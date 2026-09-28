@@ -1,0 +1,330 @@
+import AppKit
+import Observability
+import SwiftUI
+
+// MARK: - LogConsoleView
+
+/// In-app log console window content.
+///
+/// Shows all lines logged since process launch (backfill from `LogStore`) followed
+/// by new lines tailed live. Binds toolbar controls to `LogConsoleViewModel`.
+///
+/// Add as the content of a `Window("Log Console", id: "log-console")` scene; the
+/// view calls `vm.start()` on appear and `vm.stop()` on disappear via lifecycle
+/// modifiers. Use a `.task {}` for the start call so it is cancelled automatically
+/// when the view is removed from the hierarchy.
+public struct LogConsoleView: View {
+    @Bindable var vm: LogConsoleViewModel
+
+    /// Set when Save Log could not write the file, so the failure is not
+    /// silent (#480). Cleared when the alert is dismissed.
+    @State private var exportError: String?
+
+    private static let bottomAnchor = "log-console-bottom"
+
+    public init(vm: LogConsoleViewModel) {
+        self.vm = vm
+    }
+
+    // MARK: - Body
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            self.controlBar
+            Divider()
+            if self.vm.isAtCapacity {
+                self.capacityBanner
+            }
+            self.contentArea
+        }
+        .task { self.vm.start() }
+        .onDisappear { self.vm.stop() }
+        .alert(L10n.string("Couldn’t save the log"), isPresented: Binding(
+            get: { self.exportError != nil },
+            set: {
+                if !$0 {
+                    self.exportError = nil
+                }
+            }
+        )) {
+            Button(L10n.string("OK")) { self.exportError = nil }
+        } message: {
+            Text(self.exportError ?? "")
+        }
+    }
+
+    // MARK: - Control bar
+
+    private var controlBar: some View {
+        HStack(spacing: 8) {
+            self.levelPicker
+            self.categoriesMenu
+            self.searchField
+            Spacer()
+            self.pauseButton
+            self.clearMenu
+            self.copyButton
+            self.exportButton
+            Divider().frame(height: 16)
+            self.tailToggle
+            self.lineCountLabel
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    private var levelPicker: some View {
+        HStack(spacing: 4) {
+            Text(localized: "Level:")
+                .foregroundStyle(.secondary)
+            Picker(L10n.string("Level"), selection: self.$vm.minimumLevel) {
+                ForEach(LogLevel.allCases, id: \.self) { level in
+                    Text(verbatim: level.label.localizedCapitalized).tag(level)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .accessibilityIdentifier(A11y.LogConsole.levelPicker)
+            .help(L10n.string("Hides entries below this level. Everything is still recorded."))
+        }
+    }
+
+    private var categoriesMenu: some View {
+        Menu {
+            Button {
+                self.vm.selectedCategories = []
+            } label: {
+                Label {
+                    Text(localized: "All Categories")
+                } icon: {
+                    Image(systemName: "checkmark")
+                        .opacity(self.vm.selectedCategories.isEmpty ? 1 : 0)
+                }
+            }
+            Divider()
+            ForEach(LogCategory.allCases, id: \.self) { category in
+                Button {
+                    if self.vm.selectedCategories.contains(category) {
+                        self.vm.selectedCategories.remove(category)
+                    } else {
+                        self.vm.selectedCategories.insert(category)
+                    }
+                } label: {
+                    Label {
+                        Text(verbatim: category.rawValue)
+                    } icon: {
+                        Image(systemName: "checkmark")
+                            .opacity(self.vm.selectedCategories.contains(category) ? 1 : 0)
+                    }
+                }
+            }
+        } label: {
+            Label(self.categoriesMenuTitle, systemImage: "line.3.horizontal.decrease")
+        }
+        .help(L10n.string("Filter by log category"))
+        .accessibilityIdentifier(A11y.LogConsole.categoriesMenu)
+    }
+
+    private var searchField: some View {
+        TextField("", text: self.$vm.searchText, prompt: Text(localized: "Search\u{2026}"))
+            .textFieldStyle(.roundedBorder)
+            .frame(minWidth: 120, maxWidth: 200)
+            .help(L10n.string("Filter entries by message text"))
+            .accessibilityLabel(L10n.string("Search log entries"))
+            .accessibilityIdentifier(A11y.LogConsole.searchField)
+    }
+
+    private var pauseButton: some View {
+        Button {
+            self.vm.isPaused.toggle()
+        } label: {
+            Label {
+                Text(localized: self.vm.isPaused ? "Resume" : "Pause")
+            } icon: {
+                Image(systemName: self.vm.isPaused ? "play.fill" : "pause.fill")
+            }
+        }
+        .help(
+            self.vm.isPaused
+                ? L10n.string("Resume ingesting new log entries")
+                : L10n.string("Pause new entries from flowing in")
+        )
+        .accessibilityIdentifier(A11y.LogConsole.pauseButton)
+    }
+
+    private var clearMenu: some View {
+        Menu {
+            Button {
+                self.vm.clearView()
+            } label: {
+                Label(L10n.string("Clear View"), systemImage: "xmark")
+            }
+            .help(L10n.string("Remove all entries from the visible list without emptying the ring buffer"))
+
+            Divider()
+
+            Button(role: .destructive) {
+                self.vm.clearBuffer()
+            } label: {
+                Label(L10n.string("Clear Buffer"), systemImage: "trash.fill")
+            }
+            .help(L10n.string("Empty both the visible list and the underlying ring buffer"))
+        } label: {
+            Label(L10n.string("Clear"), systemImage: "trash")
+        }
+        .help(L10n.string("Clear the log view; expand for option to also clear the ring buffer"))
+        .accessibilityIdentifier(A11y.LogConsole.clearMenu)
+    }
+
+    private var copyButton: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(self.vm.copyText(), forType: .string)
+        } label: {
+            Label(L10n.string("Copy"), systemImage: "doc.on.doc")
+        }
+        .help(L10n.string("Copy visible log lines to the clipboard"))
+        .accessibilityIdentifier(A11y.LogConsole.copyButton)
+    }
+
+    private var exportButton: some View {
+        Button {
+            Task { await self.exportLog() }
+        } label: {
+            Label(L10n.string("Export\u{2026}"), systemImage: "square.and.arrow.up")
+        }
+        .help(L10n.string("Save visible log lines to a .log file"))
+        .accessibilityIdentifier(A11y.LogConsole.exportButton)
+    }
+
+    private var tailToggle: some View {
+        Toggle(isOn: self.$vm.isTailing) {
+            Label(L10n.string("Tail"), systemImage: "arrow.down.to.line")
+        }
+        .toggleStyle(.button)
+        .help(L10n.string("Auto-scroll to the newest entry as lines arrive"))
+        .accessibilityIdentifier(A11y.LogConsole.tailToggle)
+    }
+
+    private var lineCountLabel: some View {
+        Text(verbatim: self.lineCountText)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .frame(minWidth: 70, alignment: .trailing)
+            .accessibilityLabel(Text(localized: "\(self.vm.visible.count) log entries visible"))
+    }
+
+    // MARK: - Content area
+
+    private var contentArea: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(self.vm.visible) { entry in
+                        LogConsoleRow(entry: entry)
+                            .padding(.horizontal, 10)
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.bottomAnchor)
+                }
+            }
+            // Keyed on the newest id, not the count: once the mirror is full
+            // the count is pinned at capacity (one in, one out) and a
+            // count-keyed onChange never fires again, so the console stopped
+            // following the tail exactly when the buffer filled.
+            .onChange(of: self.vm.visible.last?.id) { _, _ in
+                if self.vm.isTailing {
+                    proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if !self.vm.isTailing {
+                    self.jumpToLatestButton(proxy: proxy)
+                }
+            }
+        }
+    }
+
+    private func jumpToLatestButton(proxy: ScrollViewProxy) -> some View {
+        Button {
+            self.vm.isTailing = true
+            proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+        } label: {
+            Label(L10n.string("Jump to Latest"), systemImage: "arrow.down.circle.fill")
+        }
+        .buttonStyle(.borderedProminent)
+        .padding(12)
+        .help(L10n.string("Scroll to the most recent entry and resume tailing"))
+    }
+
+    // MARK: - Capacity banner
+
+    private var capacityBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle")
+                .accessibilityHidden(true)
+            Text(localized: "Buffer full - oldest entries are being dropped")
+                .font(.caption)
+        }
+        .foregroundStyle(Color.warningTint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.warningTint.opacity(0.08))
+    }
+
+    // MARK: - Export
+
+    private func exportLog() async {
+        let text = self.vm.exportText()
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "wmusic-\(Self.exportFilename()).log"
+        panel.allowedContentTypes = [.plainText]
+        let outcome = await withCheckedContinuation { cont in
+            panel.begin { cont.resume(returning: $0) }
+        }
+        guard outcome == .OK, let url = panel.url else { return }
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            // The user picked a destination and pressed Save; a silent failure
+            // leaves them with no file and no reason (#480).
+            AppLogger.make(.ui).error("log.export.failed", [
+                "file": url.lastPathComponent,
+                "error": String(reflecting: error),
+            ])
+            self.exportError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Helpers
+
+    private var lineCountText: String {
+        L10n.string("\(self.vm.visible.count) lines")
+    }
+
+    private var categoriesMenuTitle: String {
+        if self.vm.selectedCategories.isEmpty {
+            return L10n.string("Categories: All")
+        }
+        if self.vm.selectedCategories.count == 1,
+           let single = self.vm.selectedCategories.first {
+            return L10n.string("Categories: \(single.rawValue)")
+        }
+        return L10n.string("Categories: \(self.vm.selectedCategories.count)")
+    }
+
+    private static let exportDateFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        return fmt
+    }()
+
+    private static func exportFilename() -> String {
+        self.exportDateFormatter.string(from: Date())
+    }
+}

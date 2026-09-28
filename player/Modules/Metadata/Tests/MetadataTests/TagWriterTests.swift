@@ -1,0 +1,441 @@
+import Foundation
+import Testing
+@testable import Metadata
+
+@Suite("TagWriter")
+struct TagWriterTests {
+    // MARK: - Helpers
+
+    private func fixtureURL(named name: String) throws -> URL {
+        guard let url = Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: nil) else {
+            Issue.record("Fixture not found: \(name)")
+            throw FixtureError.notFound(name)
+        }
+        return url
+    }
+
+    /// Copies a fixture to a temp file and returns the temp URL (caller is responsible for cleanup).
+    private func tempCopy(of fixture: String) throws -> URL {
+        let src = try fixtureURL(named: fixture)
+        let ext = src.pathExtension
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(ext)
+        try FileManager.default.copyItem(at: src, to: tmp)
+        return tmp
+    }
+
+    // MARK: - Round-trip tests
+
+    @Test func writeAndReadBackTitle_mp3() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.title = "New Title Round-Trip"
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.title == "New Title Round-Trip")
+    }
+
+    @Test func writeAndReadBackArtist_mp3() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.artist = "Test Artist ADR-010"
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.artist == "Test Artist ADR-010")
+    }
+
+    @Test func writeAndReadBackGenre_mp3() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.genre = "Jazz"
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.genre == "Jazz")
+    }
+
+    @Test func writeAndReadBackYear_mp3() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.year = 1999
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.year == 1999)
+    }
+
+    @Test func writeAndReadBackTrackNumber_mp3() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.trackNumber = 7
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.trackNumber == 7)
+    }
+
+    @Test("track and disc totals survive the n/N round trip (#404)", arguments: ["sample.mp3", "sample-aac.m4a"])
+    func writeAndReadBackTotals(fixture: String) throws {
+        let tmp = try tempCopy(of: fixture)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.trackNumber = 5
+        tags.trackTotal = 12
+        tags.discNumber = 1
+        tags.discTotal = 2
+        try TagWriter().write(tags, to: tmp)
+
+        // ID3v2 stores these as TRCK "5/12" / TPOS "1/2" and MP4 as trkn / disk
+        // pairs; TagLib surfaces both as a combined TRACKNUMBER / DISCNUMBER.
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.trackNumber == 5)
+        #expect(reread.trackTotal == 12)
+        #expect(reread.discNumber == 1)
+        #expect(reread.discTotal == 2)
+    }
+
+    @Test("MUSICBRAINZ_ARTISTID round-trips (#399)", arguments: ["sample.mp3", "sine-1s-44100-24-stereo.flac"])
+    func writeAndReadBackArtistMBID(fixture: String) throws {
+        let tmp = try tempCopy(of: fixture)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        var tags = try TagReader().read(from: tmp)
+        tags.musicbrainzArtistID = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+        tags.musicbrainzAlbumArtistID = "89ad4ac3-39f7-470e-963a-56509c546377"
+        try TagWriter().write(tags, to: tmp)
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.musicbrainzArtistID == "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d")
+        #expect(reread.musicbrainzAlbumArtistID == "89ad4ac3-39f7-470e-963a-56509c546377")
+    }
+
+    @Test("RELEASETYPE primary round-trips and is lowercased (#403)", arguments: ["sample.mp3", "sine-1s-44100-24-stereo.flac"])
+    func writeAndReadBackReleaseType(fixture: String) throws {
+        let tmp = try tempCopy(of: fixture)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        var tags = try TagReader().read(from: tmp)
+        tags.releaseType = "EP"
+        try TagWriter().write(tags, to: tmp)
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.releaseType == "ep")
+        #expect(reread.extendedTags["RELEASETYPE"]?.first == "EP")
+    }
+
+    @Test("the key is written back under the file's existing name, KEY or INITIALKEY (#407)")
+    func keyWrittenUnderExistingName() throws {
+        let bare = try tempCopy(of: "sine-1s-key-am.flac")
+        defer { try? FileManager.default.removeItem(at: bare) }
+        var tags = try TagReader().read(from: bare)
+        tags.key = "Bm"
+        try TagWriter().write(tags, to: bare)
+        let reread = try TagReader().read(from: bare)
+        #expect(reread.key == "Bm")
+        #expect(reread.extendedTags["KEY"] == ["Bm"])
+        #expect(reread.extendedTags["INITIALKEY"] == nil)
+
+        let plain = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: plain) }
+        var mp3 = try TagReader().read(from: plain)
+        mp3.key = "F#m"
+        try TagWriter().write(mp3, to: plain)
+        #expect(try TagReader().read(from: plain).key == "F#m")
+    }
+
+    @Test func writeAndReadBackComposer_mp3() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.composer = "J.S. Bach"
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.composer == "J.S. Bach")
+    }
+
+    @Test func writeAndReadBackBPM_mp3() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.bpm = 128
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.bpm == 128)
+    }
+
+    // MARK: - MusicBrainz IDs + ISRC round-trip (ADR-012)
+
+    private func assertMusicBrainzRoundTrip(fixture: String) throws {
+        let tmp = try tempCopy(of: fixture)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.isrc = "GBAYE0601696"
+        tags.musicbrainzTrackID = "7fe8e13a-7ae0-3ff6-8429-52ddf31e6e1b"
+        tags.musicbrainzRecordingID = "485bbe7f-d0f7-4ffe-8adb-0f1093dd2dbf"
+        tags.musicbrainzReleaseID = "9e53c190-5621-3848-8ae4-39ad9f7d9ace"
+        tags.musicbrainzReleaseGroupID = "9162580e-5df4-32de-80cc-f45a8d8a9b1d"
+        tags.musicbrainzAlbumArtistID = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.isrc == "GBAYE0601696")
+        #expect(reread.musicbrainzTrackID == "7fe8e13a-7ae0-3ff6-8429-52ddf31e6e1b")
+        #expect(reread.musicbrainzRecordingID == "485bbe7f-d0f7-4ffe-8adb-0f1093dd2dbf")
+        #expect(reread.musicbrainzReleaseID == "9e53c190-5621-3848-8ae4-39ad9f7d9ace")
+        #expect(reread.musicbrainzReleaseGroupID == "9162580e-5df4-32de-80cc-f45a8d8a9b1d")
+        #expect(reread.musicbrainzAlbumArtistID == "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d")
+    }
+
+    @Test func writeAndReadBackMusicBrainzIDs_mp3() throws {
+        try self.assertMusicBrainzRoundTrip(fixture: "sample.mp3")
+    }
+
+    @Test func writeAndReadBackMusicBrainzIDs_flac() throws {
+        try self.assertMusicBrainzRoundTrip(fixture: "sine-1s-44100-24-stereo.flac")
+    }
+
+    @Test func writeAndReadBackMusicBrainzIDs_m4a() throws {
+        try self.assertMusicBrainzRoundTrip(fixture: "sample-aac.m4a")
+    }
+
+    @Test func writeAndReadBackMusicBrainzIDs_ogg() throws {
+        try self.assertMusicBrainzRoundTrip(fixture: "sine-1s-48000-stereo.ogg")
+    }
+
+    /// A symmetric read/write swap would still round-trip, so the Picard key
+    /// convention is pinned against a fixture tagged by an external tool
+    /// (ffmpeg): the historical MUSICBRAINZ_TRACKID key carries the *recording*
+    /// MBID, MUSICBRAINZ_RELEASETRACKID the track MBID.
+    @Test func readsPicardConventionKeys() throws {
+        let url = try fixtureURL(named: "picard-mbids.flac")
+        let tags = try TagReader().read(from: url)
+        #expect(tags.musicbrainzRecordingID == "external-recording-mbid")
+        #expect(tags.musicbrainzTrackID == "external-track-mbid")
+    }
+
+    @Test func clearingFieldRemovesItFromFile() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.musicbrainzRecordingID = "485bbe7f-d0f7-4ffe-8adb-0f1093dd2dbf"
+        tags.isrc = "GBAYE0601696"
+        try TagWriter().write(tags, to: tmp)
+
+        var cleared = try TagReader().read(from: tmp)
+        cleared.musicbrainzRecordingID = nil
+        cleared.isrc = nil
+        try TagWriter().write(cleared, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.musicbrainzRecordingID == nil)
+        #expect(reread.isrc == nil)
+    }
+
+    @Test func writePreservesAudioDuration() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let originalTags = try TagReader().read(from: tmp)
+        var tags = originalTags
+        tags.title = "Duration Test"
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        // Duration should be within 1 second of original
+        #expect(abs(reread.duration - originalTags.duration) < 1.0)
+    }
+
+    // MARK: - Atomic write safety
+
+    @Test func originalUntouchedOnBadPath() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // Read original content for size comparison
+        let originalData = try Data(contentsOf: tmp)
+
+        // Non-existent file should throw, not corrupt the original
+        let badURL = URL(fileURLWithPath: "/tmp/does_not_exist_\(UUID().uuidString).mp3")
+        let tags = TrackTags()
+        #expect(throws: MetadataError.self) {
+            try TagWriter().write(tags, to: badURL)
+        }
+
+        // Original file must be intact
+        let afterData = try Data(contentsOf: tmp)
+        #expect(afterData.count == originalData.count)
+    }
+
+    // MARK: - Read-only file
+
+    @Test func readOnlyFileThrowsReadOnlyError() throws {
+        let tmp = try tempCopy(of: "sample.mp3")
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: tmp.path
+            )
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        // Make the file read-only
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o444],
+            ofItemAtPath: tmp.path
+        )
+
+        var tags = try TagReader().read(from: tmp)
+        tags.title = "Should Fail"
+
+        #expect(throws: MetadataError.self) {
+            try TagWriter().write(tags, to: tmp)
+        }
+
+        // #469: the reason must survive `localizedDescription`, which is what
+        // callers store and show; Foundation's fallback is an opaque code.
+        do {
+            try TagWriter().write(tags, to: tmp)
+        } catch {
+            #expect(error.localizedDescription.contains("read-only"))
+            #expect(error.localizedDescription.contains(tmp.lastPathComponent))
+            #expect(!error.localizedDescription.contains("MetadataError error"))
+        }
+    }
+
+    // MARK: - FLAC
+
+    @Test func writeAndReadBackTitle_flac() throws {
+        let tmp = try tempCopy(of: "sine-1s-44100-24-stereo.flac")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.title = "FLAC Round-Trip"
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.title == "FLAC Round-Trip")
+    }
+
+    // MARK: - Cover art clearing (#289)
+
+    @Test("writing empty coverArt clears existing embedded art")
+    func writingEmptyCoverArtClearsExistingArt() throws {
+        let tmp = try tempCopy(of: "sample-with-art.mp3")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // Verify the fixture actually has art before we try to clear it.
+        let before = try TagReader().read(from: tmp)
+        guard !before.coverArt.isEmpty else {
+            // Fixture has no art; the test has nothing meaningful to assert.
+            return
+        }
+
+        // Write tags back with an empty coverArt array.
+        var tags = before
+        tags.coverArt = []
+        try TagWriter().write(tags, to: tmp)
+
+        let after = try TagReader().read(from: tmp)
+        #expect(after.coverArt.isEmpty, "Expected embedded art to be cleared; got \(after.coverArt.count) image(s)")
+    }
+
+    // MARK: - Staging the temp file (#511)
+
+    /// Copies a fixture into a folder of its own and returns both, so a test
+    /// can say something about where the temp file lands.
+    private func tempCopyInOwnFolder(of fixture: String) throws -> (file: URL, folder: URL) {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TagWriterStaging-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let src = try fixtureURL(named: fixture)
+        let file = folder.appendingPathComponent("track.\(src.pathExtension)")
+        try FileManager.default.copyItem(at: src, to: file)
+        return (file, folder)
+    }
+
+    /// #511: the temp file belongs beside the original. From the system
+    /// temporary directory the replacement is cross-volume for any library
+    /// that is not on the boot volume, and macOS refuses it at folder level.
+    @Test func stagedCopyLandsBesideTheOriginal() throws {
+        let (file, folder) = try tempCopyInOwnFolder(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let staged = try TagWriter().stageCopy(of: file)
+        defer { try? FileManager.default.removeItem(at: staged) }
+
+        #expect(staged.deletingLastPathComponent().path == folder.path, "same folder, so the same volume")
+        #expect(staged.lastPathComponent.hasPrefix("."), "hidden, so a scan walks past it")
+        #expect(FileManager.default.contentsEqual(atPath: file.path, andPath: staged.path))
+    }
+
+    /// #511: a file added through "Add Files…" is writable inside a folder the
+    /// process cannot write, so the system temporary directory stays as the
+    /// fallback rather than the first choice.
+    @Test func stagedCopyFallsBackToTheTemporaryDirectoryWhenNoSiblingFits() throws {
+        let (file, folder) = try tempCopyInOwnFolder(of: "sample.mp3")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+            try? FileManager.default.removeItem(at: folder)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
+
+        let staged = try TagWriter().stageCopy(of: file)
+        defer { try? FileManager.default.removeItem(at: staged) }
+
+        #expect(staged.deletingLastPathComponent().path != folder.path, "no sibling could be created")
+        #expect(staged.path.hasPrefix(FileManager.default.temporaryDirectory.path))
+        #expect(FileManager.default.contentsEqual(atPath: file.path, andPath: staged.path))
+    }
+
+    /// The whole write still works for a file in a folder of its own, which is
+    /// the shape every library folder has.
+    @Test func writeRoundTripsForAFileInItsOwnFolder() throws {
+        let (file, folder) = try tempCopyInOwnFolder(of: "sample.mp3")
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        var tags = try TagReader().read(from: file)
+        tags.title = "Staged Beside The Original"
+        try TagWriter().write(tags, to: file)
+
+        let reread = try TagReader().read(from: file)
+        #expect(reread.title == "Staged Beside The Original")
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        #expect(leftovers == [file.lastPathComponent], "no temp file left behind: \(leftovers)")
+    }
+
+    // MARK: - OGG
+
+    @Test func writeAndReadBackTitle_ogg() throws {
+        let tmp = try tempCopy(of: "sine-1s-48000-stereo.ogg")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var tags = try TagReader().read(from: tmp)
+        tags.title = "OGG Round-Trip"
+        try TagWriter().write(tags, to: tmp)
+
+        let reread = try TagReader().read(from: tmp)
+        #expect(reread.title == "OGG Round-Trip")
+    }
+}
+
+// MARK: - FixtureError
+
+private enum FixtureError: Error {
+    case notFound(String)
+}

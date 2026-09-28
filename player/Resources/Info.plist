@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>WMusic</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>WMusic</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.music</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>WMusic is based on Bòcan by Chris Funderburg / Cloud Cauldron. See Apache 2.0 licence and notices.</string>
+    <key>NSMusicFolderUsageDescription</key>
+    <string>WMusic needs access to your Music folder to scan and play your library.</string>
+    <key>AcoustIDAPIKey</key>
+    <string>$(ACOUSTID_API_KEY)</string>
+    <key>BocanLastFmApiKey</key>
+    <string>$(BOCAN_LASTFM_API_KEY)</string>
+    <key>BocanLastFmSharedSecret</key>
+    <string>$(BOCAN_LASTFM_SHARED_SECRET)</string>
+    <key>BocanPodcastIndexApiKey</key>
+    <string>$(PODCAST_INDEX_API_KEY)</string>
+    <key>BocanPodcastIndexApiSecret</key>
+    <string>$(PODCAST_INDEX_API_SECRET)</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>WMusic needs Local Network access to discover and pair with AirPlay speakers and Apple TVs on your Wi-Fi.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_bocansync._tcp</string>
+        <string>_airplay._tcp</string>
+        <string>_raop._tcp</string>
+        <string>_companion-link._tcp</string>
+    </array>
+    <key>NSHelpBook</key>
+    <string>WMusic Help</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.willhsu.wmusic.local.playlist-drag</string>
+            <key>UTTypeDescription</key>
+            <string>WMusic Playlist Drag Item</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

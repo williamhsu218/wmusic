@@ -1,0 +1,119 @@
+import Foundation
+import Observability
+
+/// Creates the appropriate `Decoder` implementation for a given URL.
+///
+/// Selection is based solely on magic-byte detection via `FormatSniffer` —
+/// file extensions are never used for routing.
+public struct DecoderFactory: Sendable {
+    /// AVFoundation-native codecs — no FFmpeg required.
+    static let avFoundationCodecs: Set<Codec> = [.wav, .flac, .mp3, .m4a, .aiff]
+
+    private static let log = AppLogger.make(.audio)
+
+    public init() {}
+
+    /// Instantiate the correct decoder for `url`.
+    ///
+    /// - Throws: `AudioEngineError.fileNotFound` if the file doesn't exist,
+    ///   `AudioEngineError.unsupportedFormat` if no decoder handles the format.
+    public static func make(for url: URL) throws -> any Decoder {
+        let decoder: any Decoder
+        let sniffed: String
+        // HTTP / HTTPS streams (e.g. Subsonic internet radio) go straight to
+        // FFmpeg. The format sniffer reads bytes off a local file handle and
+        // can't probe a network stream — FFmpeg's own probing inside
+        // `avformat_open_input` handles ICY, Shoutcast, HLS, and the usual
+        // container formats served over HTTP. URLs with no scheme (bare paths
+        // like "/tmp/foo.flac") still go down the local-file branch so the
+        // sniffer raises a proper "file not found" if the path is missing.
+        if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            decoder = try FFmpegDecoder(url: url)
+            sniffed = "stream"
+        } else {
+            let codec = try FormatSniffer().sniff(url: url)
+            decoder = try self.make(codec: codec, url: url)
+            sniffed = String(describing: codec)
+        }
+        self.logSelected(decoder, sniffed: sniffed, url: url)
+        return decoder
+    }
+
+    /// One `decoder.selected` line per load, naming the route a file took and
+    /// what the decoder saw, so a report can tell an AVFoundation failure from
+    /// an FFmpeg one (ADR-091). Channels are the source's own from the stream
+    /// details, since the FFmpeg route still folds a layout it cannot name
+    /// to stereo before `sourceFormat` sees it (#522).
+    private static func logSelected(_ decoder: any Decoder, sniffed: String, url: URL) {
+        let format = decoder.sourceFormat
+        let details = (decoder as? FFmpegDecoder)?.streamDetails
+        let layout = format.channelLayout.map { String(format: "0x%X", $0.layoutTag) } ?? "none"
+        self.log.debug("decoder.selected", [
+            "decoder": String(describing: type(of: decoder)),
+            "codec": details?.codec ?? sniffed,
+            "channels": details?.channelCount ?? Int(format.channelCount),
+            "sampleRate": format.sampleRate,
+            "layout": layout,
+            "url": url.lastPathComponent,
+        ])
+    }
+
+    static func make(codec: Codec, url: URL) throws -> any Decoder {
+        switch codec {
+        case .wav, .mp3:
+            return try AVFoundationDecoder(url: url)
+
+        case .flac, .aiff, .m4a:
+            // AVFoundation's FLAC decoder supports up to 24-bit / 384 kHz but
+            // refuses unusual high-resolution streams (e.g. 32-bit float, very
+            // large block sizes), and its AIFF-C support stops at the common
+            // compression types. Fall back to FFmpeg in those cases so the
+            // file plays instead of throwing `decoderFailure` (#387). An MP4
+            // container can carry a payload AudioToolbox has no decoder for
+            // (Vorbis, DTS), so `.m4a` gets the same fallback (ADR-091).
+            do {
+                return try AVFoundationDecoder(url: url)
+            } catch let avError as AudioEngineError {
+                if case .accessDenied = avError {
+                    throw avError
+                }
+                if case .fileNotFound = avError {
+                    throw avError
+                }
+                do {
+                    return try FFmpegDecoder(url: url)
+                } catch {
+                    // The caller is told why AVFoundation refused the file,
+                    // which is the more useful of the two, but FFmpeg's reason
+                    // is what says whether the fallback could ever work (#497).
+                    self.log.warning("decoder.ffmpegFallback.failed", [
+                        "url": url.lastPathComponent,
+                        "error": String(reflecting: error),
+                    ])
+                }
+                throw avError
+            }
+
+        case .ogg, .opus, .dsf, .dff, .ape, .wavpack,
+             .mp2, .au, .wave64, .rf64, .matroska, .ac3, .dts, .wma,
+             .musepack, .tta:
+            return try FFmpegDecoder(url: url)
+
+        case let .unknown(magic):
+            // Last resort: try FFmpeg — it may recognise formats we don't.
+            do {
+                return try FFmpegDecoder(url: url)
+            } catch {
+                // `unsupportedFormat` names the magic bytes, which is what the
+                // user needs; FFmpeg's reason says whether the file is damaged
+                // rather than merely unknown, so it goes to the log (#497).
+                self.log.warning("decoder.unknownFormat.ffmpegFailed", [
+                    "url": url.lastPathComponent,
+                    "magic": magic,
+                    "error": String(reflecting: error),
+                ])
+            }
+            throw AudioEngineError.unsupportedFormat(magic: magic, url: url)
+        }
+    }
+}

@@ -1,0 +1,499 @@
+import AppKit
+import Library
+import Observability
+import Persistence
+import UniformTypeIdentifiers
+
+// MARK: - LibraryViewModel + Scanning
+
+/// Scanning-related actions for ``LibraryViewModel``.
+public extension LibraryViewModel {
+    // MARK: - Library roots
+
+    /// Loads the list of library root folders from the scanner.
+    func refreshRoots() async {
+        let end = Telemetry.timer("ui.refreshRoots")
+        defer { end() }
+        guard let scanner else { return }
+        do {
+            self.libraryRoots = try await scanner.roots()
+        } catch {
+            // An empty sidebar and a library with no folders look identical, so
+            // the failure has to say so somewhere (#491).
+            self.log.warning("library.roots.failed", ["error": String(reflecting: error)])
+            self.libraryRoots = []
+        }
+    }
+
+    /// Opens an NSOpenPanel for the user to pick one or more folders.
+    ///
+    /// After the user confirms, each chosen folder is added as a library root
+    /// and a scan is triggered.
+    func addFolderByPicker() async {
+        guard scanner != nil else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        // ADR-007 audit L1: spell out exactly what the panel accepts so users
+        // aren't left wondering why "Open" became "Add" or what the file
+        // filter does on the sibling files panel.
+        panel.message = L10n.string("Choose one or more folders containing music to add to your library.")
+        panel.prompt = L10n.string("Add")
+        // ADR-007 audit L2: use non-blocking `begin(completionHandler:)`
+        // instead of `runModal()` so the modal run loop doesn't starve the
+        // audio render callback on slower machines.
+        let response = await Self.runOpenPanelAsync(panel)
+        guard response == .OK else { return }
+        await self.addURLs(panel.urls)
+    }
+
+    /// Opens an NSOpenPanel for the user to pick individual audio files.
+    ///
+    /// Each chosen file is added as its own library root so that only the
+    /// selected file is indexed (not the whole folder).
+    func addFilesByPicker() async {
+        guard scanner != nil else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = Self.supportedAudioTypes
+        // ADR-007 audit L1: explicitly list the accepted formats so the
+        // greyed-out non-audio files in the panel don't look like a bug.
+        panel.message =
+            L10n.string("Choose audio files (FLAC, MP3, ALAC, AAC, OGG, Opus, APE, DSD, WAV, AIFF) to add to your library.")
+        panel.prompt = L10n.string("Add")
+        // ADR-007 audit L2: non-blocking begin() — see `addFolderByPicker`.
+        let response = await Self.runOpenPanelAsync(panel)
+        guard response == .OK else { return }
+        // Add each file directly — the sandbox grants access to the selected URLs,
+        // not their parent directories.
+        await self.addURLs(panel.urls)
+    }
+
+    /// Async wrapper around `NSOpenPanel.begin(completionHandler:)`. Unlike
+    /// `runModal()` this does **not** spin a nested modal run loop, so the
+    /// audio engine's render callback keeps its scheduling priority while the
+    /// panel is on screen.
+    /// Internal (not private): the listening-history import picker in
+    /// `LibraryViewModel+ListenImport.swift` shares this helper.
+    static func runOpenPanelAsync(_ panel: NSOpenPanel) async -> NSApplication.ModalResponse {
+        await withCheckedContinuation { (continuation: CheckedContinuation<NSApplication.ModalResponse, Never>) in
+            panel.begin { response in
+                continuation.resume(returning: response)
+            }
+        }
+    }
+
+    /// Handles a drag-and-drop of URLs onto the main window.
+    ///
+    /// Playlist files (`.m3u`, `.m3u8`, `.pls`, `.xspf`, `.cue`) are routed to
+    /// ``PlaylistImportService``; audio files/directories go to the scanner.
+    func addDroppedURLs(_ urls: [URL]) async {
+        guard scanner != nil else { return }
+        let playlistExts: Set = ["m3u", "m3u8", "pls", "xspf", "cue"]
+        let playlists = urls.filter { playlistExts.contains($0.pathExtension.lowercased()) }
+        let audio = urls.filter { !playlistExts.contains($0.pathExtension.lowercased()) }
+        if !audio.isEmpty {
+            await self.addURLs(audio)
+        }
+        if !playlists.isEmpty {
+            await self.importDroppedPlaylists(playlists)
+        }
+    }
+
+    /// Removes a library root by its database ID.
+    ///
+    /// Does not delete files from disk.
+    func removeRoot(id: Int64) async {
+        guard let scanner else { return }
+        do {
+            try await scanner.removeRoot(id: id)
+            await self.refreshRoots()
+            // Albums/Artists are separate models; tracks are reloaded for the
+            // active destination via loadCurrentDestination() so a scoped
+            // detail view isn't clobbered with the full library.
+            await self.albums.load()
+            await self.artists.load()
+            await self.loadCurrentDestination()
+        } catch {
+            self.log.error("library.removeRoot.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Dismisses the finished scan summary banner.
+    func dismissScanSummary() {
+        self.scanSummary = nil
+    }
+
+    /// Starts or stops the FSEvents watcher based on the `library.watchForChanges` preference.
+    func startOrStopWatcher() async {
+        guard let scanner else { return }
+        if UserDefaults.standard.bool(forKey: "library.watchForChanges") {
+            // Debounce FSEvents bursts: rapid back-to-back file changes (e.g.
+            // a bulk tag-edit session touching 30+ files) each fire onFileImported
+            // once per batch.  Without coalescing, every batch queues an independent
+            // full-library reload (~360 ms each), creating a cascade of 60+ concurrent
+            // load tasks.  scheduleWatcherReload() cancels any pending reload and
+            // reschedules it 500 ms into the future so only one reload fires after the
+            // burst settles.
+            await scanner.setOnFileImported { [weak self] in
+                guard let self else { return }
+                await self.scheduleWatcherReload()
+            }
+            await scanner.startWatching()
+        } else {
+            await scanner.setOnFileImported(nil)
+            await scanner.stopWatching()
+        }
+    }
+
+    /// Debounces FSEvents-triggered library reloads.
+    ///
+    /// Cancels any previously scheduled reload and starts a new one after a
+    /// 500 ms quiet period.  If more FSEvents arrive within that window the
+    /// timer resets, ensuring only one full reload runs per burst.
+    func scheduleWatcherReload() {
+        watcherReloadTask?.cancel()
+        watcherReloadTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard let self, !Task.isCancelled else { return }
+            // Refresh Albums/Artists (separate models), then reload tracks for
+            // the active destination only. A bare tracks.load() here would dump
+            // the full library into the shared tracks model and clobber a
+            // playlist/album/folder detail view that owns its own content.
+            await self.albums.load()
+            await self.artists.load()
+            await self.loadCurrentDestination()
+        }
+    }
+
+    /// Cancels any in-progress scan.
+    func cancelScan() {
+        self.scanTask?.cancel()
+        self.scanTask = nil
+        self.stopScanFlush()
+        self.isScanning = false
+        self.isInitialScan = false
+        self.scanCurrentPath = ""
+    }
+
+    // MARK: - Scan progress coalescing (ADR-007 audit L2)
+
+    /// Starts the 4 Hz flush loop that copies `pendingScan*` mirror state into
+    /// the `@Published` scan counters. Called from `triggerScan(mode:)` at
+    /// the start of every scan; cancelled on `.finished` and `cancelScan()`.
+    internal func startScanFlush() {
+        self.scanFlushTask?.cancel()
+        self.scanFlushTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, !Task.isCancelled else { return }
+                self.flushScanPending()
+            }
+        }
+    }
+
+    /// Cancels the flush loop and writes any remaining pending counters one
+    /// last time so the final values land in the UI.
+    internal func stopScanFlush() {
+        self.scanFlushTask?.cancel()
+        self.scanFlushTask = nil
+        self.flushScanPending()
+    }
+
+    /// Copies pending mirror state into the `@Published` scan properties,
+    /// skipping properties whose value hasn't changed to avoid pointless
+    /// `objectWillChange` ticks.
+    private func flushScanPending() {
+        if self.scanWalked != self.pendingScanWalked {
+            self.scanWalked = self.pendingScanWalked
+        }
+        if self.scanInserted != self.pendingScanInserted {
+            self.scanInserted = self.pendingScanInserted
+        }
+        if self.scanUpdated != self.pendingScanUpdated {
+            self.scanUpdated = self.pendingScanUpdated
+        }
+        if self.scanCurrentPath != self.pendingScanCurrentPath {
+            self.scanCurrentPath = self.pendingScanCurrentPath
+        }
+    }
+
+    // MARK: - Internal
+
+    internal static let supportedAudioTypes: [UTType] = [
+        .audio,
+        UTType("public.mp3") ?? .audio,
+        UTType("public.aac-audio") ?? .audio,
+        UTType("org.xiph.flac") ?? .audio,
+        UTType("public.aifc-audio") ?? .audio,
+        UTType("public.aiff-audio") ?? .audio,
+    ]
+
+    /// Public so the App layer's E2E fixture seeding (ADR-079) can add a
+    /// library root without driving `NSOpenPanel`; the pickers above route
+    /// through here too.
+    func addURLs(_ urls: [URL]) async {
+        guard let scanner else { return }
+        for url in urls {
+            do {
+                try await scanner.addRoot(url)
+            } catch {
+                self.log.error("library.addRoot.failed", ["url": url.path, "error": String(reflecting: error)])
+            }
+        }
+        await self.refreshRoots()
+        self.triggerScan()
+    }
+
+    internal func triggerScan() {
+        self.triggerScan(mode: .quick)
+    }
+
+    /// ADR-004 audit M2: re-scan all library roots in either Quick or Full mode.
+    /// Exposed for the File-menu "Quick Rescan" / "Full Rescan" commands.
+    func rescanLibrary(mode: ScanMode) {
+        self.triggerScan(mode: mode)
+    }
+
+    internal func triggerScan(mode: ScanMode) {
+        guard let scanner else { return }
+        guard !self.isScanning else {
+            self.log.debug("scan.trigger.skipped", ["mode": "\(mode)", "reason": "in-flight"])
+            return
+        }
+        self.log.debug("scan.trigger", ["mode": "\(mode)"])
+        self.isScanning = true
+        self.scanWalked = 0
+        self.scanInserted = 0
+        self.scanUpdated = 0
+        self.scanCurrentPath = ""
+        self.scanSummary = nil
+        // ADR-007 audit L2: reset the coalesced mirror state and start the
+        // 4 Hz flush loop before kicking off the scan stream.
+        self.pendingScanWalked = 0
+        self.pendingScanInserted = 0
+        self.pendingScanUpdated = 0
+        self.pendingScanCurrentPath = ""
+        self.startScanFlush()
+        self.scanTask = Task { [weak self] in
+            guard let self else { return }
+            let endScan = Telemetry.timer("library.scan")
+            defer { endScan() }
+            // Show the full-screen progress overlay only for a genuine first-run
+            // (empty-library) scan. Keying this off the Songs view's row count
+            // wrongly fired on relaunches into a playlist/album/folder view,
+            // which never populate `tracks.rows` (those detail views self-load),
+            // so the overlay covered already-populated content during the
+            // routine startup rescan.
+            let trackCount: Int
+            do {
+                trackCount = try await TrackRepository(database: self.database).count()
+            } catch {
+                // A failed count reads as an empty library, which flips the
+                // heuristic the wrong way and covers populated content with the
+                // full-screen overlay (#491).
+                self.log.warning("scan.trackCount.failed", ["error": String(reflecting: error)])
+                trackCount = 0
+            }
+            self.isInitialScan = trackCount == 0
+            let stream = await scanner.scan(mode: mode)
+            for await event in stream {
+                self.handleScanEvent(event)
+            }
+            // Safety net: if the stream ends without a .finished event, reset state.
+            if self.isScanning {
+                self.log.warning("scan.stream.ended_without_finished")
+                self.stopScanFlush()
+                self.isScanning = false
+                self.isInitialScan = false
+                self.scanCurrentPath = ""
+            }
+        }
+    }
+
+    internal func handleScanEvent(_ event: ScanProgress) {
+        switch event {
+        case .started:
+            break
+
+        case let .walking(path, walked):
+            // ADR-007 audit L2: write to the pending mirror only; the 4 Hz
+            // flush loop publishes these to SwiftUI to avoid 100k+
+            // objectWillChange ticks during a 50k-file scan.
+            self.pendingScanCurrentPath = URL(fileURLWithPath: path).lastPathComponent
+            self.pendingScanWalked = walked
+
+        case let .processed(url, outcome):
+            self.pendingScanCurrentPath = url.lastPathComponent
+            switch outcome {
+            case .inserted:
+                self.pendingScanInserted += 1
+
+            case .updated:
+                self.pendingScanUpdated += 1
+
+            default:
+                break
+            }
+
+        case let .finished(summary):
+            // Final flush before clearing isScanning so the banner shows the
+            // true final counts even if the last tick was mid-interval.
+            self.log.debug("scan.finished.applied", ["inserted": summary.inserted])
+            self.stopScanFlush()
+            self.scanSummary = summary
+            self.isScanning = false
+            self.scanCurrentPath = ""
+            Task { [weak self] in
+                guard let self else { return }
+                let endReload = Telemetry.timer("library.postScanReload")
+                defer { endReload() }
+                // Only reload the cached data models when the scan actually
+                // changed something. The routine quick rescan fired on every
+                // launch (RootView startup task) finds nothing new on a stable
+                // library and reports an all-zero summary; reloading anyway
+                // re-fetched identical rows and, because tracks.load() flips
+                // isLoading, tore the already-populated Songs list down to a
+                // spinner and rebuilt it -- a visible "vanish then reappear"
+                // flash for no benefit.
+                let changed = summary.inserted > 0 || summary.updated > 0 || summary.removed > 0
+                if changed {
+                    // Refresh the Albums/Artists backing models so navigating to
+                    // them after a background scan shows fresh data. They are
+                    // separate from the shared `tracks` model, so reloading them
+                    // never disturbs whatever view is on screen.
+                    await self.albums.load()
+                    await self.artists.load()
+                    // A song just added may be one the Last.fm import already
+                    // knew: link its past listens now, so History shows them
+                    // without a trip to Match Again (ADR-094 slice 3).
+                    if summary.inserted > 0 {
+                        await self.rematchImportedListensAfterScan()
+                    }
+                    // Reload tracks for the ACTIVE destination only. Calling
+                    // tracks.load() unconditionally loaded the full library into
+                    // the shared tracks model even when a playlist/album/folder
+                    // detail view (which owns its own scoped content via
+                    // setTracks) was on screen, replacing the playlist's tracks
+                    // with the entire song list. loadCurrentDestination() reloads
+                    // Songs/Album/Artist/etc and leaves self-loading detail views
+                    // (playlist/smart playlist/folder) untouched.
+                    await self.loadCurrentDestination()
+                }
+                await self.refreshRoots()
+                // Clear the initial-scan overlay AFTER tracks are loaded so the
+                // transition from progress view to track list is instant rather
+                // than showing an empty list first.
+                self.isInitialScan = false
+                await self.startOrStopWatcher()
+            }
+
+        case .error, .removed:
+            break
+        }
+    }
+
+    // MARK: - Track management
+
+    /// Soft-deletes one track from the library (sets `disabled = true`).
+    func removeTrack(id: Int64) async {
+        await self.removeTracks(ids: [id])
+    }
+
+    /// Soft-deletes several tracks in one pass and takes their rows out of the
+    /// table in place. One call per selection, not one per track: each reload
+    /// refetched the library and sent the table back to the top (#543).
+    func removeTracks(ids: [Int64]) async {
+        let trackRepo = TrackRepository(database: self.database)
+        var removed: Set<Int64> = []
+        for id in ids {
+            do {
+                var track = try await trackRepo.fetch(id: id)
+                track.disabled = true
+                try await trackRepo.update(track)
+                removed.insert(id)
+                self.log.debug("library.removeTrack", ["id": id])
+            } catch {
+                self.log.error("library.removeTrack.failed", ["id": id, "error": String(reflecting: error)])
+            }
+        }
+        self.tracks.removeRows(ids: removed)
+        await self.finishTrackRemoval(failed: Set(ids).subtracting(removed).count)
+    }
+
+    /// Re-scans a single file to refresh its tags.
+    ///
+    /// ADR-007 audit M2: surfaces feedback. On success, shows an inline
+    /// toast ("Re-scanned «Title»") for 2s. On failure, populates
+    /// `rescanErrorMessage` so RootView can present a dedicated error sheet
+    /// distinct from the playback-error alert.
+    func rescanTrack(id: Int64) async {
+        guard let scanner else { return }
+        let trackRepo = TrackRepository(database: self.database)
+        do {
+            let track = try await trackRepo.fetch(id: id)
+            guard let url = URL(string: track.fileURL) else {
+                self.rescanErrorMessage = L10n.string("Could not re-scan: the file path is invalid.")
+                return
+            }
+            _ = try await scanner.scanSingleFile(url: url)
+            // Update this row in place rather than a full tracks.load(): a full
+            // reload flips isLoading (tearing the table out for a spinner and
+            // back, resetting scroll) and re-sorts, so the list jumps away from
+            // where the user was. Matches the tag-edit / rating / identify paths
+            // (issue #343).
+            await self.refreshTracks(ids: [id])
+            self.log.debug("library.rescanTrack", ["id": id])
+            let title = track.title ?? url.lastPathComponent
+            self.showToast(ToastMessage(text: L10n.string("Re-scanned “\(title)”"), kind: .success))
+        } catch {
+            self.log.error("library.rescanTrack.failed", ["id": id, "error": String(reflecting: error)])
+            self.rescanErrorMessage = L10n.string("Could not re-scan the file: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Album settings
+
+    /// Toggles the `force_gapless` flag for an album.
+    func setAlbumForceGapless(albumID: Int64, forced: Bool) async {
+        do {
+            try await self.albumRepo.setForceGapless(albumID: albumID, forced: forced)
+            // Patch the in-memory record rather than reloading the whole albums array.
+            // A full reload replaces the array reference which resets the implicit
+            // NavigationStack in the detail column and causes the view to pop back to
+            // the albums grid.
+            self.albums.patch(albumID: albumID) { $0.forceGapless = forced }
+            self.log.debug("library.setForceGapless", ["albumID": albumID, "forced": forced])
+        } catch {
+            self.log.error("library.setForceGapless.failed", ["albumID": albumID, "error": String(reflecting: error)])
+        }
+    }
+
+    /// Toggles the `excluded_from_shuffle` flag for an album and all its tracks.
+    func setAlbumExcludedFromShuffle(albumID: Int64, excluded: Bool) async {
+        do {
+            try await self.albumRepo.setExcludedFromShuffle(albumID: albumID, excluded: excluded)
+            self.albums.patch(albumID: albumID) { $0.excludedFromShuffle = excluded }
+            self.log.debug("library.setAlbumExcludedFromShuffle", ["albumID": albumID, "excluded": excluded])
+        } catch {
+            self.log.error("library.setAlbumExcludedFromShuffle.failed", ["albumID": albumID, "error": String(reflecting: error)])
+        }
+    }
+
+    /// Toggles the `excluded_from_shuffle` flag for a single track.
+    func setTrackExcludedFromShuffle(trackID: Int64, excluded: Bool) async {
+        let trackRepo = TrackRepository(database: self.database)
+        do {
+            try await trackRepo.setExcludedFromShuffle(trackID: trackID, excluded: excluded)
+            // Update the single row in place; a full tracks.load() would flip
+            // isLoading and bounce the list's scroll position (issue #343).
+            await self.refreshTracks(ids: [trackID])
+            self.log.debug("library.setTrackExcludedFromShuffle", ["trackID": trackID, "excluded": excluded])
+        } catch {
+            self.log.error("library.setTrackExcludedFromShuffle.failed", ["trackID": trackID, "error": String(reflecting: error)])
+        }
+    }
+}

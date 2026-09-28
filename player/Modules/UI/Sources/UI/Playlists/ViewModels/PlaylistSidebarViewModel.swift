@@ -1,0 +1,473 @@
+import AppKit
+import Foundation
+import Library
+import Observability
+import Persistence
+
+// MARK: - PlaylistSidebarViewModel
+
+/// Drives the playlist section of the sidebar. Owns a snapshot of the folder tree, publishing as mutations complete.
+@MainActor
+public final class PlaylistSidebarViewModel: ObservableObject {
+    @MainActor private weak static var activeInstance: PlaylistSidebarViewModel?
+
+    @MainActor
+    public static var activeForNewPlaylistSheet: PlaylistSidebarViewModel? {
+        activeInstance
+    }
+
+    // MARK: - Published state
+
+    @Published public private(set) var nodes: [PlaylistNode] = []
+    /// `true` after the first `reload()` completes. Use this to distinguish
+    /// "sidebar not yet loaded" from "item genuinely not found" in the UI.
+    @Published public private(set) var isLoaded = false
+    @Published public var expandedFolders: Set<Int64> = []
+    @Published public var renamingPlaylistID: Int64?
+    @Published public var renameTarget: PlaylistNode?
+    @Published public var deleteTarget: PlaylistNode?
+    @Published public var deleteRecursiveTarget: PlaylistNode?
+    @Published public var newPlaylistParent: Int64?
+    @Published public private(set) var pendingTrackIDs: [Int64] = []
+    @Published public var isPresentingNewPlaylist = false
+    @Published public var isPresentingNewFolder = false
+    @Published public var isPresentingNewSmartPlaylist = false
+    /// Most recently created playlist ID. Used by sidebar/focus consumers to
+    /// scroll/select the new row.
+    @Published public var lastCreatedPlaylistID: Int64?
+    @Published public var lastError: String?
+    /// Set to trigger the accent-colour picker sheet for a specific playlist.
+    @Published public var accentColorTarget: PlaylistNode?
+
+    // MARK: - Dependencies
+
+    public let service: PlaylistService
+    private let log = AppLogger.make(.ui)
+
+    /// Called after playlists/folders are deleted; the set contains all deleted
+    /// IDs (target plus recursive descendants). Wire externally to deselect.
+    public var onDidDelete: ((Set<Int64>) -> Void)?
+
+    /// Invoked when the user picks "Export…" from a manual playlist's context
+    /// menu. Wire this in `LibraryViewModel` to drive the export sheet.
+    public var onRequestExport: ((Int64, String) -> Void)?
+
+    // MARK: - Init
+
+    public init(service: PlaylistService) {
+        self.service = service
+        Self.activeInstance = self
+    }
+
+    // MARK: - Public API
+
+    /// In-flight reload, so a burst of concurrent `reload()` calls shares one
+    /// fetch instead of issuing N. At launch three independent triggers fire it
+    /// (LibraryViewModel setup, the RootView startup spine, and the sidebar
+    /// section's own `.task`); without coalescing each ran its own `service.list()`.
+    private var reloadTask: Task<Void, Never>?
+    /// A reload requested while one was running schedules exactly one trailing
+    /// fetch afterwards, so a caller that mutated the store mid-flight (e.g. a
+    /// rapid second move/create) still observes fresh data.
+    private var reloadPending = false
+
+    /// Reloads the sidebar tree, coalescing overlapping calls.
+    public func reload() async {
+        if let task = self.reloadTask {
+            self.reloadPending = true
+            await task.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performReload()
+        }
+        self.reloadTask = task
+        await task.value
+        self.reloadTask = nil
+        if self.reloadPending {
+            self.reloadPending = false
+            await self.reload()
+        }
+    }
+
+    private func performReload() async {
+        let end = Telemetry.timer("ui.playlistSidebar.reload")
+        defer { end() }
+        do {
+            self.nodes = try await self.service.list()
+            self.isLoaded = true
+        } catch {
+            self.log.error("playlist.sidebar.reload.failed", ["error": String(reflecting: error)])
+            self.lastError = L10n.string("Could not load playlists.")
+        }
+    }
+
+    public func toggle(folderID: Int64) {
+        if self.expandedFolders.contains(folderID) {
+            self.expandedFolders.remove(folderID)
+        } else {
+            self.expandedFolders.insert(folderID)
+        }
+    }
+
+    /// Expands a folder without toggling it closed if it is already open.
+    public func expand(folderID: Int64) {
+        self.expandedFolders.insert(folderID)
+    }
+
+    /// Replaces the current expanded-folder set, used when restoring persisted
+    /// UI state at launch.
+    public func setExpandedFolders(_ ids: Set<Int64>) {
+        self.expandedFolders = ids
+    }
+
+    /// Moves a playlist by ID into a folder (or top-level when `folderID` is `nil`).
+    ///
+    /// Convenience overload used by drag-and-drop, which only has the payload ID
+    /// rather than the full `PlaylistNode`.
+    public func move(playlistID: Int64, toFolder folderID: Int64?) async {
+        do {
+            try await self.service.move(playlistID, toParent: folderID)
+            await self.reload()
+        } catch {
+            self.lastError = self.describe(error)
+        }
+    }
+
+    public func beginNewPlaylist(parent: Int64? = nil, trackIDs: [Int64] = []) {
+        self.log.debug("playlist.sheet", ["kind": "playlist", "parent": parent ?? -1])
+        self.newPlaylistParent = parent
+        self.pendingTrackIDs = trackIDs
+        self.isPresentingNewPlaylist = true
+    }
+
+    /// Returns the pending selection IDs captured when the new-playlist flow was opened.
+    public func pendingSelectionForNewPlaylist() -> [Int64] {
+        self.pendingTrackIDs
+    }
+
+    /// Flat folder list used by the New Playlist sheet's parent picker.
+    public func foldersForParentPicker() -> [PlaylistNode] {
+        self.allFolders()
+    }
+
+    /// Returns a collision-safe default name for a new playlist in `parentID`.
+    public func defaultPlaylistName(parentID: Int64?) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let base = L10n.string("New Playlist \(formatter.string(from: Date()))")
+        return self.uniqueSiblingName(base: base, parentID: parentID)
+    }
+
+    /// Resolves a collision-safe sibling name in `parentID`, appending ` (n)`.
+    public func uniqueSiblingName(base: String, parentID: Int64?) -> String {
+        let siblings = self.siblingNames(parentID: parentID)
+        let existing = Set(siblings.map { $0.lowercased() })
+        if !existing.contains(base.lowercased()) {
+            return base
+        }
+        var suffix = 2
+        while true {
+            let candidate = "\(base) (\(suffix))"
+            if !existing.contains(candidate.lowercased()) {
+                return candidate
+            }
+            suffix += 1
+        }
+    }
+
+    public func beginNewFolder(parent: Int64? = nil) {
+        self.log.debug("playlist.sheet", ["kind": "folder", "parent": parent ?? -1])
+        self.newPlaylistParent = parent
+        self.isPresentingNewFolder = true
+    }
+
+    public func beginNewSmartPlaylist() {
+        self.log.debug("playlist.sheet", ["kind": "smart"])
+        self.newPlaylistParent = nil
+        self.isPresentingNewSmartPlaylist = true
+    }
+
+    public func beginInlineRename(_ node: PlaylistNode) {
+        self.renamingPlaylistID = node.id
+    }
+
+    public func cancelInlineRename() {
+        self.renamingPlaylistID = nil
+    }
+
+    public func createPlaylist(name: String) async -> Int64? {
+        await self.createPlaylist(
+            name: name,
+            parentID: self.newPlaylistParent,
+            includePendingSelection: true
+        )
+    }
+
+    /// Creates a playlist with explicit parent/selection controls used by the
+    /// new-playlist sheet.
+    public func createPlaylist(
+        name: String,
+        parentID: Int64?,
+        includePendingSelection: Bool
+    ) async -> Int64? {
+        do {
+            let resolvedName = self.uniqueSiblingName(base: name, parentID: parentID)
+            let playlist = try await self.service.create(name: resolvedName, parentID: parentID)
+            let ids = includePendingSelection ? self.pendingTrackIDs : []
+            self.pendingTrackIDs = []
+            if !ids.isEmpty, let playlistID = playlist.id {
+                try await self.service.addTracks(ids, to: playlistID)
+            }
+            await self.reload()
+            if let newID = playlist.id {
+                self.lastCreatedPlaylistID = newID
+                if let parentID {
+                    self.expandedFolders.insert(parentID)
+                }
+                // No inline rename here. Every creation path goes through the
+                // new-playlist sheet, where the user has already typed the
+                // name; opening the new row for editing asked them for it a
+                // second time.
+            }
+            return playlist.id
+        } catch {
+            self.lastError = self.describe(error)
+            return nil
+        }
+    }
+
+    public func createFolder(name: String) async -> Int64? {
+        do {
+            let f = try await self.service.createFolder(name: name, parentID: self.newPlaylistParent)
+            await self.reload()
+            if let parentID = self.newPlaylistParent {
+                self.expandedFolders.insert(parentID)
+            }
+            // Named in the sheet, like a playlist; nothing left to ask.
+            return f.id
+        } catch {
+            self.lastError = self.describe(error)
+            return nil
+        }
+    }
+
+    public func rename(_ node: PlaylistNode, to newName: String) async {
+        do {
+            try await self.service.rename(node.id, to: newName)
+            self.renamingPlaylistID = nil
+            await self.reload()
+        } catch {
+            self.lastError = self.describe(error)
+        }
+    }
+
+    public func commitInlineRename(_ node: PlaylistNode, proposedName: String) async {
+        let trimmed = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            self.cancelInlineRename()
+            return
+        }
+        if trimmed == node.name {
+            self.cancelInlineRename()
+            return
+        }
+        await self.rename(node, to: trimmed)
+    }
+
+    public func delete(_ node: PlaylistNode, recursive: Bool = false) async {
+        // Collect all IDs that will be deleted *before* the operation so the
+        // callback can clear any active selection for deleted playlists.
+        let deletedIDs: Set<Int64> = recursive
+            ? Self.allIDs(in: [node])
+            : [node.id]
+        do {
+            if recursive {
+                try await self.service.deleteRecursively(node.id)
+            } else {
+                try await self.service.delete(node.id)
+            }
+            await self.reload()
+            // Defer to the next main-actor tick: if onDidDelete swaps the
+            // content pane (e.g. smart playlist → songs) while the confirmation
+            // sheet is still animating closed, SwiftUI's dialog bridge can
+            // crash mid-layout (EXC_BAD_ACCESS in UC::DriverCore).
+            Task { @MainActor [weak self] in
+                self?.onDidDelete?(deletedIDs)
+            }
+        } catch {
+            self.lastError = self.describe(error)
+        }
+    }
+
+    public func duplicate(_ node: PlaylistNode) async -> Int64? {
+        do {
+            let copy = try await self.service.duplicate(node.id)
+            await self.reload()
+            return copy.id
+        } catch {
+            self.lastError = self.describe(error)
+            return nil
+        }
+    }
+
+    public func move(_ node: PlaylistNode, toParent parent: Int64?) async {
+        do {
+            try await self.service.move(node.id, toParent: parent)
+            await self.reload()
+        } catch {
+            self.lastError = self.describe(error)
+        }
+    }
+
+    public func addTracks(_ trackIDs: [Int64], to playlistID: Int64) async {
+        do {
+            try await self.service.addTracks(trackIDs, to: playlistID)
+            await self.reload()
+        } catch {
+            self.lastError = self.describe(error)
+        }
+    }
+
+    /// Sorts the contents of `node` by `key` and reloads the sidebar.
+    public func sortContents(_ node: PlaylistNode, by key: PlaylistSortKey) async {
+        do {
+            try await self.service.sortContents(node.id, by: key)
+            await self.reload()
+        } catch {
+            self.lastError = self.describe(error)
+        }
+    }
+
+    // MARK: - Cover art & accent colour
+
+    /// Opens a non-blocking `NSOpenPanel` for the user to pick a cover image,
+    /// copies it into Application Support, and persists the path via the service.
+    ///
+    /// Uses `NSOpenPanel.begin(completionHandler:)` (not `runModal`) so the
+    /// audio render callback is never starved — see ADR-007 audit issue #28.
+    public func setCoverArt(for node: PlaylistNode) async {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.jpeg, .png, .tiff, .heic, .webP]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = L10n.string("Choose an image to use as the cover art for \"\(node.name)\".")
+        panel.prompt = L10n.string("Set Cover Art")
+
+        let response = await Self.openPanelAsync(panel)
+        guard response == .OK, let url = panel.url else { return }
+
+        self.log.debug("playlist.setCoverArt.begin", ["id": node.id])
+        do {
+            let destPath = try await Self.saveImageFile(url: url, playlistID: node.id)
+            try await self.service.setCoverArtPath(node.id, path: destPath)
+            await self.reload()
+            self.log.debug("playlist.setCoverArt.done", ["id": node.id, "path": destPath])
+        } catch {
+            self.log.error("playlist.setCoverArt.failed", ["error": String(reflecting: error)])
+            self.lastError = L10n.string("Could not set cover art.")
+        }
+    }
+
+    /// Persists `hex` (or `nil` to clear) as the accent colour for `id`.
+    public func setAccentColor(_ hex: String?, for id: Int64) async {
+        do {
+            try await self.service.setAccentColor(id, hex: hex)
+            await self.reload()
+        } catch {
+            self.log.error("playlist.setAccentColor.failed", ["error": String(reflecting: error)])
+            self.lastError = L10n.string("Could not update accent colour.")
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// Returns `true` when `node` is visible given the current expansion state.
+    public func isVisible(_ node: PlaylistNode) -> Bool {
+        // Walk the tree finding the node and checking all its ancestors are expanded.
+        self.isVisible(node.id, in: self.nodes, ancestorsExpanded: true)
+    }
+
+    private func isVisible(_ id: Int64, in nodes: [PlaylistNode], ancestorsExpanded: Bool) -> Bool {
+        for node in nodes {
+            if node.id == id {
+                return ancestorsExpanded
+            }
+            let nextExpanded = ancestorsExpanded && self.expandedFolders.contains(node.id)
+            if self.isVisible(id, in: node.children, ancestorsExpanded: nextExpanded) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Flattens visible nodes in depth-first render order with an accompanying depth.
+    public func flattened() -> [(node: PlaylistNode, depth: Int)] {
+        var result: [(node: PlaylistNode, depth: Int)] = []
+        self.appendFlattened(self.nodes, depth: 0, into: &result)
+        return result
+    }
+
+    private func appendFlattened(
+        _ nodes: [PlaylistNode],
+        depth: Int,
+        into result: inout [(node: PlaylistNode, depth: Int)]
+    ) {
+        for node in nodes {
+            result.append((node, depth))
+            if node.kind == .folder, self.expandedFolders.contains(node.id) {
+                self.appendFlattened(node.children, depth: depth + 1, into: &result)
+            }
+        }
+    }
+
+    /// Returns a flat list of all folder nodes in tree order, for the Move to Folder menu.
+    public func allFolders() -> [PlaylistNode] {
+        var result: [PlaylistNode] = []
+        self.collectFolders(self.nodes, into: &result)
+        return result
+    }
+
+    /// Returns the node with the given `id` from the full tree, or `nil` if not found.
+    public func findNode(id: Int64) -> PlaylistNode? {
+        Self.findNode(id: id, in: self.nodes)
+    }
+
+    private static func findNode(id: Int64, in nodes: [PlaylistNode]) -> PlaylistNode? {
+        nodes.lazy.compactMap { $0.id == id ? $0 : self.findNode(id: id, in: $0.children) }.first
+    }
+
+    private func collectFolders(_ nodes: [PlaylistNode], into result: inout [PlaylistNode]) {
+        for node in nodes where node.kind == .folder {
+            result.append(node)
+            self.collectFolders(node.children, into: &result)
+        }
+    }
+
+    private func siblingNames(parentID: Int64?) -> [String] {
+        if let parentID, let parent = self.findNode(id: parentID) {
+            return parent.children.filter { $0.kind == .manual }.map(\.name)
+        }
+        return self.nodes.filter { $0.parentID == nil && $0.kind == .manual }.map(\.name)
+    }
+
+    private func describe(_ error: Error) -> String {
+        if let pe = error as? PlaylistError {
+            return String(describing: pe)
+        }
+        return error.localizedDescription
+    }
+
+    /// Returns the IDs of `nodes` and all their descendants.
+    private static func allIDs(in nodes: [PlaylistNode]) -> Set<Int64> {
+        var ids = Set<Int64>()
+        for node in nodes {
+            ids.insert(node.id)
+            ids.formUnion(self.allIDs(in: node.children))
+        }
+        return ids
+    }
+}

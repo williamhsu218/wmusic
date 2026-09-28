@@ -1,0 +1,156 @@
+import Library
+import SwiftUI
+
+// MARK: - LibrarySettingsView
+
+public struct LibrarySettingsView: View {
+    @EnvironmentObject private var vm: LibraryViewModel
+    @AppStorage("library.watchForChanges") private var watchForChanges = true
+    @AppStorage("metadata.embedCoverArt") private var embedCoverArt = false
+    @AppStorage(DeepDiveSetting.key) private var deepDiveEnabled = false
+
+    public init() {}
+
+    public var body: some View {
+        Form {
+            Section(L10n.string("Scanning")) {
+                Toggle(L10n.string("Watch folders for new files"), isOn: self.$watchForChanges)
+                    .accessibilityIdentifier(A11y.SettingsIDs.watchFolders)
+                    .help(L10n.string("Imports files as soon as they appear in your library folders, without waiting for a rescan."))
+                // "Use quick scan by default" lived here and read nothing: the
+                // launch scan is always quick (RootView's triggerScan), and
+                // Full Rescan is an explicit File-menu command. A switch that
+                // cannot change anything is worse than no switch (#502).
+                Text(localized: "Scans on launch read only the files that changed. Use Full Rescan in the File menu to re-read everything.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section(L10n.string("Metadata")) {
+                Toggle(L10n.string("Embed cover art directly into audio files"), isOn: self.$embedCoverArt)
+                    .accessibilityIdentifier(A11y.SettingsIDs.embedCoverArt)
+                    .help(self.embedCoverArtHelp)
+                if self.embedCoverArt {
+                    Text(localized: "Files will be modified when you save cover art changes.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(localized: "Cover art is stored in WMusic's cache only and won't be visible in other apps.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section(L10n.string("Deep Dive")) {
+                Toggle(L10n.string("Enable Deep Dive"), isOn: self.$deepDiveEnabled)
+                    .accessibilityIdentifier(A11y.SettingsIDs.deepDive)
+                    .help(L10n.string("Adds the Deep Dive tab to Get Info, and starts the one-off artist lookups described below."))
+                Text(self.deepDiveDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(self.deepDivePrivacyNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                if self.vm.libraryRoots.isEmpty {
+                    Text(localized: "No folders or files added yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(self.vm.libraryRoots, id: \.id) { root in
+                        let url = URL(fileURLWithPath: root.path)
+                        HStack {
+                            Image(systemName: url.hasDirectoryPath ? "folder" : "music.note")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(url.lastPathComponent)
+                                Text(root.path)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                if let id = root.id {
+                                    Task { await self.vm.removeRoot(id: id) }
+                                }
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.borderless)
+                            .help(L10n.string("Remove \(url.lastPathComponent) from library (does not delete files on disk)"))
+                            .accessibilityLabel(L10n.string("Remove \(url.lastPathComponent) from library"))
+                            .accessibilityIdentifier(A11y.SettingsIDs.removeRoot)
+                        }
+                        .help(root.path)
+                    }
+                }
+
+                HStack {
+                    Button(L10n.string("Add Folder…")) {
+                        Task { await self.vm.addFolderByPicker() }
+                    }
+                    .help(L10n.string("Choose a folder containing music to add to your library"))
+                    .accessibilityLabel(L10n.string("Add folder to library"))
+                    .accessibilityIdentifier(A11y.SettingsIDs.addFolder)
+                    Button(L10n.string("Add Files…")) {
+                        Task { await self.vm.addFilesByPicker() }
+                    }
+                    .help(L10n.string("Choose individual audio files to add to your library"))
+                    .accessibilityLabel(L10n.string("Add files to library"))
+                    .accessibilityIdentifier(A11y.SettingsIDs.addFiles)
+                }
+                .buttonStyle(.borderless)
+            } header: {
+                HStack(spacing: 6) {
+                    Text(localized: "Music Sources")
+                    if self.vm.isScanning {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .padding(.leading, 2)
+                        Text(self.vm.scanCurrentPath.isEmpty ? L10n.string("Scanning…") : self.vm.scanCurrentPath)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: 200, alignment: .leading)
+                        Spacer()
+                        Button(L10n.string("Cancel")) {
+                            self.vm.cancelScan()
+                        }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help(L10n.string("Cancel the in-progress library scan"))
+                        .accessibilityLabel(L10n.string("Cancel library scan"))
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle(L10n.string("Library"))
+    }
+
+    private var deepDiveDescription: String {
+        L10n.string("Adds a Deep Dive tab to Get Info for artists, albums and songs.")
+            + " " + L10n.string("It uses MusicBrainz and Wikipedia lookups to enrich your library.")
+    }
+
+    private var deepDivePrivacyNote: String {
+        L10n.string("When on, WMusic sends MusicBrainz identifiers (or an artist's name) to MusicBrainz and Wikipedia.")
+            + " " + L10n.string("It also slowly looks up each artist in your library on MusicBrainz, once.")
+            + " " + L10n.string("Off by default; nothing is sent while it is off.")
+    }
+
+    /// Help copy for the embed toggle. Two full-sentence keys joined in code;
+    /// each sentence is independently translatable (#314).
+    private var embedCoverArtHelp: String {
+        L10n.string("When on, saving cover art rewrites the audio file to embed the image.")
+            + " "
+            + L10n.string("When off, art is stored only in WMusic's cache and won't appear in other apps.")
+    }
+}

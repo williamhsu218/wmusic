@@ -1,0 +1,14 @@
+splitter horizontal style=thin
+ splitter vertical style=thin
+  splitter horizontal style=thin
+   tabs
+    albumlist tab-name="曲库"
+    refacets tab-name="筛选"
+   playlist font-size=12
+  splitter horizontal style=thin
+   tabs
+    splitter horizontal style=thin tab-name="正在播放"
+     albumart
+     selection-properties sections=metadata
+    playlist-picker style=plain tab-name="播放列表"
+   playback-controls format-title="%title%" format-artist="$if2(%artist%,Unknown artist)" format-info="%codec% · %bitrate%kbps · %samplerate%Hz · %channels%"

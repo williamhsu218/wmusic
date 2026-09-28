@@ -1,0 +1,92 @@
+import AppKit
+import SwiftUI
+
+// MARK: - WindowModeController
+
+/// Manages toggling between the main window and the Mini Player.
+///
+/// Inject into the environment and call `toggleMiniPlayer()` from the keyboard
+/// shortcut or menu bar.
+///
+/// Opening a window that is already open just brings it forward — so we track
+/// the desired mode in `@AppStorage` and call `openWindow`/`dismissWindow`
+/// accordingly.
+@MainActor
+public final class WindowModeController: ObservableObject {
+    // MARK: - Persisted state
+
+    /// @Published + manual UserDefaults read/write instead of @AppStorage.
+    /// @AppStorage in an ObservableObject that is a @StateObject in an App struct
+    /// subscribes to UserDefaults.didChangeNotification (key-agnostic), which fires
+    /// whenever macOS autosaves window frames — triggering objectWillChange → infinite
+    /// App body re-evaluation loop at display-refresh rate.
+    @Published public var miniPlayerOpen: Bool {
+        didSet { UserDefaults.standard.set(self.miniPlayerOpen, forKey: "ui.windowMode.miniPlayerOpen") }
+    }
+
+    @Published public var restoresLastMode: Bool {
+        didSet { UserDefaults.standard.set(self.restoresLastMode, forKey: "ui.windowMode.restoresLastMode") }
+    }
+
+    // MARK: - Environment
+
+    /// Must be set from inside a SwiftUI view that has the environment values.
+    public var openWindow: ((String) -> Void)?
+    public var dismissWindow: ((String) -> Void)?
+
+    public init() {
+        self.miniPlayerOpen = UserDefaults.standard.bool(forKey: "ui.windowMode.miniPlayerOpen")
+        let stored = UserDefaults.standard.object(forKey: "ui.windowMode.restoresLastMode") as? Bool
+        self.restoresLastMode = stored ?? true
+    }
+
+    // MARK: - Public API
+
+    /// Toggle the Mini Player window (⌘⌥M).
+    public func toggleMiniPlayer() {
+        if self.miniPlayerOpen {
+            // Reset window level to .normal before dismissing.  A floating-level
+            // window leaving the screen can prevent a .normal-level main window
+            // from gaining focus in the same run-loop tick.
+            if let miniWin = NSApp.windows.first(where: {
+                $0.title == "Mini Player" || $0.identifier?.rawValue == "mini"
+            }) {
+                miniWin.level = .normal
+                // Cross-fade (#330): fade the mini player to transparent, then
+                // dismiss the already-invisible window in the completion.
+                WindowFade.orderOut(miniWin) { [weak self] in
+                    self?.dismissWindow?("mini")
+                }
+            } else {
+                self.dismissWindow?("mini")
+            }
+            self.miniPlayerOpen = false
+            // Defer restore by one tick so dismissWindow's animation completes
+            // before we bring the main window forward.  The main window fades
+            // in while the mini player is still fading out.
+            DispatchQueue.main.async {
+                if let win = MainWindowTracker.shared.resolveWindow() {
+                    WindowFade.makeKeyAndOrderFront(win)
+                    NSApp.activate(ignoringOtherApps: true)
+                } else {
+                    self.openWindow?("main")
+                }
+            }
+        } else {
+            self.openWindow?("mini")
+            self.miniPlayerOpen = true
+        }
+    }
+
+    /// Show the Mini Player without closing the main window.
+    public func showMiniPlayer() {
+        self.openWindow?("mini")
+        self.miniPlayerOpen = true
+    }
+
+    /// Restore window mode on launch.
+    public func restoreIfNeeded() {
+        guard self.restoresLastMode, self.miniPlayerOpen else { return }
+        self.openWindow?("mini")
+    }
+}

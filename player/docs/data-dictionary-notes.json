@@ -1,0 +1,219 @@
+{
+  "_comment": "Curated layer for docs/data-dictionary.md, keyed by table.column. 'traces' is the ADR / issue the column serves and marks the row as reviewed; 'note' is free text. Regenerate with make data-dictionary.",
+  "play_history.duration_played": {
+    "traces": "ADR-094",
+    "note": "Elapsed seconds at the moment the recording rule fired (50% or 4 minutes), never updated afterwards, so it measures how long the rule took to trigger, not how much of the song was heard. Written by PlayHistoryRecorder. The History page deliberately does not show it (ADR-094): on the maintainer's library 567 of 877 rows sit at 49 to 52% of the song."
+  },
+  "play_history.source": {
+    "traces": "ADR-094",
+    "note": "Always 'queue' today: radio, podcasts and Subsonic plays never reach the recorder's local write. Not shown on the History page for that reason; reserved for a second local source."
+  },
+  "sync_transcodes.track_id": {
+    "traces": "ADR-088",
+    "note": "Track the artifact belongs to; cascades away with the track."
+  },
+  "sync_transcodes.preset": {
+    "traces": "ADR-088",
+    "note": "Transcode preset raw value (e.g. mp3_320); opaque to Persistence, vocabulary owned by AudioEngine. Composite key with track_id."
+  },
+  "sync_transcodes.source_content_hash": {
+    "traces": "ADR-088",
+    "note": "The track's content_hash the artifact was derived from; the row is valid only while it still matches, so a retag invalidates the artifact."
+  },
+  "sync_transcodes.sha256": {
+    "traces": "ADR-088",
+    "note": "SHA-256 of the artifact bytes, advertised as the manifest sha256 and used as the file endpoint's ETag. Hashed once at encode time; the ledger outlives the bytes."
+  },
+  "sync_transcodes.size": {
+    "traces": "ADR-088",
+    "note": "Artifact size in bytes, advertised as the manifest size; feeds the phone's storage accounting."
+  },
+  "sync_transcodes.bitrate": {
+    "traces": "ADR-088",
+    "note": "Artifact bitrate in kbps when known; advertised as the manifest bitrate. NULL when the encoder did not report one."
+  },
+  "sync_transcodes.created_at": {
+    "traces": "ADR-088",
+    "note": "Unix seconds when the artifact was encoded."
+  },
+  "sync_transcodes.served_at": {
+    "traces": "ADR-088",
+    "note": "Unix seconds when a file response last delivered the artifact through EOF; NULL until then. The prepare-and-release sweep deletes bytes for stamped rows unless the keep toggle is on."
+  },
+  "tracks.channel_count": {
+    "traces": "ADR-091, #513",
+    "note": "Channel count from the tag reader: TagLib, or AVFoundation for a raw Dolby file TagLib cannot parse. Read by TrackInfoPanel.swift and TagEditorSheet+InfoTabs.swift, which show it as a layout name (Mono, Stereo, 5.1, 7.1, else a count) with hover text saying a surround mix plays folded to stereo. Playback folds every source channel into stereo, so the value describes the file, not what is heard."
+  },
+  "tracks.bit_depth": {
+    "traces": "ADR-009:52, ADR-065:134, #405",
+    "note": "Container bit depth (FLAC, WAV, AIFF, APE, WavPack, ALAC); NULL for lossy formats. Was NULL everywhere until #405; full rescan backfills."
+  },
+  "tracks.key": {
+    "traces": "#407",
+    "note": "Musical key from INITIALKEY (ID3 TKEY, MP4 atom via TagLib) or a bare KEY Vorbis comment; written back under whichever name the file uses. Legitimately NULL in a library tagged without a key detector (0 files carried either tag on 2026-08-28). No smart-playlist field."
+  },
+  "tracks.musicbrainz_album_artist_id": {
+    "traces": "ADR-012:68, #399",
+    "note": "Album-artist MBID per track (Picard MUSICBRAINZ_ALBUMARTISTID). The identify UI labels this 'Artist MBID'. Track-artist MBID has no column yet (#399)."
+  },
+  "tracks.musicbrainz_release_id": {
+    "traces": "ADR-012:68, ADR-009:58",
+    "note": "Populated per track; never rolled up to albums (#402)."
+  },
+  "tracks.musicbrainz_release_group_id": {
+    "traces": "ADR-012:68",
+    "note": "Populated per track; never rolled up to albums (#402)."
+  },
+  "tracks.track_total": {
+    "traces": "M002, #404",
+    "note": "From TRACKTOTAL / TOTALTRACKS, or the N of an n/N TRACKNUMBER (ID3v2 TRCK, MP4 trkn) since #404."
+  },
+  "tracks.disc_total": {
+    "traces": "M002, #404",
+    "note": "Same sources as track_total, via DISCTOTAL / TOTALDISCS or n/N DISCNUMBER."
+  },
+  "artists.sort_name": {
+    "traces": "ADR-003:155, #400",
+    "note": "ARTISTSORT / ALBUMARTISTSORT via ArtistRepository.findOrCreate(name:sortName:) from TrackImporter and EditTransaction; tags win, else derived by Artist.derivedSortName (English articles only); NULL when neither applies. M041 backfilled the derivation. Read by fetchAll (COALESCE ordering), ArtistsViewModel, artists_fts."
+  },
+  "artists.musicbrainz_artist_id": {
+    "traces": "#399, #413",
+    "note": "Filled via ArtistRepository.findOrCreate(name:sortName:musicbrainzID:) from the track-artist MBID (track artist) or album-artist MBID (album artist); the first tagged id wins and is never overwritten by another tag (a conflict is the shared-name problem, #401), but a tagged id replaces a confirmed Deep Dive guess (see musicbrainz_id_source). Also written by setMusicBrainzID when the user confirms a name match. M043 backfilled album artists from tracks.musicbrainz_album_artist_id; track-only artists fill on the next full rescan. Needed by Deep Dive."
+  },
+  "artists.disambiguation": {
+    "traces": "ADR-003:103, #401, #413",
+    "note": "MusicBrainz disambiguation from ArtistEnrichmentService (one artist lookup each, background, shared 1 req/s limiter), NULL when MusicBrainz has none. Read by the artist page header subtitle and reusable by Deep Dive."
+  },
+  "albums.musicbrainz_release_id": {
+    "traces": "ADR-003:102, #402",
+    "note": "Rolled up by AlbumRepository.recomputeMusicBrainzIDs (TrackImporter, EditTransaction, M042): the single value when every tagged track agrees, NULL for mixed pressings. Hygiene counts an album as missing an MBID only when this and the release group are both NULL."
+  },
+  "albums.musicbrainz_release_group_id": {
+    "traces": "ADR-003:102, #402",
+    "note": "Most common non-empty value across the album's tracks, same rollup path. Preferred key for 'same album, different pressing'."
+  },
+  "albums.release_type": {
+    "traces": "ADR-003:101, #403",
+    "note": "MusicBrainz primary type (album, single, ep, broadcast, other; lowercased) from the first RELEASETYPE value via TrackTags.releaseType and AlbumRepository.setReleaseType in TrackImporter; the full multi-valued list stays in tracks.extended_tags. Read by the AlbumDetailView kind badge (hidden for plain albums). M046 requests the backfill rescan."
+  },
+  "albums.total_tracks": {
+    "traces": "ADR-003:100, #404",
+    "note": "MAX(tracks.track_total) via AlbumRepository.recomputeTotals, called by TrackImporter and EditTransaction; M040 backfilled. NULL when no track carries a total. Drives AlbumDetailView's 'N songs'."
+  },
+  "albums.total_discs": {
+    "traces": "ADR-003:100, #404",
+    "note": "MAX(tracks.disc_total), same path as total_tracks."
+  },
+  "cover_art.width": {
+    "traces": "ADR-003:111, ADR-004:81, #417",
+    "note": "Pixel width from CGImageSource in CoverArtCache.persist; CoverArtRepository.save fills NULL on an existing hash so a full rescan backfills old rows. Read by the hygiene 'Albums With Low-Resolution Artwork' line (< 500 px longest side)."
+  },
+  "cover_art.height": {
+    "traces": "ADR-003:111, ADR-004:81, #417",
+    "note": "See width."
+  },
+  "cover_art.byte_size": {
+    "traces": "ADR-003:114, #417",
+    "note": "Size of the cached (possibly downsampled) file, set by persist and the MusicBrainz batch tool; NULL rows heal on rescan."
+  },
+  "cover_art.source": {
+    "traces": "ADR-003:116, #417",
+    "note": "embedded (importer), sidecar (cover.jpg pickup), user (editor art drop), musicbrainz (batch tool). First-seen wins per hash; never overwritten."
+  },
+  "lyrics.offset_ms": {
+    "traces": "ADR-015:85, #415",
+    "note": "The user's per-track sync adjustment (LRC convention: positive = lyrics ahead). Written by LyricsService.setUserOffset from LyricsViewModel.commitOffset (debounced slider, popover dismiss); preserved by setLyrics; folded into the document by LyricsService.parse. Not the LRC [offset:] tag, which stays in the text."
+  },
+  "scrobble_queue.payload_title": {
+    "traces": "M021, ADR-029",
+    "note": "Subsonic-only snapshot; local plays join tracks/albums at submit time."
+  },
+  "scrobble_queue.payload_artist": {
+    "traces": "M021, ADR-029",
+    "note": "Subsonic-only, see payload_title."
+  },
+  "scrobble_queue.payload_album": {
+    "traces": "M021, ADR-029, #408",
+    "note": "Subsonic-only snapshot (local plays join albums at submit time). Carried from QueueItem.albumName via QueuePlayer.subsonicPlayContext since #408; was hardcoded nil before."
+  },
+  "scrobble_queue.payload_album_artist": {
+    "traces": "M021, ADR-029, #408",
+    "note": "Subsonic-only. Still nil: the Subsonic Child a queue item is built from has no album-artist field, and the track artist would be wrong for compilations."
+  },
+  "scrobble_queue.payload_duration": {
+    "traces": "M021, ADR-029",
+    "note": "Subsonic-only, see payload_title."
+  },
+  "podcasts.itunes_collection_id": {
+    "traces": "ADR-040:305, ADR-041:95, #409",
+    "note": "From the search result via PodcastDetail, the PodcastActions seam (subscribe(feedURL:podcastIndexID:itunesCollectionID:)), PodcastService, ParsedFeed.toPodcast(hints:); preserved by upsertByFeedURL across refreshes since #409. NULL for hand-typed or OPML feeds. No reader yet."
+  },
+  "podcasts.podcast_index_id": {
+    "traces": "ADR-040:305, ADR-041:95, #409",
+    "note": "Same path as itunes_collection_id. Candidate key for the feed-moved case (ADR-058) and for an 'Open in Podcast Index' link; no reader yet."
+  },
+  "podcasts.persons_json": {
+    "traces": "M028, CHANGELOG 'podcast:person'",
+    "note": "Show-level credits; written via GRDB record encoding, so it works."
+  },
+  "podcast_episodes.artwork_path": {
+    "traces": "ADR-041:100, ADR-047:43, ADR-070:42, #410",
+    "note": "Local path of the episode's own itunes:image, cached lazily by PodcastService when playback resolves the episode (not for every episode on refresh); upsertOne keeps it across refreshes. Read by Continue Listening (COALESCE with show art) and Now Playing (episode art overrides show art). Not in the sync manifest (ADR-070)."
+  },
+  "podcast_episodes.persons_json": {
+    "traces": "M028, #411",
+    "note": "Was omitted from EpisodeRepository.upsertOne until #411; M039 forces a re-parse to backfill."
+  },
+  "tracks.musicbrainz_artist_id": {
+    "traces": "#399, #413",
+    "note": "Picard MUSICBRAINZ_ARTISTID (first value) via the bridge, TrackImporter, TrackTagPatch / EditTransaction / BackupRing. Read by the tag editor's Identifiers section (Artist MBID row). Added in M043."
+  },
+  "tracks.skip_after_seconds": {
+    "traces": "#423",
+    "note": "User setting (LibraryViewModel); preserved across rescans by TrackImporter since #423."
+  },
+  "tracks.acoustid_id": {
+    "traces": "ADR-011, #423",
+    "note": "Identify result; preserved across rescans since #423 (a retag or re-encode does not change the recording)."
+  },
+  "tracks.acoustid_fingerprint": {
+    "traces": "ADR-011, #423",
+    "note": "See acoustid_id."
+  },
+  "tracks.replaygain_track_gain": {
+    "traces": "ADR-013, #423",
+    "note": "From tags when present, else the app-computed value, which TrackImporter now keeps on rescan (#423). A full rescan on 2026-08-28 wiped 13,000 computed values before the fix."
+  },
+  "tracks.replaygain_album_gain": {
+    "traces": "ADR-013, #579",
+    "note": "From tags when present, else computed by ReplayGainAlbumPass after a ReplayGain batch: the power mean of the album's track loudness, written to every track of an album whose tracks all have a track gain. TrackImporter keeps it on rescan. Read at playback in Album and Auto modes (#573)."
+  },
+  "tracks.content_hash": {
+    "traces": "ADR-065, #423",
+    "note": "Sync ETag from ContentHashService; kept on rescan while file_mtime is unchanged, cleared when the file changed (same rule as provenance)."
+  },
+  "pending_maintenance.task": {
+    "traces": "#425",
+    "note": "One-time housekeeping request left by a migration inside its own transaction (only 'full_rescan' so far). Read by LibraryScanner.scan, which upgrades a quick scan to full and clears the rows when that scan finishes."
+  },
+  "pending_maintenance.requested_by": {
+    "traces": "#425",
+    "note": "Migration name that asked; part of the primary key so repeated requests collapse."
+  },
+  "pending_maintenance.requested_at": {
+    "traces": "#425",
+    "note": "Unix seconds, set by the migration (strftime('%s','now')) or PendingMaintenanceRepository.request."
+  },
+  "track_dsp_assignments.eq_preset_id": {
+    "traces": "ADR-013, #418",
+    "note": "Per-track EQ preset override (EQPreset.id or NULL = global). The effect columns M010 sketched next to it were dropped in M049; per-track effects were never built."
+  },
+  "artists.musicbrainz_id_source": {
+    "traces": "#413",
+    "note": "Provenance of musicbrainz_artist_id: 'tag' (scanner, ArtistRepository.findOrCreate; M052 backfilled every existing id) or 'search' (a Deep Dive name match the user confirmed, ArtistRepository.setMusicBrainzID via DeepDiveService.confirmArtistMBID). Read by findOrCreate so a tagged id replaces a 'search' one on the next scan. NULL only while the id is NULL."
+  },
+  "artists.musicbrainz_fetched_at": {
+    "traces": "#401",
+    "note": "Unix seconds of the last MusicBrainz artist lookup; NULL = never. Set by ArtistRepository.setEnrichment (including on a 404, so a stale MBID is not retried every launch); read by fetchNeedingEnrichment."
+  }
+}

@@ -1,0 +1,110 @@
+import SwiftUI
+
+/// Layout constants for Bòcan's native-macOS UI.
+public enum Theme {
+    // MARK: - Sidebar
+
+    /// Default sidebar width.
+    public static let sidebarWidth: CGFloat = 220
+
+    /// Minimum sidebar width when the user drags the divider.
+    public static let sidebarMinWidth: CGFloat = 180
+
+    // MARK: - Rows
+
+    /// Height of a single track row in the table view.
+    public static let rowHeight: CGFloat = 28
+
+    /// Height of a single artist/genre row in a List.
+    public static let listRowHeight: CGFloat = 36
+
+    // MARK: - Album grid
+
+    /// Minimum cell width in the albums grid.
+    public static let albumGridMinWidth: CGFloat = 180
+
+    /// Spacing between cells in the albums grid.
+    public static let albumGridSpacing: CGFloat = 16
+
+    // MARK: - Artwork
+
+    /// Artwork thumbnail size in the now-playing strip.
+    public static let nowPlayingArtworkSize: CGFloat = 48
+
+    /// Artwork size inside an album grid cell.
+    public static let albumArtworkSize: CGFloat = 160
+
+    /// Small artwork shown in track rows.
+    public static let rowArtworkSize: CGFloat = 24
+
+    /// Corner radius applied to all artwork thumbnails.
+    public static let artworkCornerRadius: CGFloat = 6
+
+    // MARK: - Now-playing strip
+
+    /// Height of the bottom transport strip.
+    ///
+    /// 80 since ADR-092. The worst case the info block has to hold is a
+    /// title, an artist and album line, a CUE marker caption and the row of
+    /// source badges: measured at 66 pt of content, which left nothing at all
+    /// in the old 72 pt bar. The block is centred in the 80, so that worst
+    /// case clears 7 pt at the top and the bottom.
+    public static let nowPlayingStripHeight: CGFloat = 80
+
+    // MARK: - Corner radii
+
+    /// Tight corner radius — tags, badges.
+    public static let cornerRadiusSmall: CGFloat = 4
+    /// Standard corner radius — cards, rows.
+    public static let cornerRadiusMedium: CGFloat = 8
+    /// Large corner radius — panels.
+    public static let cornerRadiusLarge: CGFloat = 10
+
+    // MARK: - Animations
+
+    /// Standard quick transition — hover states.
+    public static let animationFast: SwiftUI.Animation = .easeOut(duration: 0.15)
+
+    /// Standard medium transition — panel slides.
+    public static let animationNormal: SwiftUI.Animation = .easeOut(duration: 0.25)
+
+    /// Slower full-screen transitions.
+    public static let animationSlow: SwiftUI.Animation = .easeOut(duration: 0.40)
+
+    /// Namespace for animation constants (mirrors top-level for ergonomics).
+    public enum Animation {
+        /// Maps to `Theme.animationFast`.
+        public static let fast: SwiftUI.Animation = Theme.animationFast
+        /// Maps to `Theme.animationNormal`.
+        public static let `default`: SwiftUI.Animation = Theme.animationNormal
+        /// Maps to `Theme.animationSlow`.
+        public static let slow: SwiftUI.Animation = Theme.animationSlow
+    }
+}
+
+// MARK: - Reduce Transparency tokens
+
+/// Semantic colour tokens that adapt between translucent and solid surfaces
+/// based on the system Reduce Transparency preference.
+public extension Theme {
+    /// Opaque alternative to a translucent or vibrancy panel surface.
+    ///
+    /// Returns the window background colour when `reduceTransparency` is on,
+    /// or `.clear` (so the caller can layer a material) when it is off.
+    static func panelBackground(reduceTransparency: Bool) -> Color {
+        reduceTransparency ? Color(nsColor: .windowBackgroundColor) : Color.clear
+    }
+
+    /// Overlay background for content layered over artwork or media.
+    ///
+    /// Returns an opaque window-background colour when `reduceTransparency` is on,
+    /// or a semi-transparent black at the requested `opacity` when it is off.
+    static func overlayBackground(
+        reduceTransparency: Bool,
+        opacity: Double = 0.6
+    ) -> Color {
+        reduceTransparency
+            ? Color(nsColor: .windowBackgroundColor)
+            : Color.black.opacity(opacity)
+    }
+}

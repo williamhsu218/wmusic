@@ -1,0 +1,5 @@
+splitter horizontal style=thin
+ splitter vertical style=thin
+  albumart NSSplitViewItem.holdingPriority=250
+  playback-controls format-title="%title%" format-artist="$if2(%artist%,Unknown artist)" format-info="%codec% · %bitrate%kbps · %samplerate%Hz · %channels%"
+ playlist font-size=12

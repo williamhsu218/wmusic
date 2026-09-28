@@ -1,0 +1,692 @@
+import Foundation
+import Metadata
+import Observability
+import Persistence
+
+// MARK: - EditTransaction
+
+/// Executes an atomic metadata edit: file write → DB update.
+///
+/// For a batch of N tracks:
+/// 1. Back up each track's current tags into the `BackupRing`.
+/// 2. Write new tags to the file (copy → write → fsync → rename).
+/// 3. Re-read the file to confirm persistence.
+/// 4. Update all DB rows in a single database transaction.
+/// 5. On any per-file failure, restore that file from the backup.
+///
+/// The DB transaction rolls back automatically if the `database.write` closure
+/// throws, so file and DB stay in sync on success.
+actor EditTransaction {
+    // MARK: - Dependencies
+
+    private let database: Persistence.Database
+    private let trackRepo: TrackRepository
+    private let artistRepo: ArtistRepository
+    private let albumRepo: AlbumRepository
+    private let coverArtRepo: CoverArtRepository
+    private let coverArtCache: CoverArtCache
+    private let backupRing: BackupRing
+    private let rootRepo: LibraryRootRepository
+    private let writer: TagWriter
+    private let reader: TagReader
+    private let log = AppLogger.make(.library)
+
+    // MARK: - Init
+
+    init(
+        database: Persistence.Database,
+        trackRepo: TrackRepository,
+        artistRepo: ArtistRepository,
+        albumRepo: AlbumRepository,
+        coverArtRepo: CoverArtRepository,
+        coverArtCache: CoverArtCache,
+        backupRing: BackupRing,
+        rootRepo: LibraryRootRepository
+    ) {
+        self.database = database
+        self.trackRepo = trackRepo
+        self.artistRepo = artistRepo
+        self.albumRepo = albumRepo
+        self.coverArtRepo = coverArtRepo
+        self.coverArtCache = coverArtCache
+        self.backupRing = backupRing
+        self.rootRepo = rootRepo
+        self.writer = TagWriter()
+        self.reader = TagReader()
+    }
+
+    // MARK: - Execute
+
+    /// Applies `patch` to every track in `trackIDs`.
+    ///
+    /// - Parameter embedCoverArt: When `true`, cover art changes are written
+    ///   directly into the audio file bytes in addition to the app cache.
+    /// - Parameter onProgress: Called after each file completes (0-based index, total count).
+    /// - Throws: `EditError.partial` if some but not all files succeeded.
+    func execute(
+        patch: TrackTagPatch,
+        trackIDs: [Int64],
+        embedCoverArt: Bool = false,
+        onProgress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws {
+        guard !patch.isEmpty else { return }
+
+        var errors: [Int64: String] = [:]
+        var successfulUpdates: [(track: Track, coverArtHash: String?)] = []
+
+        // --- Per-file phase ---
+        for (idx, trackID) in trackIDs.enumerated() {
+            try Task.checkCancellation()
+            do {
+                let result = try await self.processOneTrack(
+                    trackID: trackID,
+                    patch: patch,
+                    embedCoverArt: embedCoverArt
+                )
+                successfulUpdates.append(result)
+            } catch {
+                self.log.error("edit.track.failed", ["id": trackID, "error": String(reflecting: error)])
+                errors[trackID] = error.localizedDescription
+            }
+            onProgress?(idx, trackIDs.count)
+        }
+
+        // --- DB phase: write all successful updates in one transaction ---
+        if !successfulUpdates.isEmpty {
+            let updates = successfulUpdates // let-copy for Sendable capture
+            try await self.database.write { db in
+                for (track, coverHash) in updates {
+                    var mutable = track
+                    if let hash = coverHash {
+                        mutable.coverArtHash = hash
+                    }
+                    try mutable.update(db)
+
+                    // Keep the lyrics table in sync with the edited text so
+                    // ADR-015 (lyrics display) sees the updated isSynced flag
+                    // immediately — without waiting for the next rescan.
+                    if let trackID = mutable.id {
+                        if let text = patch.syncedLyrics {
+                            // nil text means "clear synced lyrics"
+                            if let lyricsText = text {
+                                let row = Lyrics(
+                                    trackID: trackID,
+                                    lyricsText: lyricsText,
+                                    isSynced: true,
+                                    source: "user"
+                                )
+                                try row.save(db)
+                            } else {
+                                try db.execute(
+                                    sql: "DELETE FROM lyrics WHERE track_id = ?",
+                                    arguments: [trackID]
+                                )
+                            }
+                        } else if let text = patch.lyrics {
+                            // nil text means "clear plain lyrics"
+                            if let lyricsText = text {
+                                let row = Lyrics(
+                                    trackID: trackID,
+                                    lyricsText: lyricsText,
+                                    isSynced: false,
+                                    source: "user"
+                                )
+                                try row.save(db)
+                            } else {
+                                try db.execute(
+                                    sql: "DELETE FROM lyrics WHERE track_id = ?",
+                                    arguments: [trackID]
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            self.log.debug("edit.committed", ["count": successfulUpdates.count])
+
+            // Link patched cover art to the affected albums. The track list's
+            // leading thumbnail renders the ALBUM's art, not the track's —
+            // without this, saved art shows on the play bar (which reads the
+            // track) but never in the list or the albums grid.
+            if case let .some(.some(artData)) = patch.coverArt {
+                try await self.linkAlbumArt(artData: artData, updates: updates.map(\.track))
+            }
+        }
+
+        // Roll totals (#404) and MusicBrainz IDs (#402) up to every album
+        // touched when the edit changed one of them or moved tracks between
+        // albums. The identify flow lands here too via MetadataEditService.
+        let regrouped = patch.album != nil || patch.albumArtist != nil
+        let totalsChanged = patch.trackTotal != nil || patch.discTotal != nil
+        let mbidsChanged = patch.musicbrainzReleaseID != nil || patch.musicbrainzReleaseGroupID != nil
+        if !successfulUpdates.isEmpty, regrouped || totalsChanged || mbidsChanged {
+            let albumIDs = Set(successfulUpdates.compactMap(\.track.albumID))
+            for albumID in albumIDs {
+                if regrouped || totalsChanged {
+                    try await self.albumRepo.recomputeTotals(albumID: albumID)
+                }
+                if regrouped || mbidsChanged {
+                    try await self.albumRepo.recomputeMusicBrainzIDs(albumID: albumID)
+                }
+            }
+        }
+
+        if !errors.isEmpty {
+            throw EditError.partial(errors)
+        }
+    }
+
+    /// Album-art semantics for a batch edit:
+    /// - The batch covers **every** track of an album (e.g. Get Info on the
+    ///   album itself) → the user is editing the album's art: **replace** it.
+    /// - Partial coverage (fixing one track of many) → fill a **missing**
+    ///   album link only; never hijack deliberate album-level art.
+    /// Throws when the art cannot be cached: the user asked for this image, the
+    /// edit reported success, and swallowing the failure left the art nowhere
+    /// the album could show it (#481).
+    private func linkAlbumArt(artData: Data, updates: [Track]) async throws {
+        let extracted = CoverArtExtractor.extract(from: [
+            RawCoverArt(data: artData, mimeType: Self.mimeType(for: artData), pictureType: 3),
+        ])
+        // persist() is idempotent (content-hash keyed); reuse from step 7 is free.
+        let persisted = try await self.coverArtCache.persist(extracted, source: "user")
+        // nil means the bytes held no usable image, so there is nothing to link.
+        guard let persisted else { return }
+
+        var touchedByAlbum: [Int64: Int] = [:]
+        for track in updates {
+            if let albumID = track.albumID {
+                touchedByAlbum[albumID, default: 0] += 1
+            }
+        }
+
+        for (albumID, touched) in touchedByAlbum {
+            let album: Album
+            do {
+                album = try await self.albumRepo.fetch(id: albumID)
+            } catch {
+                // The art reaches the tracks but not the album the grid and
+                // the track list actually draw from (#492).
+                self.log.warning("edit.albumArt.albumLookupFailed", [
+                    "album": albumID,
+                    "error": String(reflecting: error),
+                ])
+                continue
+            }
+            // A failed count keeps the old meaning: assume partial coverage,
+            // so deliberate album art is never hijacked.
+            var total = Int.max
+            do {
+                total = try await self.trackRepo.count(albumID: albumID)
+            } catch {
+                self.log.warning("edit.albumArt.countFailed", [
+                    "album": albumID,
+                    "error": String(reflecting: error),
+                ])
+            }
+            let coversWholeAlbum = touched >= total
+            let albumHasNoArt = album.coverArtPath == nil || album.coverArtHash == nil
+            guard coversWholeAlbum || albumHasNoArt else { continue }
+            do {
+                try await self.albumRepo.setCoverArt(
+                    albumID: albumID,
+                    hash: persisted.hash,
+                    path: persisted.path
+                )
+            } catch {
+                self.log.error("edit.albumArt.link_failed", ["album": albumID, "error": String(reflecting: error)])
+            }
+        }
+    }
+
+    // MARK: - Private
+
+    private func processOneTrack(
+        trackID: Int64,
+        patch: TrackTagPatch,
+        embedCoverArt: Bool
+    ) async throws -> (track: Track, coverArtHash: String?) {
+        // 1. Fetch DB row
+        let track = try await self.trackRepo.fetch(id: trackID)
+        guard let fileURL = URL(string: track.fileURL) else {
+            throw EditError.fileWriteFailed(
+                URL(fileURLWithPath: track.fileURL),
+                "Invalid file URL"
+            )
+        }
+
+        // A patch that changes no tag inside the audio file has nothing to
+        // write there: cover art with embedding off goes to Bòcan's cache and
+        // the rows, and the rating and shuffle flags never leave the database.
+        // Rewriting the file anyway cost a backup, a full TagLib rewrite and a
+        // watcher conflict for every track, and failed outright on a file the
+        // user cannot write (#472).
+        guard Self.needsFileWrite(patch: patch, embedCoverArt: embedCoverArt) else {
+            return try await self.applyWithoutFileWrite(track: track, patch: patch)
+        }
+
+        // Start the root-folder security scope so TagReader / TagWriter can
+        // access this file and create temp siblings in the same directory.
+        // The scope must remain active for the entire read-write-verify cycle.
+        // The handle's `deinit` releases the scope when this function returns.
+        let rootScope = try await self.acquireRootScope(for: track.fileURL)
+
+        // Fallback: if no folder root covers this file (e.g. it was added via
+        // "Add Files…" as an individual root), activate its per-file bookmark.
+        // This grants the sandbox read+write access to the specific file so that
+        // TagReader/TagWriter can open it and FileManager can replace it.
+        var perFileURL: URL? = nil
+        if rootScope == nil, let bookmark = track.fileBookmark {
+            var isStale = false
+            do {
+                let resolved = try URL(
+                    resolvingBookmarkData: bookmark,
+                    options: .withSecurityScope,
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &isStale
+                )
+                if resolved.startAccessingSecurityScopedResource() {
+                    perFileURL = resolved
+                }
+            } catch {
+                // Without the scope the write fails later with a permission
+                // error naming the file, never this cause (#492).
+                self.log.warning("edit.perFileScope.bookmarkUnresolvable", [
+                    "track": track.id ?? -1,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+
+        defer {
+            // `rootScope` releases automatically via `deinit`; only the
+            // per-file fallback URL needs a manual stop.
+            perFileURL?.stopAccessingSecurityScopedResource()
+            _ = rootScope // keep alive until end of function
+        }
+
+        // 2. Read current tags from file
+        let currentTags = try await Task.detached(priority: .userInitiated) {
+            try TagReader().read(from: fileURL)
+        }.value
+
+        // 3. Back up original tags
+        let snapshot = TagsSnapshot(from: currentTags)
+        try await self.backupRing.save(fileURL: track.fileURL, tags: snapshot)
+
+        // 4. Build the new tags by applying the patch
+        var newTags = currentTags
+        Self.applyPatch(patch, to: &newTags)
+
+        // 4b. If embedding is enabled, include the patched cover art bytes in the
+        //     file tags so TagWriter writes them into the audio file.
+        if embedCoverArt, let artPatch = patch.coverArt {
+            if let artData = artPatch {
+                let rawArts = [RawCoverArt(
+                    data: artData,
+                    mimeType: Self.mimeType(for: artData),
+                    pictureType: 3 // APIC type 3 = front cover
+                )]
+                newTags.coverArt = CoverArtExtractor.extract(from: rawArts)
+            } else {
+                // Patch explicitly clears the art → remove from file as well.
+                newTags.coverArt = []
+            }
+        }
+
+        // 5. Write file atomically
+        try await Task.detached(priority: .userInitiated) {
+            try TagWriter().write(newTags, to: fileURL)
+        }.value
+
+        // 6. Re-read to confirm persistence
+        let verified = try await Task.detached(priority: .userInitiated) {
+            try TagReader().read(from: fileURL)
+        }.value
+        _ = verified // read confirmed; we use the patch-applied track for the DB update
+
+        // 7. Handle cover art
+        var coverArtHash: String? = track.coverArtHash
+        if let artPatch = patch.coverArt {
+            if let artData = artPatch {
+                let extracted = CoverArtExtractor.extract(from: [
+                    RawCoverArt(data: artData, mimeType: Self.mimeType(for: artData), pictureType: 3),
+                ])
+                if let persisted = try await self.coverArtCache.persist(extracted, source: "user") {
+                    coverArtHash = persisted.hash
+                }
+            } else {
+                coverArtHash = nil // cleared
+            }
+        }
+
+        // 8. Build updated Track record, normalising artist/album FKs when changed.
+        var updated = patch.applying(to: track)
+        updated.userEdited = true
+
+        // 8a. Stamp the DB row with the file's post-write mtime/size so the
+        //     next scan sees them as identical and does NOT raise a false-positive
+        //     "file changed after your last edit" conflict.
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            if let modDate = attrs[.modificationDate] as? Date {
+                updated.fileMtime = Int64(modDate.timeIntervalSince1970)
+            }
+            if let sz = attrs[.size] as? Int {
+                updated.fileSize = Int64(sz)
+            }
+        } catch {
+            // Without this stamp the next scan sees a changed file and raises
+            // a false "changed since your last edit" conflict (#492).
+            self.log.warning("edit.mtimeStamp.failed", [
+                "file": fileURL.lastPathComponent,
+                "error": String(reflecting: error),
+            ])
+        }
+
+        if patch.artist != nil || patch.albumArtist != nil || patch.album != nil {
+            // Fallback values for the edit. A failed read is not the same as
+            // "the track had no album or artist", which is how it used to
+            // read, so each one is logged (#492).
+            let currentAlbum = await self.albumOrNil(track.albumID, context: "currentAlbum")
+            let currentAlbumArtist = await self.artistOrNil(currentAlbum?.albumArtistID, context: "currentAlbumArtist")
+            let currentTrackArtist = await self.artistOrNil(track.artistID, context: "currentTrackArtist")
+
+            // Resolve track-artist FK.
+            let artistName: String = if let patched = patch.artist {
+                patched ?? "Unknown Artist"
+            } else {
+                currentTrackArtist?.name ?? "Unknown Artist"
+            }
+            let artist = try await self.artistRepo.findOrCreate(
+                name: artistName,
+                sortName: patch.sortArtist ?? nil,
+                musicbrainzID: patch.musicbrainzArtistID ?? nil
+            )
+            updated.artistID = artist.id
+
+            // Resolve album-artist (may differ from track artist).
+            let albumArtistName: String = if let patched = patch.albumArtist {
+                patched ?? artistName
+            } else {
+                currentAlbumArtist?.name ?? artistName
+            }
+            let albumArtist = albumArtistName == artistName
+                ? artist
+                : try await self.artistRepo.findOrCreate(
+                    name: albumArtistName,
+                    sortName: patch.sortAlbumArtist ?? nil,
+                    musicbrainzID: patch.musicbrainzAlbumArtistID ?? nil
+                )
+
+            // Resolve album FK.
+            let albumTitle: String = if let patched = patch.album {
+                patched ?? "Unknown Album"
+            } else {
+                currentAlbum?.title ?? "Unknown Album"
+            }
+            let album = try await self.albumRepo.findOrCreate(title: albumTitle, albumArtistID: albumArtist.id)
+            updated.albumID = album.id
+
+            // Propagate the edited year to the album row when the patch
+            // explicitly includes a year change (outer optional non-nil means
+            // the field was deliberately patched; inner optional nil means
+            // the user cleared the year).
+            if let newYear = patch.year, let albumID = album.id {
+                try await self.albumRepo.setYear(albumID: albumID, year: newYear)
+            }
+        }
+
+        return (updated, coverArtHash)
+    }
+
+    /// Whether `patch` has anything to write into the audio file: a tag the
+    /// file carries, or cover art while the user has embedding switched on.
+    private static func needsFileWrite(patch: TrackTagPatch, embedCoverArt: Bool) -> Bool {
+        patch.touchesFileTags || (embedCoverArt && patch.coverArt != nil)
+    }
+
+    /// Applies a patch that touches no file tag: the art is cached, the row
+    /// carries the change, and the audio file is never opened (#472).
+    ///
+    /// The backup entry records the art rows rather than the file's tags, so
+    /// undo restores the previous hash and album link.
+    private func applyWithoutFileWrite(
+        track: Track,
+        patch: TrackTagPatch
+    ) async throws -> (track: Track, coverArtHash: String?) {
+        var coverArtHash: String? = track.coverArtHash
+        if let artPatch = patch.coverArt {
+            if let artData = artPatch {
+                let extracted = CoverArtExtractor.extract(from: [
+                    RawCoverArt(data: artData, mimeType: Self.mimeType(for: artData), pictureType: 3),
+                ])
+                if let persisted = try await self.coverArtCache.persist(extracted, source: "user") {
+                    coverArtHash = persisted.hash
+                }
+            } else {
+                coverArtHash = nil // cleared
+            }
+        }
+
+        try await self.backupRing.save(
+            fileURL: track.fileURL,
+            tags: nil,
+            databaseOnly: self.artRestorePoint(for: track)
+        )
+
+        var updated = patch.applying(to: track)
+        updated.userEdited = true
+        self.log.debug("edit.track.databaseOnly", ["id": track.id ?? -1])
+        return (updated, coverArtHash)
+    }
+
+    /// The cover-art rows as they stand before a database-only edit, so undo
+    /// can put them back (#472).
+    private func artRestorePoint(for track: Track) async -> BackupRing.DatabaseOnlyRestore {
+        var album: Album? = nil
+        if let albumID = track.albumID {
+            album = await self.albumOrNil(albumID, context: "artRestorePoint")
+        }
+        return BackupRing.DatabaseOnlyRestore(
+            trackCoverArtHash: track.coverArtHash,
+            albumID: track.albumID,
+            albumCoverArtHash: album?.coverArtHash,
+            albumCoverArtPath: album?.coverArtPath
+        )
+    }
+
+    private static func applyPatch(_ patch: TrackTagPatch, to tags: inout TrackTags) {
+        if let v = patch.title {
+            tags.title = v
+        }
+        if let v = patch.artist {
+            tags.artist = v
+        }
+        if let v = patch.albumArtist {
+            tags.albumArtist = v
+        }
+        if let v = patch.album {
+            tags.album = v
+        }
+        if let v = patch.genre {
+            tags.genre = v
+        }
+        if let v = patch.composer {
+            tags.composer = v
+        }
+        if let v = patch.comment {
+            tags.comment = v
+        }
+        if let v = patch.trackNumber {
+            tags.trackNumber = v
+        }
+        if let v = patch.trackTotal {
+            tags.trackTotal = v
+        }
+        if let v = patch.discNumber {
+            tags.discNumber = v
+        }
+        if let v = patch.discTotal {
+            tags.discTotal = v
+        }
+        if let v = patch.year {
+            tags.year = v
+        }
+        if let v = patch.bpm {
+            tags.bpm = v
+        }
+        if let v = patch.key {
+            tags.key = v
+        }
+        if let v = patch.isrc {
+            tags.isrc = v
+        }
+        if let v = patch.musicbrainzTrackID {
+            tags.musicbrainzTrackID = v
+        }
+        if let v = patch.musicbrainzRecordingID {
+            tags.musicbrainzRecordingID = v
+        }
+        if let v = patch.musicbrainzReleaseID {
+            tags.musicbrainzReleaseID = v
+        }
+        if let v = patch.musicbrainzReleaseGroupID {
+            tags.musicbrainzReleaseGroupID = v
+        }
+        if let v = patch.musicbrainzArtistID {
+            tags.musicbrainzArtistID = v
+        }
+        if let v = patch.musicbrainzAlbumArtistID {
+            tags.musicbrainzAlbumArtistID = v
+        }
+        if let v = patch.lyrics {
+            tags.lyrics = v
+        }
+        // syncedLyrics writes to the same audio-file tag as plain lyrics;
+        // the isSynced distinction is maintained in the lyrics DB table only.
+        if let v = patch.syncedLyrics {
+            tags.lyrics = v
+        }
+        if let v = patch.sortArtist {
+            tags.sortArtist = v
+        }
+        if let v = patch.sortAlbumArtist {
+            tags.sortAlbumArtist = v
+        }
+        if let v = patch.sortAlbum {
+            tags.sortAlbum = v
+        }
+        if let v = patch.replaygainTrackGain {
+            let rg = tags.replayGain
+            tags.replayGain = ReplayGain(
+                trackGain: v,
+                trackPeak: rg.trackPeak,
+                albumGain: rg.albumGain,
+                albumPeak: rg.albumPeak
+            )
+        }
+    }
+
+    /// Detects the MIME type of image `data` from its magic bytes.
+    ///
+    /// Returns `"image/jpeg"` as the default for unrecognised formats because
+    /// `ArtworkEditor.normalise()` converts large images to JPEG, making JPEG
+    /// the most common format for patched cover art.
+    private static func mimeType(for data: Data) -> String {
+        guard data.count >= 4 else { return "image/jpeg" }
+        let header = data.prefix(4)
+        // PNG: 89 50 4E 47
+        if header.starts(with: [0x89, 0x50, 0x4E, 0x47]) {
+            return "image/png"
+        }
+        // JPEG: FF D8 FF
+        if header.starts(with: [0xFF, 0xD8, 0xFF]) {
+            return "image/jpeg"
+        }
+        // WebP: 52 49 46 46 ... 57 45 42 50 (need 12 bytes)
+        if data.count >= 12, header.starts(with: [0x52, 0x49, 0x46, 0x46]),
+           data[8 ..< 12].elementsEqual([0x57, 0x45, 0x42, 0x50]) {
+            return "image/webp"
+        }
+        return "image/jpeg"
+    }
+
+    // MARK: - Security scope
+
+    /// Acquires the security scope of the library root that contains
+    /// `fileURLString` and returns an RAII handle whose `deinit` releases it.
+    /// Caller binds the handle to a `let` for the duration of the operation;
+    /// no manual `defer` is required.
+    ///
+    /// Returns `nil` when no matching root exists (e.g. in-memory test DBs) or
+    /// when the bookmark cannot be resolved — file I/O is then attempted with
+    /// the raw URL, which works outside the sandbox.
+    /// The album row, or nil with a log line rather than silence (#492).
+    private func albumOrNil(_ id: Int64?, context: String) async -> Album? {
+        guard let id else { return nil }
+        do {
+            return try await self.albumRepo.fetch(id: id)
+        } catch {
+            self.log.warning("edit.fallbackRow.albumLookupFailed", [
+                "album": id,
+                "context": context,
+                "error": String(reflecting: error),
+            ])
+            return nil
+        }
+    }
+
+    /// The artist row, or nil with a log line rather than silence (#492).
+    private func artistOrNil(_ id: Int64?, context: String) async -> Artist? {
+        guard let id else { return nil }
+        do {
+            return try await self.artistRepo.fetch(id: id)
+        } catch {
+            self.log.warning("edit.fallbackRow.artistLookupFailed", [
+                "artist": id,
+                "context": context,
+                "error": String(reflecting: error),
+            ])
+            return nil
+        }
+    }
+
+    private func acquireRootScope(for fileURLString: String) async throws -> RootScopeHandle? {
+        let roots: [LibraryRoot]
+        do {
+            roots = try await self.rootRepo.fetchAll()
+        } catch {
+            // No scope means the raw write is attempted instead, and its
+            // failure names the file rather than this cause (#492).
+            self.log.warning("edit.root_scope.rootsUnavailable", ["error": String(reflecting: error)])
+            return nil
+        }
+        guard let filePath = URL(string: fileURLString)?.path else { return nil }
+        guard let root = roots.first(where: {
+            let prefix = $0.path == "/" ? "/" : $0.path + "/"
+            return filePath.hasPrefix(prefix)
+        }) else { return nil }
+        var isStale = false
+        let rootURL: URL
+        do {
+            rootURL = try URL(
+                resolvingBookmarkData: root.bookmark,
+                options: .withSecurityScope,
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+        } catch {
+            self.log.warning("edit.root_scope.bookmark_unresolvable", [
+                "filePath": filePath,
+                "error": String(reflecting: error),
+            ])
+            return nil
+        }
+        guard let handle = RootScopeHandle(url: rootURL) else {
+            self.log.warning("edit.root_scope.failed", ["filePath": filePath])
+            return nil
+        }
+        return handle
+    }
+}

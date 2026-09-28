@@ -1,0 +1,242 @@
+import Foundation
+import Observability
+import Scrobble
+import SwiftUI
+
+// MARK: - ScrobbleSettingsViewModel
+
+/// Drives `ScrobbleSettingsView` and `ConnectSheet`. Holds connection state
+/// for both providers, surfaces queue stats, and brokers connect/disconnect
+/// flows. The actual scrobbling pipeline lives in `ScrobbleService`; this view
+/// model is a thin façade so SwiftUI can stay declarative.
+@MainActor
+public final class ScrobbleSettingsViewModel: ObservableObject {
+    public struct ProviderStatus: Sendable, Equatable {
+        public let id: String
+        public let displayName: String
+        public var isConnected: Bool
+        public var username: String?
+    }
+
+    @Published public private(set) var lastFm: ProviderStatus
+    @Published public private(set) var listenBrainz: ProviderStatus
+    @Published public private(set) var rocksky: ProviderStatus
+    @Published public private(set) var stats: ScrobbleQueueRepository.Stats?
+    @Published public private(set) var recentScrobbles: [ScrobbleQueueRepository.RecentRow] = []
+    @Published public var isAuthenticatingLastFm = false
+    @Published public var lastFmAuthError: String?
+    @Published public var listenBrainzTokenError: String?
+    @Published public var rockskyConnectError: String?
+
+    private let service: ScrobbleService
+    private let credentials: CredentialsAdapter
+    private let openURL: @Sendable (URL) -> Void
+    private let log = AppLogger.make(.scrobble)
+    private var statsTask: Task<Void, Never>?
+    private var recentTask: Task<Void, Never>?
+    /// Number of visible surfaces (settings pane, recent-scrobbles sheet)
+    /// currently relying on the observation streams. The streams start when
+    /// this goes 0 -> 1 and stop when it returns to 0, so dismissing the sheet
+    /// over a still-visible settings pane does not cancel the pane's streams.
+    private var observerCount = 0
+
+    public init(
+        service: ScrobbleService,
+        credentials: CredentialsAdapter,
+        openURL: @escaping @Sendable (URL) -> Void
+    ) {
+        self.service = service
+        self.credentials = credentials
+        self.openURL = openURL
+        self.lastFm = .init(id: "lastfm", displayName: "Last.fm", isConnected: false, username: nil)
+        self.listenBrainz = .init(id: "listenbrainz", displayName: "ListenBrainz", isConnected: false, username: nil)
+        self.rocksky = .init(id: "rocksky", displayName: "Rocksky", isConnected: false, username: nil)
+    }
+
+    public func appear() {
+        Task { await self.refreshConnectionState() }
+        self.observerCount += 1
+        guard self.observerCount == 1 else { return }
+        self.statsTask?.cancel()
+        self.recentTask?.cancel()
+        let repo = self.service.queueRepository
+        self.statsTask = Task { [weak self] in
+            do {
+                for try await stats in repo.observeStats() {
+                    await MainActor.run { self?.stats = stats }
+                }
+            } catch {
+                AppLogger.make(.scrobble).warning("scrobble.stats.stream.failed", ["error": String(reflecting: error)])
+            }
+        }
+        self.recentTask = Task { [weak self] in
+            do {
+                for try await rows in repo.observeRecent(limit: 50) {
+                    await MainActor.run { self?.recentScrobbles = rows }
+                }
+            } catch {
+                AppLogger.make(.scrobble).warning("scrobble.recent.stream.failed", ["error": String(reflecting: error)])
+            }
+        }
+    }
+
+    public func disappear() {
+        self.observerCount = max(0, self.observerCount - 1)
+        guard self.observerCount == 0 else { return }
+        self.statsTask?.cancel()
+        self.statsTask = nil
+        self.recentTask?.cancel()
+        self.recentTask = nil
+    }
+
+    // MARK: Connection state
+
+    public func refreshConnectionState() async {
+        let lastFmKey: String? = await self.tryFetch { try await self.credentials.lastFmSessionKey() }
+        let lastFmUser: String? = await self.tryFetch { try await self.credentials.lastFmUsername() }
+        let listenToken: String? = await self.tryFetch { try await self.credentials.listenBrainzToken() }
+        let listenUser: String? = await self.tryFetch { try await self.credentials.listenBrainzUsername() }
+        self.lastFm = .init(
+            id: "lastfm",
+            displayName: "Last.fm",
+            isConnected: !(lastFmKey?.isEmpty ?? true),
+            username: lastFmUser
+        )
+        self.listenBrainz = .init(
+            id: "listenbrainz",
+            displayName: "ListenBrainz",
+            isConnected: !(listenToken?.isEmpty ?? true),
+            username: listenUser
+        )
+        let rockskyKey: String? = await self.tryFetch { try await self.credentials.rockskyApiKey() }
+        self.rocksky = .init(
+            id: "rocksky",
+            displayName: "Rocksky",
+            isConnected: !(rockskyKey?.isEmpty ?? true),
+            username: nil
+        )
+    }
+
+    private func tryFetch(_ body: @Sendable () async throws -> String?) async -> String? {
+        do { return try await body() } catch { return nil }
+    }
+
+    // MARK: Last.fm flow
+
+    public func connectLastFm() async {
+        self.isAuthenticatingLastFm = true
+        self.lastFmAuthError = nil
+        defer { self.isAuthenticatingLastFm = false }
+
+        guard let provider = await self.service.provider(id: "lastfm") as? LastFmProvider else {
+            self.lastFmAuthError = L10n.string("Last.fm is not configured for this local build.")
+            return
+        }
+        let auth = LastFmAuth(
+            provider: provider,
+            credentials: self.credentials,
+            openURL: self.openURL
+        )
+        do {
+            _ = try await auth.connect()
+            await self.refreshConnectionState()
+        } catch {
+            self.log.error("scrobble.lastfm.connect.failed", ["error": String(reflecting: error)])
+            self.lastFmAuthError = self.message(for: error)
+        }
+    }
+
+    public func disconnectLastFm() async {
+        do {
+            try await self.credentials.clearLastFmSession()
+        } catch {
+            // The credentials are still in the Keychain, so the refresh below
+            // shows the account as connected: say why (#480).
+            self.log.error("scrobble.lastfm.disconnect.failed", ["error": String(reflecting: error)])
+            self.lastFmAuthError = self.message(for: error)
+        }
+        await self.refreshConnectionState()
+    }
+
+    // MARK: ListenBrainz flow
+
+    public func connectListenBrainz(token: String) async {
+        self.listenBrainzTokenError = nil
+        guard let provider = await self.service.provider(id: "listenbrainz") as? ListenBrainzProvider else {
+            self.listenBrainzTokenError = L10n.string("ListenBrainz is unavailable.")
+            return
+        }
+        do {
+            let user = try await provider.validate(token: token)
+            try await self.credentials.setListenBrainz(token: token, username: user)
+            await self.refreshConnectionState()
+        } catch {
+            self.log.error("scrobble.listenbrainz.connect.failed", ["error": String(reflecting: error)])
+            self.listenBrainzTokenError = self.message(for: error)
+        }
+    }
+
+    public func disconnectListenBrainz() async {
+        do {
+            try await self.credentials.clearListenBrainz()
+        } catch {
+            self.log.error("scrobble.listenbrainz.disconnect.failed", ["error": String(reflecting: error)])
+            self.listenBrainzTokenError = self.message(for: error)
+        }
+        await self.refreshConnectionState()
+    }
+
+    // MARK: Rocksky flow
+
+    public func connectRocksky(apiKey: String) async {
+        self.rockskyConnectError = nil
+        do {
+            try await self.credentials.setRocksky(apiKey: apiKey)
+            await self.refreshConnectionState()
+        } catch {
+            self.log.error("scrobble.rocksky.connect.failed", ["error": String(reflecting: error)])
+            self.rockskyConnectError = self.message(for: error)
+        }
+    }
+
+    public func disconnectRocksky() async {
+        do {
+            try await self.credentials.clearRocksky()
+        } catch {
+            self.log.error("scrobble.rocksky.disconnect.failed", ["error": String(reflecting: error)])
+            self.rockskyConnectError = self.message(for: error)
+        }
+        await self.refreshConnectionState()
+    }
+
+    // MARK: Queue actions
+
+    public func resubmitDeadLetters() async {
+        let repo = self.service.queueRepository
+        do {
+            try await repo.reviveDead()
+            await self.service.kickAll()
+        } catch {
+            self.log.warning("scrobble.dead.revive.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    public func purgeDeadLetters() async {
+        let repo = self.service.queueRepository
+        do {
+            try await repo.purgeDead()
+        } catch {
+            // The user pressed Purge and the dead letters are still there, with
+            // nothing to say the purge did not happen (#491).
+            self.log.warning("scrobble.dead.purge.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// `ScrobbleError` conforms to `LocalizedError` (#471), so its reason now
+    /// survives `localizedDescription`. The old special case stringified the
+    /// enum instead, which put a raw case dump such as
+    /// `notAuthenticated(provider: "lastfm")` into the Settings error field.
+    private func message(for error: Error) -> String {
+        error.localizedDescription
+    }
+}

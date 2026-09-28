@@ -1,0 +1,1808 @@
+// swiftlint:disable file_length
+import Acoustics
+import AppKit
+import AudioEngine
+import Combine
+import Foundation
+import Library
+import Observability
+import Persistence
+import Playback
+import Scrobble
+import Subsonic
+import UniformTypeIdentifiers
+
+// MARK: - UIStateV2
+
+/// Serialised sidebar + table UI state persisted to `settings` key `ui.state.v2`.
+///
+/// ADR-005 audit H2: `sidebarWidth` is persisted here as a fallback for the
+/// AppKit autosave name set on `NSSplitView` — autosave covers the common
+/// case (window restore on relaunch); the explicit value lets us seed a
+/// freshly-installed window or a profile copied between machines.
+struct UIStateV2: Codable {
+    var selectedDestination: SidebarDestination = .songs
+    var sortColumn: TrackSortColumn = .artist
+    var sortAscending = true
+    /// Width of the navigation split-view's sidebar column, in points.
+    /// `nil` when no width has been recorded yet (first launch).
+    var sidebarWidth: Double?
+    /// Persisted IDs of expanded playlist folders in the sidebar tree.
+    var expandedPlaylistFolders: Set<Int64> = []
+    /// ADR-035 step 9: expand/collapse state for top-level sidebar
+    /// sections plus per-Subsonic-server disclosure state.
+    var sectionExpansion: SidebarSectionExpansion = .init()
+
+    private enum CodingKeys: String, CodingKey {
+        case selectedDestination
+        case sortColumn
+        case sortAscending
+        case sidebarWidth
+        case expandedPlaylistFolders
+        case sectionExpansion
+    }
+
+    init(
+        selectedDestination: SidebarDestination = .songs,
+        sortColumn: TrackSortColumn = .artist,
+        sortAscending: Bool = true,
+        sidebarWidth: Double? = nil,
+        expandedPlaylistFolders: Set<Int64> = [],
+        sectionExpansion: SidebarSectionExpansion = .init()
+    ) {
+        self.selectedDestination = selectedDestination
+        self.sortColumn = sortColumn
+        self.sortAscending = sortAscending
+        self.sidebarWidth = sidebarWidth
+        self.expandedPlaylistFolders = expandedPlaylistFolders
+        self.sectionExpansion = sectionExpansion
+    }
+
+    /// Forward-compatible decoder for old payloads (V1) that do not include
+    /// `expandedPlaylistFolders` or `sectionExpansion`.
+    init(from decoder: any Swift.Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.selectedDestination = try c.decode(SidebarDestination.self, forKey: .selectedDestination)
+        self.sortColumn = try c.decode(TrackSortColumn.self, forKey: .sortColumn)
+        self.sortAscending = try c.decode(Bool.self, forKey: .sortAscending)
+        self.sidebarWidth = try c.decodeIfPresent(Double.self, forKey: .sidebarWidth)
+        self.expandedPlaylistFolders = try c.decodeIfPresent(Set<Int64>.self, forKey: .expandedPlaylistFolders) ?? []
+        self.sectionExpansion = try c.decodeIfPresent(SidebarSectionExpansion.self, forKey: .sectionExpansion)
+            ?? .init()
+    }
+}
+
+// MARK: - LibraryViewModel
+
+/// Root view-model that owns all child view-models and wires the play action.
+///
+/// Injected into `RootView` via the environment and passed down to child views.
+@MainActor
+public final class LibraryViewModel: ObservableObject { // swiftlint:disable:this type_body_length
+    // MARK: - Published state
+
+    @Published public var selectedDestination: SidebarDestination = .songs {
+        didSet {
+            // Same CommandGroup-staleness mirror as `isScanning` below: the
+            // View menu's "View as" toggles gate on whether the active
+            // destination is a collection listing. `UserDefaults.set`
+            // broadcasts the key-agnostic `didChangeNotification` on every
+            // call regardless of whether the value actually changed, and
+            // `BocanCommands` subscribes via `@AppStorage` — an unguarded
+            // write here fired that broadcast on every single navigation
+            // click (most of which aren't even entering/leaving a listing),
+            // reconstructing the menu bar on the main thread often enough
+            // to audibly crackle live playback. Only write on a real flip.
+            let isListing = switch self.selectedDestination {
+            case .artists, .genres, .composers:
+                true
+
+            default:
+                false
+            }
+            if UserDefaults.standard.bool(forKey: "library.collectionListingActive") != isListing {
+                UserDefaults.standard.set(isListing, forKey: "library.collectionListingActive")
+            }
+            // Same rule for Track > Get Info, which opens the artist's Get
+            // Info when an artist page is showing and no track is selected (#413).
+            let isArtistPage = if case .artist = self.selectedDestination {
+                true
+            } else {
+                false
+            }
+            if UserDefaults.standard.bool(forKey: "library.artistPageActive") != isArtistPage {
+                UserDefaults.standard.set(isArtistPage, forKey: "library.artistPageActive")
+            }
+        }
+    }
+
+    @Published public var searchQuery = ""
+
+    /// The text in the toolbar search field. On History it is that page's own
+    /// query; everywhere else it is the library query, and the two never mix
+    /// (ADR-094 slice 2). Computed over two properties that are observed on
+    /// their own, so it must not be `@Published` itself: a publisher here
+    /// would fire the library debounce a second time.
+    public var searchText: String {
+        get { self.selectedDestination == .history ? self.history.query : self.searchQuery }
+        set {
+            if self.selectedDestination == .history {
+                self.history.query = newValue
+            } else {
+                self.searchQuery = newValue
+            }
+        }
+    }
+
+    /// ADR-035 step 9: expand/collapse state for top-level sidebar
+    /// sections, plus per-Subsonic-server disclosure state. Mutated directly
+    /// by `Sidebar` via SwiftUI bindings; persistence is driven by a
+    /// debounced Combine sink installed in `init`.
+    @Published public var sectionExpansion: SidebarSectionExpansion = .init()
+
+    /// ADR-035 step 9: Subsonic servers the user has chosen to show in the
+    /// sidebar. Empty until `reloadSubsonicServers()` runs (no-op when no
+    /// `SubsonicSidebarListing` was supplied at init).
+    @Published public private(set) var subsonicServers: [SubsonicSidebarServer] = []
+
+    /// Subsonic servers the user has hidden from the sidebar. Surfaced by the
+    /// sidebar's "Hidden Sources" submenu so they can be re-enabled with one
+    /// click without round-tripping through Settings → Sources.
+    @Published public private(set) var hiddenSubsonicServers: [SubsonicSidebarServer] = []
+
+    /// ADR-035 step 17: live connection state per Subsonic server, used by
+    /// the sidebar status dot and the per-view offline banner. Updated by
+    /// the optional `SubsonicConnectionObserving` injected at init.
+    @Published public private(set) var subsonicConnectionStates: [UUID: SubsonicSidebarConnectionState] = [:]
+
+    /// The server the user has asked to remove, awaiting a confirmation dialog.
+    /// Non-nil drives the sidebar's destructive confirm-delete (#306).
+    @Published public var subsonicServerPendingRemoval: SubsonicSidebarServer?
+
+    // MARK: - Navigation history
+
+    @Published public private(set) var canGoBack = false
+    @Published public private(set) var canGoForward = false
+    /// One history entry: the destination plus the search query that was
+    /// active there, so back/forward restores the filter the user left
+    /// behind (drilling into a detail page clears the query; without the
+    /// capture, Esc-out of an album always landed on the unfiltered grid).
+    struct HistoryEntry {
+        let destination: SidebarDestination
+        let searchQuery: String
+    }
+
+    private var backStack: [HistoryEntry] = []
+    private var forwardStack: [HistoryEntry] = []
+    private static let historyLimit = 50
+    /// The most recent history destination, for Esc drill-out's
+    /// plausible-container check (#378).
+    var lastHistoryEntry: SidebarDestination? {
+        self.backStack.last?.destination
+    }
+
+    // MARK: - Scroll restoration
+
+    /// Vertical scroll offset of an artist's album strip, keyed by artist id,
+    /// snapshotted when opening one of that artist's albums so `ArtistDetailView`
+    /// can restore the strip when it's rebuilt on return (mirrors the album-grid
+    /// scroll restore, #349). Plain `var`, not `@Published`: it must not trigger
+    /// a re-render.
+    public var artistAlbumScrollOffsets: [Int64: Double] = [:]
+
+    /// The genre last navigated into, snapshotted so `GenresView` can scroll it
+    /// back into view when the list is rebuilt on return (#349). Plain `var`,
+    /// not `@Published`: it must not trigger a re-render.
+    public var lastVisitedGenre: String?
+
+    /// The composer last navigated into, snapshotted so `ComposersView` can
+    /// scroll it back into view when the list is rebuilt on return (#349). Plain
+    /// `var`, not `@Published`: it must not trigger a re-render.
+    public var lastVisitedComposer: String?
+
+    /// Grid-mode scroll offsets for the genre and composer grids, snapshotted on
+    /// open so `CollectionCardGrid` can restore them when the view (which owns no
+    /// view model) is rebuilt on return (#349). Plain `var`s, not `@Published`.
+    public var genreGridScrollOffset: Double = 0
+    public var composerGridScrollOffset: Double = 0
+
+    // MARK: - Tag editor state
+
+    /// Non-nil when the tag editor sheet should be presented.
+    @Published public var tagEditorTrackIDs: [Int64]?
+    /// Set with `tagEditorTrackIDs` when Get Info was opened for one album,
+    /// so the editor can show the album Deep Dive (#413).
+    public private(set) var tagEditorAlbumID: Int64?
+    /// The artist whose Get Info sheet is open (#413).
+    @Published public var artistInfo: ArtistInfoRequest?
+    /// `true` when at least one track is selected in the current track table.
+    @Published public var hasTrackSelection = false
+    /// `true` when exactly one track is selected — enables the "Identify Track…" toolbar button.
+    @Published public var hasSingleTrackSelection = false
+    /// Shared `MetadataEditService` (nil only if the backup directory is unavailable).
+    public let metadataEditService: MetadataEditService?
+
+    // MARK: - Identify track state
+
+    /// Non-nil when the identify-track sheet should be shown.
+    @Published public var identifyTrack: Track?
+    /// Shared queue for acoustic identification requests.
+    public let fingerprintQueue: FingerprintQueue?
+
+    // MARK: - Error state
+
+    /// Set when playback fails; cleared when the user dismisses the alert.
+    @Published public var playbackErrorMessage: String?
+
+    /// Set when a single-track re-scan fails so the UI can surface a sheet
+    /// distinct from the playback-error alert. Cleared when the user
+    /// dismisses the alert.
+    @Published public var rescanErrorMessage: String?
+
+    // MARK: - Lightweight toast surface
+
+    /// Transient confirmation toast (e.g. "Re-scanned «Title»"). Auto-cleared
+    /// after a short delay by ``showToast(_:)``.
+    @Published public var toast: ToastMessage?
+
+    /// Identifier for an inflight toast-dismiss task so a newer toast can
+    /// cancel the auto-dismiss for a stale one.
+    private var toastDismissID = UUID()
+
+    /// Shows a toast and auto-clears it after 2 seconds. Calling again before
+    /// the timer fires replaces the toast and resets the timer.
+    public func showToast(_ message: ToastMessage) {
+        let token = UUID()
+        self.toastDismissID = token
+        self.toast = message
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, self.toastDismissID == token else { return }
+            self.toast = nil
+        }
+    }
+
+    // MARK: - ReplayGain analysis state
+
+    /// Non-nil while a batch ReplayGain analysis is running.
+    @Published public var replayGainProgress: ReplayGainBatchProgress?
+
+    // MARK: - Provenance analysis state (ADR-075 slice 3)
+
+    /// Non-nil while a transcode-detection batch is running, or when one has
+    /// completed and its banner has not been dismissed yet. The batch logic
+    /// lives in `LibraryViewModel+Provenance.swift`.
+    @Published public var provenanceProgress: ProvenanceBatchProgress?
+
+    /// Handle for the running provenance batch so Cancel can reach it.
+    var provenanceTask: Task<Void, Never>?
+
+    // MARK: - Listening-history import state (ADR-076 slice 1)
+
+    /// True while a Last.fm export import is running; the Listening
+    /// Behaviour pane shows a spinner and reloads its counts on completion.
+    /// The import logic lives in `LibraryViewModel+ListenImport.swift`.
+    @Published public var isImportingListens = false
+
+    // MARK: - Scan state
+
+    @Published public var isScanning = false {
+        didSet {
+            // Mirrored into defaults for the menu bar: items injected into
+            // system menus via CommandGroup evaluate their `.disabled` only
+            // when the Commands body rebuilds, and a plain `let` view model
+            // never triggers one, so the File-menu rescan items froze in
+            // whatever state they were built with. An @AppStorage read in
+            // BocanCommands both rebuilds the body and stays fresh
+            // (ADR-081 enablement matrix; the established live-label
+            // pattern from App/CLAUDE.md). Guarded the same way as
+            // `selectedDestination` above: only write on an actual flip, so
+            // a redundant same-value set can never fire the app-wide
+            // `didChangeNotification` broadcast.
+            if UserDefaults.standard.bool(forKey: "library.scanActive") != self.isScanning {
+                UserDefaults.standard.set(self.isScanning, forKey: "library.scanActive")
+            }
+        }
+    }
+
+    /// `true` from the moment a scan begins against an empty library until the
+    /// post-scan `tracks.load()` has completed.  `ContentPane` uses this to
+    /// show a full-pane progress overlay instead of an empty tracks list —
+    /// avoiding the confusing flash of "nothing here" during a first-ever scan.
+    /// For re-scans (library already populated) this stays `false` and the
+    /// existing track list remains visible throughout.
+    @Published public var isInitialScan = false
+    @Published public var scanWalked = 0
+    @Published public var scanInserted = 0
+    @Published public var scanUpdated = 0
+    @Published public var scanCurrentPath = ""
+    @Published public var scanSummary: ScanProgress.Summary?
+    @Published public var libraryRoots: [LibraryRoot] = []
+    @Published public var isDragTargeted = false
+
+    // MARK: - Playlist import/export sheet flags
+
+    @Published public var isPlaylistImportSheetPresented = false
+    @Published public var playlistExportRequest: PlaylistExportRequest?
+
+    // MARK: - Clear-queue confirmation (issue #260)
+
+    /// Drives the "Clear the queue?" confirmation presented from `BocanRootView`,
+    /// raised by the Playback menu's "Clear Queue" command for a non-trivial queue.
+    @Published public var clearQueueConfirmationPresented = false
+
+    /// Number of queued tracks, shown in the confirmation message. Always at or
+    /// above the confirmation threshold while the dialog is visible.
+    @Published public private(set) var clearQueueItemCount = 0
+
+    // MARK: - Tools sheet flags
+
+    /// Set to `true` to present the "Fetch Missing Cover Art" progress sheet.
+    @Published public var isBatchCoverArtSheetPresented = false
+
+    /// Set to `true` to present the "Find Duplicates" review sheet.
+    @Published public var isDuplicateReviewSheetPresented = false
+
+    /// Presents the batch cover-art fetch sheet.
+    public func showBatchCoverArt() {
+        self.isBatchCoverArtSheetPresented = true
+    }
+
+    /// Presents the duplicate-track review sheet.
+    public func showDuplicateReview() {
+        self.isDuplicateReviewSheetPresented = true
+    }
+
+    public struct PlaylistExportRequest: Identifiable, Equatable {
+        public let id: Int64
+        public let name: String
+    }
+
+    // MARK: - Child view-models
+
+    public let tracks: TracksViewModel
+    public let albums: AlbumsViewModel
+    /// The History destination's rows and its own, independent search (ADR-094).
+    public let history: HistoryViewModel
+    public let artists: ArtistsViewModel
+    public let nowPlaying: NowPlayingViewModel
+    public let playlistSidebar: PlaylistSidebarViewModel
+    public let playlistService: PlaylistService
+    public let smartPlaylistService: SmartPlaylistService
+    public let playlistImporter: PlaylistImportService
+    public let playlistExporter: PlaylistExportService
+
+    /// The local internet radio station catalog (ADR-078). `RadioView` builds
+    /// its view model on this; playback goes through `play(radioStation:)`.
+    public let radioStations: RadioStationRepository
+    /// ADR-044: drives the Podcasts home grid and show episode list.
+    public let podcasts: PodcastsViewModel
+
+    // MARK: - ADR-037 seams (nil when Podcasts feature not wired in)
+
+    public let podcastLibrary: (any PodcastLibraryDataSource)?
+    public let podcastActions: (any PodcastActions)?
+    /// ADR-045: dual-index search + detail provider. Nil until wired in App.
+    public let podcastSearch: (any PodcastSearchProviding)?
+    /// ADR-051: transcript fetch/cache provider. Nil until wired in App.
+    public let podcastTranscript: (any PodcastTranscriptProviding)?
+
+    // MARK: - Dependencies
+
+    public let database: Database
+    /// Deep Dive reports (#413); built lazily, reports are cached on disk.
+    public private(set) lazy var deepDiveService = DeepDiveService(database: self.database)
+    private let engine: any Transport
+    private let settingsRepo: SettingsRepository
+    let albumRepo: AlbumRepository
+    let artistRepo: ArtistRepository
+    let scanner: LibraryScanner?
+    let scrobbleService: ScrobbleService?
+    var scanTask: Task<Void, Never>?
+    /// Pending debounced reload task scheduled by `scheduleWatcherReload()`.
+    /// Cancelled and replaced whenever a new FSEvents batch arrives so that
+    /// a burst of back-to-back file changes collapses into a single refresh.
+    var watcherReloadTask: Task<Void, Never>?
+    /// ADR-007 audit L2: scan progress is coalesced into these "pending"
+    /// counters and flushed to the `@Published` properties at ~4 Hz so a
+    /// 50k-file scan doesn't drown the main actor in objectWillChange ticks
+    /// while audio is playing.
+    var pendingScanWalked = 0
+    var pendingScanInserted = 0
+    var pendingScanUpdated = 0
+    var pendingScanCurrentPath = ""
+    var scanFlushTask: Task<Void, Never>?
+    private var searchQueryCancellable: AnyCancellable?
+    private var expandedFoldersCancellable: AnyCancellable?
+    private var sectionExpansionCancellable: AnyCancellable?
+    private var newPlaylistSelectionCancellable: AnyCancellable?
+    /// Single-row observation of the now-playing track, re-subscribed whenever
+    /// the active track changes. Keeps the Songs table's Plays / Date Played
+    /// columns live when a play is counted mid-playback.
+    private var nowPlayingStatsTask: Task<Void, Never>?
+    /// MusicBrainz artist lookup progress for the scan banner (#401); nil
+    /// until the first count, then live from the database.
+    @Published public private(set) var enrichmentProgress: ArtistEnrichmentProgress?
+    private var enrichmentProgressTask: Task<Void, Never>?
+    private var selectedDestinationCancellable: AnyCancellable?
+    /// The manual playlist whose membership is currently driving the queue.
+    /// `nil` when the queue was populated from any other source (Songs, Albums, etc.).
+    var activePlaylistID: Int64?
+    /// Background task observing `activePlaylistID`'s membership so that
+    /// adds/removes/reorders are mirrored into the live queue.
+    var playlistSyncTask: Task<Void, Never>?
+    /// Source of Subsonic servers for the sidebar (ADR-035 step 9). `nil`
+    /// when running without the Subsonic module wired in (tests, snapshots).
+    private let subsonicSidebarListing: SubsonicSidebarListing?
+
+    /// ADR-035 step 16: emits server IDs whose capabilities changed so the
+    /// sidebar can grow new rows without a relaunch.
+    private let subsonicCapabilityObserver: (any SubsonicCapabilityChangeObserving)?
+    private var subsonicCapabilityTask: Task<Void, Never>?
+
+    /// ADR-035 step 17: emits per-server connection-state changes so the
+    /// sidebar status dot and per-view offline banner stay current.
+    private let subsonicConnectionObserver: (any SubsonicConnectionObserving)?
+    private var subsonicConnectionTask: Task<Void, Never>?
+
+    /// ADR-035 step 10: data source for per-server browse view models
+    /// (Songs / Albums / Artists / Genres). `nil` in tests / snapshots that
+    /// don't wire the Subsonic module.
+    public let subsonicDataSource: (any SubsonicBrowseDataSource)?
+
+    /// Injected by the app layer to initialise the Subsonic client pool
+    /// before navigation state is restored. Called from `RootView.task` so
+    /// that any persisted Subsonic destination can load without racing
+    /// against the background hydration task in `BocanApp`.
+    public var subsonicBootstrap: (@Sendable () async -> Void)?
+
+    /// ADR-035 step 10: cover-art URL resolver used by Subsonic browse
+    /// views. `nil` when Subsonic isn't wired in.
+    public let subsonicCoverArtProvider: SubsonicCoverArtProvider?
+
+    /// Optional metadata cache used by Subsonic browse view-models to hydrate
+    /// their first render from the last persisted snapshot before kicking off
+    /// the live re-fetch. `nil` in tests / snapshots that don't wire it.
+    public let subsonicMetadataCache: (any SubsonicMetadataCaching)?
+
+    /// Cross-server Subsonic search aggregator. Drives the in-place filtered
+    /// content of the per-server Songs/Albums/Artists views when the global
+    /// search field has text. `nil` when no `subsonicDataSource` was supplied.
+    public let subsonicSearch: SubsonicMultiSourceSearchViewModel?
+
+    /// ADR-035 step 14: optimistic star/rating writes for Subsonic songs.
+    /// `nil` when no annotation delivery was supplied.
+    public let subsonicAnnotations: SubsonicAnnotationCoordinator?
+
+    let log = AppLogger.make(.ui)
+
+    // MARK: - Init
+
+    // swiftlint:disable:next function_body_length
+    public init(
+        database: Database,
+        engine: any Transport,
+        scanner: LibraryScanner? = nil,
+        scrobbleRepository: ScrobbleQueueRepository? = nil,
+        scrobbleService: ScrobbleService? = nil,
+        subsonicSidebarListing: SubsonicSidebarListing? = nil,
+        subsonicDataSource: (any SubsonicBrowseDataSource)? = nil,
+        subsonicCoverArtProvider: SubsonicCoverArtProvider? = nil,
+        subsonicMetadataCache: (any SubsonicMetadataCaching)? = nil,
+        subsonicAnnotationDelivery: (any SubsonicAnnotationDelivering)? = nil,
+        subsonicCapabilityObserver: (any SubsonicCapabilityChangeObserving)? = nil,
+        subsonicConnectionObserver: (any SubsonicConnectionObserving)? = nil,
+        podcastLibrary: (any PodcastLibraryDataSource)? = nil,
+        podcastActions: (any PodcastActions)? = nil,
+        podcastSearch: (any PodcastSearchProviding)? = nil,
+        podcastTranscript: (any PodcastTranscriptProviding)? = nil
+    ) {
+        // Reset the menu-bar mirror keys (see the property didSets): a
+        // crash mid-scan would otherwise leave a stale `true` wedging the
+        // File-menu rescan items disabled for the whole next session.
+        UserDefaults.standard.set(false, forKey: "library.scanActive")
+        UserDefaults.standard.set(false, forKey: "library.collectionListingActive")
+        self.database = database
+        self.engine = engine
+        self.scanner = scanner
+        self.scrobbleService = scrobbleService
+        self.subsonicSidebarListing = subsonicSidebarListing
+        self.subsonicCapabilityObserver = subsonicCapabilityObserver
+        self.subsonicConnectionObserver = subsonicConnectionObserver
+        self.subsonicDataSource = subsonicDataSource
+        self.subsonicCoverArtProvider = subsonicCoverArtProvider
+        self.subsonicMetadataCache = subsonicMetadataCache
+        let subsonicAnnotations = subsonicAnnotationDelivery.map { SubsonicAnnotationCoordinator(delivery: $0) }
+        self.subsonicAnnotations = subsonicAnnotations
+        // The search view model owns its table rows, so it needs the
+        // coordinator to rebuild them when a star or rating moves (#475).
+        self.subsonicSearch = subsonicDataSource.map {
+            SubsonicMultiSourceSearchViewModel(dataSource: $0, annotations: subsonicAnnotations)
+        }
+        self.settingsRepo = SettingsRepository(database: database)
+        let radioStations = RadioStationRepository(database: database)
+        self.radioStations = radioStations
+        // A failed init leaves the tag editor unavailable for the whole
+        // session; `self.log` is not usable this early in init (#480).
+        do {
+            self.metadataEditService = try MetadataEditService(database: database)
+        } catch {
+            AppLogger.make(.ui).error("metadataEditService.init_failed", ["error": String(reflecting: error)])
+            self.metadataEditService = nil
+        }
+
+        self.fingerprintQueue = Self.makeFingerprintQueue(database: database)
+
+        let trackRepo = TrackRepository(database: database)
+        let albumRepo = AlbumRepository(database: database)
+        let artistRepo = ArtistRepository(database: database)
+        self.albumRepo = albumRepo
+        self.artistRepo = artistRepo
+
+        self.tracks = TracksViewModel(
+            repository: trackRepo,
+            artistRepository: artistRepo,
+            albumRepository: albumRepo
+        )
+        self.albums = AlbumsViewModel(repository: albumRepo)
+        self.history = HistoryViewModel(
+            repository: PlayHistoryRepository(database: database),
+            trackRepository: trackRepo
+        )
+        let playlistService = PlaylistService(database: database)
+        self.playlistService = playlistService
+        self.playlistSidebar = PlaylistSidebarViewModel(service: playlistService)
+        self.smartPlaylistService = SmartPlaylistService(database: database)
+        let (importer, exporter) = Self.makePlaylistIO(
+            database: database,
+            trackRepo: trackRepo,
+            playlistService: playlistService,
+            radioStations: radioStations
+        )
+        self.playlistImporter = importer
+        self.playlistExporter = exporter
+        self.artists = ArtistsViewModel(repository: artistRepo, albumRepository: albumRepo)
+        self.nowPlaying = NowPlayingViewModel(
+            engine: engine,
+            database: database,
+            scrobbleRepository: scrobbleRepository,
+            subsonicCoverArtProvider: subsonicCoverArtProvider
+        )
+
+        self.podcastLibrary = podcastLibrary
+        self.podcastActions = podcastActions
+        self.podcastSearch = podcastSearch
+        self.podcastTranscript = podcastTranscript
+        self.podcasts = PodcastsViewModel(
+            library: podcastLibrary,
+            actions: podcastActions,
+            searchProvider: podcastSearch,
+            transcriptProvider: podcastTranscript
+        )
+
+        self.searchQueryCancellable = self.makeSearchQuerySubscription()
+
+        self.wirePlaylistCallbacks()
+
+        // Seed built-in smart presets on first run (idempotent), then reload
+        // the sidebar so presets appear even if the initial load raced ahead.
+        let sps = self.smartPlaylistService
+        Task {
+            do {
+                try await BuiltInSmartPresets.seed(using: sps)
+            } catch {
+                // The built-in smart playlists then never appear in the sidebar
+                // and nothing on screen says why (#491).
+                self.log.warning("library.smartPresets.seed.failed", ["error": String(reflecting: error)])
+            }
+            await self.playlistSidebar.reload()
+        }
+
+        self.observeTracksSelection()
+        self.wireExpandedFoldersPersistence()
+        self.wireNewPlaylistSelection()
+        self.wireSectionExpansionPersistence()
+        self.wireSelectedDestinationPersistence()
+        self.observeSubsonicCapabilityChanges()
+        self.observeSubsonicConnectionChanges()
+        self.observeQueueSchemaWarnings()
+        self.observeNowPlayingTrackStats()
+        self.observeEnrichmentProgress()
+    }
+
+    /// Keeps the now-playing track's row in the Songs table current.
+    ///
+    /// A track accrues its play (and a `last_played_at` bump) mid-playback, at
+    /// the scrobble threshold — while it is still the active track.  We watch
+    /// `nowPlayingTrackID` and re-subscribe a single-row observation each time
+    /// it changes, so that bump is reflected in the Plays / Date Played columns
+    /// live, instead of only after navigating away and back.  Tracks not present
+    /// in the current destination are simply skipped by `updateRows(for:)`.
+    /// Follows the artist lookup pass so the scan banner can show how far it has got.
+    private func observeEnrichmentProgress() {
+        let repo = self.artistRepo
+        self.enrichmentProgressTask = Task { [weak self] in
+            do {
+                for try await progress in await repo.observeEnrichmentProgress() {
+                    guard let self else { return }
+                    if self.enrichmentProgress != progress {
+                        self.enrichmentProgress = progress
+                    }
+                }
+            } catch {
+                self?.log.warning("artist.enrich.observe.failed", ["error": String(reflecting: error)])
+            }
+        }
+    }
+
+    private func observeNowPlayingTrackStats() {
+        withObservationTracking {
+            _ = self.nowPlaying.nowPlayingTrackID
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in self?.observeNowPlayingTrackStats() }
+        }
+        self.nowPlayingStatsTask?.cancel()
+        guard let id = self.nowPlaying.nowPlayingTrackID else {
+            self.nowPlayingStatsTask = nil
+            return
+        }
+        let repo = TrackRepository(database: self.database)
+        self.nowPlayingStatsTask = Task { [weak self] in
+            let stream = await repo.observe(id: id)
+            do {
+                var isInitialSnapshot = true
+                for try await track in stream {
+                    guard let self else { return }
+                    // The first emission is the current value, already shown by
+                    // the table's load; only later mutations need a refresh.
+                    if isInitialSnapshot {
+                        isInitialSnapshot = false
+                        continue
+                    }
+                    if let track {
+                        self.tracks.updateRows(for: [track])
+                    }
+                }
+            } catch is CancellationError {
+                // Expected when re-subscribing for a new now-playing track.
+            } catch {
+                self?.log.warning("nowplaying.stats.observe.failed", ["error": String(reflecting: error)])
+            }
+        }
+    }
+
+    /// Bridges `TracksViewModel` (`@Observable`) selection state into the
+    /// `@Published` properties that `ObservableObject` consumers depend on.
+    ///
+    /// Uses a recursive `withObservationTracking` loop: the `apply` closure
+    /// both reads `tracks.selection` (registering the dependency) and writes
+    /// the derived `@Published` flags; `onChange` re-schedules the same
+    /// function so the next mutation is also caught.
+    private func observeTracksSelection() {
+        withObservationTracking {
+            let sel = self.tracks.selection
+            self.hasTrackSelection = !sel.isEmpty
+            self.hasSingleTrackSelection = sel.count == 1
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in self?.observeTracksSelection() }
+        }
+    }
+
+    private func wireExpandedFoldersPersistence() {
+        // ADR-008 audit: persist expanded playlist folders bidirectionally.
+        // Restore happens in `restoreUIState()`, and updates are saved with a
+        // short debounce to avoid frequent writes while users rapidly expand/collapse.
+        self.expandedFoldersCancellable = self.playlistSidebar.$expandedFolders
+            .dropFirst()
+            .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.saveUIState() }
+            }
+    }
+
+    /// Selects a playlist the moment it is created (#535).
+    ///
+    /// The sidebar has always recorded the new id in `lastCreatedPlaylistID`
+    /// and nothing read it, so creating a playlist left the selection where it
+    /// was and the new row had to be hunted down. Its parent folder is already
+    /// expanded by the create path, so selecting the destination is enough to
+    /// bring the row into view unless the sidebar is long enough to scroll,
+    /// which its `List` has no reader for.
+    private func wireNewPlaylistSelection() {
+        self.newPlaylistSelectionCancellable = self.playlistSidebar.$lastCreatedPlaylistID
+            .dropFirst()
+            .compactMap(\.self)
+            .sink { [weak self] id in
+                guard let self else { return }
+                Task { await self.selectDestination(.playlist(id)) }
+            }
+    }
+
+    private func wireSectionExpansionPersistence() {
+        // ADR-035 step 9: persist sidebar section collapse + per-server
+        // disclosure with the same debounce strategy as expanded folders.
+        self.sectionExpansionCancellable = self.$sectionExpansion
+            .dropFirst()
+            .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.saveUIState() }
+            }
+    }
+
+    private func wireSelectedDestinationPersistence() {
+        // Persist the selected sidebar destination as the user navigates, so the
+        // app reopens where they left off. Previously this was only saved by the
+        // folder/section sinks (when those happened to change) and RootView's
+        // `.onDisappear`, which does not reliably fire on app termination — so a
+        // stale destination (e.g. Up Next) would stick across launches. Same
+        // 250 ms debounce coalesces rapid back/forward navigation.
+        self.selectedDestinationCancellable = self.$selectedDestination
+            .dropFirst()
+            .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.saveUIState() }
+            }
+    }
+
+    /// ADR-035 step 9: reload the Subsonic server list from the supplied
+    /// `SubsonicSidebarListing`. No-op when no listing was injected. Reloads
+    /// both the visible and hidden lists so the sidebar's "Hidden Sources"
+    /// submenu stays in sync.
+    public func reloadSubsonicServers() async {
+        guard let listing = self.subsonicSidebarListing else { return }
+        do {
+            self.subsonicServers = try await listing.fetchSidebarServers()
+        } catch {
+            self.log.error("library.subsonic.reload.failed", ["error": String(reflecting: error)])
+        }
+        do {
+            self.hiddenSubsonicServers = try await listing.fetchHiddenSidebarServers()
+        } catch {
+            self.log.error("library.subsonic.reloadHidden.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Hides or shows a Subsonic server in the sidebar by toggling its
+    /// `showInSidebar` flag on the underlying store, then reloads the
+    /// sidebar listing. Powers the "Disable in Sidebar" context-menu action.
+    public func setSubsonicServerSidebarVisible(id: UUID, visible: Bool) async {
+        guard let listing = self.subsonicSidebarListing else { return }
+        do {
+            try await listing.setSidebarVisible(id: id, visible: visible)
+            await self.reloadSubsonicServers()
+        } catch {
+            self.log.error(
+                "library.subsonic.setSidebarVisible.failed",
+                ["id": id.uuidString, "error": String(reflecting: error)]
+            )
+        }
+    }
+
+    /// Permanently removes the server currently queued in
+    /// `subsonicServerPendingRemoval` (set when the user confirms the sidebar's
+    /// "Remove…" dialog), then clears the pending state and reloads the sidebar.
+    /// Deletes the server, its in-memory client, and its Keychain credential via
+    /// the injected listing (#306).
+    public func confirmRemoveSubsonicServer() async {
+        guard let server = self.subsonicServerPendingRemoval,
+              let listing = self.subsonicSidebarListing else {
+            self.subsonicServerPendingRemoval = nil
+            return
+        }
+        self.subsonicServerPendingRemoval = nil
+        do {
+            try await listing.removeServer(id: server.id)
+            await self.reloadSubsonicServers()
+        } catch {
+            self.log.error(
+                "library.subsonic.removeServer.failed",
+                ["id": server.id.uuidString, "error": String(reflecting: error)]
+            )
+        }
+    }
+
+    /// Runs the injected `subsonicBootstrap` closure if one was supplied.
+    /// Called from `RootView.task` *before* navigation state is restored so
+    /// that any persisted Subsonic destination can load immediately without
+    /// racing against the background hydration task in `BocanApp`.
+    public func bootstrapSubsonic() async {
+        let end = Telemetry.timer("ui.bootstrapSubsonic")
+        defer { end() }
+        await self.subsonicBootstrap?()
+    }
+
+    /// ADR-035 step 16: subscribe to capability-change events from
+    /// `SubsonicService` and refresh the sidebar listing whenever a server's
+    /// advertised capabilities change. This makes new sections (Podcasts,
+    /// Internet Radio, Bookmarks…) appear immediately after a server upgrade
+    /// without requiring an app relaunch.
+    private func observeSubsonicCapabilityChanges() {
+        guard let observer = self.subsonicCapabilityObserver else { return }
+        let stream = observer.capabilityChanges()
+        self.subsonicCapabilityTask = Task { [weak self] in
+            for await _ in stream {
+                guard let self else { return }
+                await self.reloadSubsonicServers()
+            }
+        }
+    }
+
+    private func makeSearchQuerySubscription() -> AnyCancellable {
+        self.$searchQuery
+            // Skip the value @Published emits on subscribe. The startup spine
+            // performs the first load (after restoreUIState picks the saved
+            // destination); without dropFirst the initial empty query debounced
+            // through and fired a redundant full loadCurrentDestination() ~250ms
+            // into launch, loading the default destination before the restore.
+            // Only real query changes should drive a reload.
+            .dropFirst()
+            .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] query in
+                guard let self else { return }
+                Task { await self.loadCurrentDestination() }
+                self.subsonicSearch?.search(query: query, servers: self.subsonicServers)
+            }
+    }
+
+    /// ADR-035 step 17: subscribe to per-server connection-state events
+    /// from the App-layer `SubsonicConnectionObserving` so the sidebar
+    /// status dot and the per-view offline banner stay live.
+    private func observeSubsonicConnectionChanges() {
+        guard let observer = self.subsonicConnectionObserver else { return }
+        Task { [weak self] in
+            let snapshot = await observer.currentStates()
+            await MainActor.run { self?.subsonicConnectionStates = snapshot }
+        }
+        let stream = observer.stateUpdates()
+        self.subsonicConnectionTask = Task { [weak self] in
+            for await (serverID, state) in stream {
+                guard let self else { return }
+                self.subsonicConnectionStates[serverID] = state
+            }
+        }
+    }
+
+    /// Subscribes to ``QueuePlayer/schemaWarnings`` and surfaces any message as a
+    /// toast.  Fires at most once per launch (the stream yields only when a
+    /// persisted queue blob was written by a newer build and has been discarded).
+    private func observeQueueSchemaWarnings() {
+        guard let qp = self.queuePlayer else { return }
+        Task { [weak self] in
+            for await message in qp.schemaWarnings {
+                guard let self else { return }
+                self.showToast(ToastMessage(text: Self.localizedSchemaWarning(message), kind: .info))
+            }
+        }
+    }
+
+    /// `QueuePersistence` yields a single fixed warning today; translate it
+    /// through the catalog and pass any unrecognized message through untouched.
+    private static func localizedSchemaWarning(_ message: String) -> String {
+        message == "Saved queue is from a newer version of WMusic — starting fresh."
+            ? L10n.string("Saved queue is from a newer version of WMusic — starting fresh.")
+            : message
+    }
+
+    /// ADR-035 step 17: powers the per-view "Retry now" button by asking
+    /// the `SubsonicConnectionObserving` adapter to re-ping immediately.
+    public func retrySubsonicConnection(serverID: UUID) async {
+        await self.subsonicConnectionObserver?.retry(serverID: serverID)
+    }
+
+    deinit {
+        self.subsonicCapabilityTask?.cancel()
+        self.subsonicConnectionTask?.cancel()
+    }
+
+    private func wirePlaylistCallbacks() {
+        // Wire the NowPlayingStrip play button to start from the library when the
+        // queue is empty.
+        self.nowPlaying.onPlayFromEmptyQueue = { [weak self] in
+            guard let self else { return }
+            Task { await self.playCurrentLibrary() }
+        }
+
+        // Surface a terminal playback failure (e.g. a streamed source dropped and
+        // could not be recovered) as a toast; the engine has already stopped.
+        self.nowPlaying.onPlaybackError = { [weak self] in
+            self?.showToast(ToastMessage(text: L10n.string("Playback stopped: the audio stream could not be reached.")))
+        }
+
+        self.playlistSidebar.onDidDelete = { [weak self] deletedIDs in
+            guard let self else { return }
+            switch self.selectedDestination {
+            case let .playlist(id) where deletedIDs.contains(id):
+                self.selectedDestination = .songs
+
+            case let .smartPlaylist(id) where deletedIDs.contains(id):
+                self.selectedDestination = .songs
+
+            case let .folder(id) where deletedIDs.contains(id):
+                self.selectedDestination = .songs
+
+            default:
+                break
+            }
+        }
+
+        self.playlistSidebar.onRequestExport = { [weak self] id, name in
+            self?.playlistExportRequest = .init(id: id, name: name)
+        }
+    }
+
+    private static func makeFingerprintQueue(database: Database) -> FingerprintQueue? {
+        let apiKey = Bundle.main.infoDictionary?["AcoustIDAPIKey"] as? String ?? ""
+        guard let fpcalcURL = Bundle.main.url(forResource: "fpcalc", withExtension: nil),
+              !apiKey.isEmpty else { return nil }
+        let service = FingerprintService(database: database, fpcalcURL: fpcalcURL, acoustIDAPIKey: apiKey)
+        return FingerprintQueue(service: service)
+    }
+
+    private static func makePlaylistIO(
+        database: Database,
+        trackRepo: TrackRepository,
+        playlistService: PlaylistService,
+        radioStations: RadioStationRepository
+    ) -> (PlaylistImportService, PlaylistExportService) {
+        let resolver = TrackResolver(trackRepo: trackRepo)
+        let importer = PlaylistImportService(
+            resolver: resolver,
+            playlists: playlistService,
+            trackRepo: trackRepo,
+            radioStations: radioStations,
+            // Lets the import sheet's access probe verify audio through a
+            // library root's scope, so the folder-grant prompt stays a last
+            // resort (#391).
+            libraryRoots: LibraryRootRepository(database: database),
+            // ADR-087: CUE import attaches in-track markers, never virtual
+            // tracks.
+            cueMarkers: CueMarkerService(
+                trackRepo: trackRepo,
+                markerRepo: TrackMarkerRepository(database: database)
+            )
+        )
+        let exporter = PlaylistExportService(database: database)
+        return (importer, exporter)
+    }
+
+    // MARK: - Tag editor
+
+    /// Opens the tag editor sheet for the given tracks. Pass `albumID` when
+    /// they are exactly one album's tracks, which unlocks the album Deep Dive.
+    public func showTagEditor(tracks: [Track], albumID: Int64? = nil) {
+        let ids = tracks.compactMap(\.id)
+        guard !ids.isEmpty else { return }
+        self.tagEditorAlbumID = albumID
+        self.tagEditorTrackIDs = ids
+    }
+
+    /// The editor model for the current `tagEditorTrackIDs`, or nil when the
+    /// sheet should close. Carries the Deep Dive service and album identity.
+    public func makeTagEditorViewModel() -> TagEditorViewModel? {
+        guard let ids = self.tagEditorTrackIDs, !ids.isEmpty, let service = self.metadataEditService else { return nil }
+        return TagEditorViewModel(service: service, trackIDs: ids, deepDive: self.deepDiveService, albumID: self.tagEditorAlbumID)
+    }
+
+    /// Opens Get Info for an artist (#413).
+    public func showArtistInfo(id: Int64) {
+        self.artistInfo = ArtistInfoRequest(id: id)
+    }
+
+    /// Opens the tag editor for the track currently loaded in the player.
+    public func showTagEditorForNowPlaying() {
+        guard let id = self.nowPlaying.nowPlayingTrackID else { return }
+        self.tagEditorAlbumID = nil
+        self.tagEditorTrackIDs = [id]
+    }
+
+    /// Navigates the sidebar to the album of the currently-playing track.
+    ///
+    /// No-op when nothing is playing or when the playing track has no album ID.
+    public func goToCurrentAlbum() async {
+        guard let albumID = self.nowPlaying.nowPlayingAlbumID else { return }
+        await self.selectDestination(.album(albumID))
+    }
+
+    /// Navigates the sidebar to the artist of the currently-playing track.
+    ///
+    /// No-op when nothing is playing or when the playing track has no artist ID.
+    public func goToCurrentArtist() async {
+        guard let artistID = self.nowPlaying.nowPlayingArtistID else { return }
+        await self.selectDestination(.artist(artistID))
+    }
+
+    /// Scrolls the track list to reveal the currently-playing track.
+    ///
+    /// If the now-playing track is not in the current destination (e.g. an album
+    /// or artist drill-down that doesn't contain it), the sidebar first navigates
+    /// to the Songs view before requesting the scroll.
+    public func scrollToNowPlayingTrack() async {
+        guard let id = self.nowPlaying.nowPlayingTrackID else { return }
+        // The shared tracks model keeps the previous list's rows while
+        // grids and self-loading destinations (Albums, Artists listings,
+        // playlists, Up Next, Radio) are on screen, so row membership
+        // alone lies there and the jump silently did nothing (ADR-081
+        // invocation pass). Scroll in place only when the visible
+        // destination actually renders the shared track list.
+        if !Self.destinationRendersSharedTrackList(self.selectedDestination)
+            || !self.tracks.rows.contains(where: { $0.id == id }) {
+            await self.selectDestination(.songs)
+        }
+        self.tracks.requestScrollToNowPlaying()
+    }
+
+    /// True when `destination`'s content view is the shared track list
+    /// (`tracks.rows`), making an in-place jump/scroll meaningful.
+    nonisolated static func destinationRendersSharedTrackList(_ destination: SidebarDestination) -> Bool {
+        switch destination {
+        case .songs, .album, .artist, .genre, .composer,
+             .recentlyAdded, .recentlyPlayed, .mostPlayed, .search:
+            true
+
+        default:
+            false
+        }
+    }
+
+    /// Opens the tag editor for whatever is currently selected in the track table.
+    /// Get Info (⌘I): the selected tracks, or the artist whose page is
+    /// showing when nothing is selected (#413).
+    public func showTagEditorForCurrentSelection() {
+        let ids = self.tracks.selection.compactMap(\.self)
+        guard !ids.isEmpty else {
+            if case let .artist(id) = self.selectedDestination {
+                self.showArtistInfo(id: id)
+            }
+            return
+        }
+        self.tagEditorAlbumID = nil
+        self.tagEditorTrackIDs = ids
+    }
+
+    /// Opens the identify-track sheet for a single track.
+    public func showIdentifyTrack(_ track: Track) {
+        self.identifyTrack = track
+    }
+
+    /// Opens the identify-track sheet for the first track in the current selection.
+    public func showIdentifyTrackForCurrentSelection() {
+        guard let track = self.tracks.tracks.first(where: { self.tracks.selection.contains($0.id) }) else {
+            return
+        }
+        self.identifyTrack = track
+    }
+
+    /// Reveals all selected tracks in Finder.
+    public func revealSelectedInFinder() {
+        let urls = self.tracks.tracks
+            .filter { self.tracks.selection.contains($0.id) }
+            .compactMap { URL(string: $0.fileURL) }
+        guard !urls.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(urls)
+    }
+
+    // MARK: - Public API
+
+    /// Loads data for the current destination.
+    public func loadCurrentDestination() async {
+        await self.loadDestination(self.selectedDestination)
+    }
+
+    /// Responds to a sidebar selection change.
+    ///
+    /// - Parameter addToHistory: Pass `false` when navigating via back/forward
+    ///   so the stacks are not double-pushed.
+    public func selectDestination(_ destination: SidebarDestination, addToHistory: Bool = true) async {
+        self.log.info("nav.select", ["destination": String(describing: destination)])
+        let isMove = destination != self.selectedDestination
+
+        if addToHistory, destination != self.selectedDestination {
+            // Capture the query alongside the destination (before the clear
+            // below) so back/forward can restore the filter that was active.
+            self.backStack.append(HistoryEntry(
+                destination: self.selectedDestination, searchQuery: self.searchQuery
+            ))
+            if self.backStack.count > Self.historyLimit {
+                self.backStack.removeFirst()
+            }
+            self.forwardStack.removeAll()
+            self.canGoBack = true
+            self.canGoForward = false
+        }
+
+        // Clear search when drilling into a detail page (album, artist, genre,
+        // composer, podcast show — local or Subsonic — and other concrete
+        // destinations). Without this, opening a show from a filtered grid
+        // would carry the show's own name in as an episode filter.
+        // For top-level browse views (songs/albums/artists/etc) keep the active
+        // query so the new view shows filtered results immediately.
+        switch destination {
+        case .album, .artist, .playlist, .smartPlaylist, .folder,
+             .genre, .composer, .podcastShow,
+             .subsonicAlbum, .subsonicArtist:
+            self.searchQuery = ""
+
+        default:
+            break
+        }
+        // History's own query never survives a navigation, in either
+        // direction (ADR-094): cleared on the way out, and again on the way
+        // in, so the page always opens with an empty field. The library
+        // query is not touched by either edge, so a filter left on Songs is
+        // still there after a visit.
+        if self.selectedDestination == .history || destination == .history {
+            self.history.clearQuery()
+        }
+        self.selectedDestination = destination
+        // A move gets the loading state, not the songs of the place just left:
+        // the table stays mounted while rows exist, which is what keeps a
+        // refresh in place (#543).
+        if isMove {
+            self.tracks.clearRows()
+        }
+        await self.loadDestination(destination)
+    }
+
+    /// Opens a podroll recommendation: navigates to the Podcasts home (where the
+    /// pre-subscribe detail sheet is hosted) and resolves the feed URL into it, so
+    /// the user can preview and subscribe.
+    public func openPodcastRecommendation(_ url: URL) {
+        Task {
+            await self.selectDestination(.podcasts)
+            await self.podcasts.openDetailForURL(url)
+        }
+    }
+
+    /// Navigates to the previous destination in history, restoring the
+    /// search query that was active there — so Esc-ing out of an album found
+    /// via type-to-search lands back on the still-filtered grid with the
+    /// typed text intact. Restored BEFORE the destination loads, or the grid
+    /// would flash unfiltered and re-filter on the query debounce.
+    public func goBack() async {
+        guard let previous = self.backStack.popLast() else { return }
+        self.forwardStack.append(HistoryEntry(
+            destination: self.selectedDestination, searchQuery: self.searchQuery
+        ))
+        self.canGoBack = !self.backStack.isEmpty
+        self.canGoForward = true
+        if self.searchQuery != previous.searchQuery {
+            self.searchQuery = previous.searchQuery
+        }
+        await self.selectDestination(previous.destination, addToHistory: false)
+    }
+
+    /// Navigates to the next destination in history, restoring its search
+    /// query symmetrically with ``goBack()``.
+    public func goForward() async {
+        guard let next = self.forwardStack.popLast() else { return }
+        self.backStack.append(HistoryEntry(
+            destination: self.selectedDestination, searchQuery: self.searchQuery
+        ))
+        if self.backStack.count > Self.historyLimit {
+            self.backStack.removeFirst()
+        }
+        self.canGoBack = true
+        self.canGoForward = !self.forwardStack.isEmpty
+        if self.searchQuery != next.searchQuery {
+            self.searchQuery = next.searchQuery
+        }
+        await self.selectDestination(next.destination, addToHistory: false)
+    }
+
+    /// Plays `track` immediately, replacing the queue with the full current track
+    /// list so that auto-advance, shuffle, and the forward button all work as expected.
+    ///
+    /// Called by TracksView / AlbumDetailView on double-click or Return key.
+    public func play(track: Track) async {
+        let endPlay = Telemetry.timer("playback.play")
+        defer { endPlay() }
+        self.stopPlaylistSync()
+        // Ensure the track list is populated.
+        if self.tracks.tracks.isEmpty {
+            await self.loadCurrentDestination()
+        }
+        // Build the full context list.  Fall back to just this track if context is empty.
+        let contextTracks = self.tracks.tracks.isEmpty ? [track] : self.tracks.tracks
+        let startIndex = contextTracks.firstIndex { $0.id == track.id } ?? 0
+        if let qp = engine as? QueuePlayer {
+            do {
+                // Build items in-memory from the already-loaded Track objects and
+                // artistNames dictionary.  This avoids the per-track DB round-trips
+                // inside QueuePlayer.buildItems (32k queries for a 16k library) which
+                // otherwise cause a multi-second stall before playback begins.
+                let names = self.tracks.artistNames
+                let items: [QueueItem] = contextTracks.map { t in
+                    let name = t.artistID.flatMap { names[$0] }
+                    return QueueItem.make(from: t, artistName: name)
+                }
+                try await qp.play(items: items, startingAt: startIndex, shuffle: self.nowPlaying.shuffleOn)
+            } catch {
+                self.log.error("library.play.failed", ["error": String(reflecting: error)])
+                self.playbackErrorMessage = L10n.string("Could not play \"\(track.title ?? track.fileURL)\". Try re-scanning your library.")
+            }
+            return
+        }
+        guard let url = URL(string: track.fileURL) else {
+            self.log.error("library.play.badURL", ["url": track.fileURL])
+            return
+        }
+        do {
+            self.nowPlaying.setCurrentTrack(track)
+            try await self.engine.load(url)
+            try await self.engine.play()
+            self.log.debug("library.play", ["id": track.id ?? -1])
+        } catch {
+            self.log.error("library.play.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Plays `tracks` starting at `index`, replacing the queue.
+    ///
+    /// Pass `shuffle: true` to pre-shuffle before playback so the very first
+    /// track heard is randomly selected (not `tracks[0]`).
+    public func play(tracks: [Track], startingAt index: Int = 0, shuffle: Bool = false) async {
+        self.stopPlaylistSync()
+        guard let qp = engine as? QueuePlayer else { return }
+        let names = self.tracks.artistNames
+        let items: [QueueItem] = tracks.map { t in
+            let name = t.artistID.flatMap { names[$0] }
+            return QueueItem.make(from: t, artistName: name)
+        }
+        do {
+            try await qp.play(items: items, startingAt: index, shuffle: shuffle)
+        } catch {
+            self.log.error("library.playAll.failed", ["error": String(reflecting: error)])
+            self.playbackErrorMessage = L10n.string("Could not play tracks. Try re-scanning your library.")
+        }
+    }
+
+    /// Starts playing all tracks in the current Songs view from the beginning,
+    /// honouring the current sort order.  Called when the play button is pressed
+    /// with an empty queue (nothing ever loaded, or queue exhausted).
+    public func playCurrentLibrary() async {
+        // Ensure the track list is populated — it may be empty on fast startup
+        // if the view's .task hasn't completed before the play button is pressed.
+        if self.tracks.tracks.isEmpty {
+            await self.loadCurrentDestination()
+        }
+        guard !self.tracks.tracks.isEmpty else { return }
+        await self.play(tracks: self.tracks.tracks, startingAt: 0)
+    }
+
+    /// Inserts `tracks` to play immediately after the current item.
+    public func playNext(tracks: [Track]) async {
+        guard let qp = engine as? QueuePlayer else { return }
+        let ids = tracks.compactMap(\.id)
+        do {
+            try await qp.playNext(ids)
+        } catch {
+            self.log.error("library.playNext.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Appends `tracks` to the end of the queue.
+    public func addToQueue(tracks: [Track]) async {
+        guard let qp = engine as? QueuePlayer else { return }
+        let ids = tracks.compactMap(\.id)
+        do {
+            try await qp.addToQueue(ids)
+        } catch {
+            self.log.error("library.addToQueue.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Appends raw track IDs (e.g. from a pasteboard drop) to the end of the queue.
+    /// Used by the Up Next sidebar drop target where only the IDs are available.
+    public func addToQueue(trackIDs ids: [Int64]) async {
+        guard let qp = engine as? QueuePlayer, !ids.isEmpty else { return }
+        do {
+            try await qp.addToQueue(ids)
+        } catch {
+            self.log.error("library.addToQueue.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Selects all currently visible tracks in the track list.
+    public func selectAllTracks() {
+        self.tracks.selectAll()
+    }
+
+    /// Clears the track selection.
+    public func deselectAllTracks() {
+        self.tracks.deselectAll()
+    }
+
+    /// Plays the first selected track now, with full browse-context (same as double-click).
+    public func playNowForCurrentSelection() {
+        guard let track = self.tracks.tracks.first(where: { self.tracks.selection.contains($0.id) }) else {
+            return
+        }
+        Task { await self.play(track: track) }
+    }
+
+    /// Inserts all selected tracks immediately after the current item.
+    public func playNextForCurrentSelection() {
+        let selected = self.tracks.tracks.filter { self.tracks.selection.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        Task { await self.playNext(tracks: selected) }
+    }
+
+    /// Appends all selected tracks to the end of the queue.
+    public func addToQueueForCurrentSelection() {
+        let selected = self.tracks.tracks.filter { self.tracks.selection.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        Task { await self.addToQueue(tracks: selected) }
+    }
+
+    /// Plays the album of the first selected track, replacing the queue.
+    public func playAlbumForCurrentSelection(shuffle: Bool = false) {
+        guard let track = self.tracks.tracks.first(where: { self.tracks.selection.contains($0.id) }) else {
+            return
+        }
+        Task { await self.playAlbum(track: track, shuffle: shuffle) }
+    }
+
+    /// Plays all tracks by the artist of the first selected track, replacing the queue.
+    public func playArtistForCurrentSelection() {
+        guard let track = self.tracks.tracks.first(where: { self.tracks.selection.contains($0.id) }) else {
+            return
+        }
+        Task { await self.playArtist(track: track) }
+    }
+
+    // Plays all tracks from the album of `track`.
+
+    public func playAlbum(track: Track, shuffle: Bool = false) async {
+        guard let albumID = track.albumID else { return }
+        await self.playAlbum(albumID: albumID, shuffle: shuffle)
+    }
+
+    /// Plays the album with `albumID` in track order, replacing the queue, without
+    /// changing the visible destination (issue #349: "Play Album" plays in place).
+    public func playAlbum(albumID: Int64, shuffle: Bool = false) async {
+        self.stopPlaylistSync()
+        guard let qp = engine as? QueuePlayer else { return }
+        do {
+            try await qp.playAlbum(albumID, shuffle: shuffle)
+        } catch {
+            self.log.error("library.playAlbum.failed", ["error": String(reflecting: error)])
+            self.playbackErrorMessage = L10n.string("Could not play album.")
+        }
+    }
+
+    /// Plays every track of the given albums (album then track order), replacing
+    /// the queue. Used by the multi-select "Play N Albums" grid action.
+    public func playAlbums(albumIDs: [Int64]) async {
+        guard !albumIDs.isEmpty else { return }
+        if albumIDs.count == 1, let only = albumIDs.first {
+            await self.playAlbum(albumID: only)
+            return
+        }
+        let repo = TrackRepository(database: self.database)
+        var collected: [Track] = []
+        for id in albumIDs {
+            do {
+                let tracks = try await repo.fetchAll(albumID: id)
+                collected.append(contentsOf: tracks)
+            } catch {
+                // The album drops out of the play set, so the user gets a
+                // shorter queue than they asked for with no sign of it (#491).
+                self.log.warning("library.playAlbums.fetchFailed", [
+                    "id": id,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+        guard !collected.isEmpty else { return }
+        await self.play(tracks: collected)
+    }
+
+    /// Plays all tracks by the artist of `track`.
+    public func playArtist(track: Track) async {
+        self.stopPlaylistSync()
+        guard let qp = engine as? QueuePlayer, let artistID = track.artistID else { return }
+        do {
+            try await qp.playArtist(artistID)
+        } catch {
+            self.log.error("library.playArtist.failed", ["error": String(reflecting: error)])
+            self.playbackErrorMessage = L10n.string("Could not play artist.")
+        }
+    }
+
+    /// Toggles shuffle on the queue player.
+    public func setShuffle(_ on: Bool) async {
+        await self.nowPlaying.setShuffle(on)
+    }
+
+    /// Reorders the playback queue to match the current track-list sort order,
+    /// keeping the currently-playing track in place.
+    ///
+    /// No-op when nothing is playing or when the currently-playing track isn't
+    /// in the view's current track list — sorting an unrelated browse view
+    /// should not silently replace the playback queue.  The heavy QueueItem
+    /// construction runs off the main actor so large libraries don't stall the UI.
+    public func reorderQueue() async {
+        guard let qp = engine as? QueuePlayer else { return }
+        let contextTracks = self.tracks.tracks
+        guard !contextTracks.isEmpty else { return }
+
+        // Only reorder when the currently-playing track is actually in the
+        // view's list; otherwise the user is sorting an unrelated context.
+        let currentTrackID = self.nowPlaying.nowPlayingTrackID
+        guard let currentTrackID,
+              contextTracks.contains(where: { $0.id == currentTrackID }) else { return }
+
+        let names = self.tracks.artistNames
+        // Build QueueItems off the main actor so 20k-track libraries don't stall the UI.
+        let items = await Task.detached(priority: .userInitiated) {
+            contextTracks.map { t -> QueueItem in
+                let name = t.artistID.flatMap { names[$0] }
+                return QueueItem.make(from: t, artistName: name)
+            }
+        }.value
+        await qp.queue.reorder(to: items)
+    }
+
+    /// Changes the repeat mode on the queue player.
+    public func setRepeat(_ mode: RepeatMode) async {
+        guard let qp = engine as? QueuePlayer else { return }
+        await qp.setRepeat(mode)
+    }
+
+    /// Smallest queue size that warrants a "Clear the queue?" confirmation.
+    /// Trivial queues (empty, or just the currently-playing track) clear without
+    /// asking; anything larger is a built-up queue worth protecting (issue #260).
+    static let clearQueueConfirmationThreshold = 2
+
+    /// Entry point for the Playback menu's "Clear Queue" command (Cmd-Shift-Delete).
+    /// Reads the live queue size, then either clears immediately (trivial queue)
+    /// or raises the confirmation dialog. The crash-recovery "Start Fresh" button
+    /// deliberately calls `clearQueue()` directly and is not gated by this.
+    public func requestClearQueue() async {
+        guard let qp = engine as? QueuePlayer else { return }
+        let count = await qp.queue.items.count
+        if self.resolveClearQueueRequest(itemCount: count) {
+            await self.clearQueue()
+        }
+    }
+
+    /// Decides what "Clear Queue" should do for a queue of `count` items,
+    /// updating the confirmation state. Returns `true` when the queue is trivial
+    /// and the caller should clear immediately, `false` when a confirmation was
+    /// raised instead. Split out from `requestClearQueue()` so the decision is
+    /// synchronously testable without a live `QueuePlayer`.
+    @discardableResult
+    func resolveClearQueueRequest(itemCount count: Int) -> Bool {
+        guard count >= Self.clearQueueConfirmationThreshold else { return true }
+        self.clearQueueItemCount = count
+        self.clearQueueConfirmationPresented = true
+        return false
+    }
+
+    /// Clears the entire playback queue and stops playback. The unguarded clear,
+    /// invoked by the "Clear Queue" confirmation, the crash-recovery "Start Fresh"
+    /// button, and the matching Up Next toolbar / context-menu surfaces.
+    public func clearQueue() async {
+        self.stopPlaylistSync()
+        guard let qp = engine as? QueuePlayer else { return }
+        await qp.clearSavedState()
+    }
+
+    /// Jumps to and starts playing the queue item at `index` in the existing
+    /// queue.  Used by the Up Next "Play From Here" context-menu action
+    /// (ADR-006 audit M1).
+    public func playFromQueueIndex(_ index: Int) async {
+        guard let qp = engine as? QueuePlayer else { return }
+        do {
+            try await qp.playAt(index: index)
+        } catch {
+            self.log.error("library.playFromQueueIndex.failed", [
+                "index": index,
+                "error": String(reflecting: error),
+            ])
+        }
+    }
+
+    /// Moves a queue item so it plays immediately after the current track. Used
+    /// by the Up Next "Play Next" context-menu action. With Up Next pinned to the
+    /// now-playing track, the top of the visible list is the slot right after the
+    /// playhead, so this targets `currentIndex + 1` rather than absolute index 0.
+    public func playQueueItemNext(id: QueueItem.ID) async {
+        guard let qp = engine as? QueuePlayer else { return }
+        let items = await qp.queue.items
+        let currentIndex = await qp.queue.currentIndex
+        guard let from = items.firstIndex(where: { $0.id == id }) else { return }
+        let target = (currentIndex ?? -1) + 1
+        guard from != target else { return }
+        await qp.queue.move(fromIndex: from, toIndex: target)
+    }
+
+    /// Moves a queue item to the bottom of the queue.  Used by the Up Next
+    /// "Move to Bottom" context-menu action (ADR-006 audit M1).
+    public func moveQueueItemToBottom(id: QueueItem.ID) async {
+        guard let qp = engine as? QueuePlayer else { return }
+        let items = await qp.queue.items
+        let last = items.count - 1
+        guard let from = items.firstIndex(where: { $0.id == id }), from != last, last >= 0 else { return }
+        await qp.queue.move(fromIndex: from, toIndex: last)
+    }
+
+    /// The underlying `QueuePlayer` if the engine is one; otherwise `nil`.
+    public var queuePlayer: QueuePlayer? {
+        self.engine as? QueuePlayer
+    }
+
+    /// Last sidebar width reported by the AppKit split-view, used to seed
+    /// `UIStateV2.sidebarWidth` at save time.  ADR-005 audit H2.
+    @Published public var sidebarWidth: Double?
+
+    /// Bumped by the global ⌘F command; observed by `BocanRootView` to move
+    /// `@FocusState` onto the toolbar search field.  ADR-005 audit H5.
+    @Published public var searchFocusRequestID = UUID()
+
+    /// One-shot request for `SmartPlaylistDetailView` to open `RuleBuilderView`
+    /// as soon as the requested smart playlist is visible.
+    @Published public var smartPlaylistRuleBuilderRequestID: Int64?
+
+    /// Asks the root view to focus the toolbar search field.
+    public func requestSearchFocus() {
+        self.searchFocusRequestID = UUID()
+    }
+
+    /// Requests that the smart-playlist detail for `playlistID` opens rule editor.
+    public func requestSmartPlaylistRuleBuilder(for playlistID: Int64) {
+        self.smartPlaylistRuleBuilderRequestID = playlistID
+    }
+
+    /// Consumes a pending rule-builder request if it targets `playlistID`.
+    @discardableResult
+    public func consumeSmartPlaylistRuleBuilderRequest(for playlistID: Int64) -> Bool {
+        guard self.smartPlaylistRuleBuilderRequestID == playlistID else { return false }
+        self.smartPlaylistRuleBuilderRequestID = nil
+        return true
+    }
+
+    /// Persists current UI state to settings.
+    public func saveUIState() async {
+        let state = UIStateV2(
+            selectedDestination: selectedDestination,
+            sortColumn: tracks.sortColumn,
+            sortAscending: self.tracks.sortAscending,
+            sidebarWidth: self.sidebarWidth,
+            expandedPlaylistFolders: self.playlistSidebar.expandedFolders,
+            sectionExpansion: self.sectionExpansion
+        )
+        do {
+            try await self.settingsRepo.set(state, for: "ui.state.v2")
+        } catch {
+            self.log.error("library.saveState.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Restores UI state from settings.
+    public func restoreUIState() async {
+        let end = Telemetry.timer("ui.restoreUIState")
+        defer { end() }
+        do {
+            guard let state = try await settingsRepo.get(UIStateV2.self, for: "ui.state.v2") else { return }
+            self.selectedDestination = state.selectedDestination
+            // Validate the restored destination. `playlistSidebar.reload()` is always
+            // called before this method in the startup sequence, so `nodes` is already
+            // populated. If the saved folder/playlist was deleted since last launch,
+            // fall back to Songs rather than showing "Folder Not Found" on every startup.
+            let savedDestID: Int64? = switch self.selectedDestination {
+            case let .folder(id):
+                id
+
+            case let .playlist(id):
+                id
+
+            case let .smartPlaylist(id):
+                id
+
+            default:
+                nil
+            }
+            if let id = savedDestID, self.playlistSidebar.findNode(id: id) == nil {
+                self.log.warning("ui.restoreState.destinationGone", ["id": id])
+                self.selectedDestination = .songs
+            }
+            self.tracks.setSort(column: state.sortColumn, ascending: state.sortAscending)
+            self.sidebarWidth = state.sidebarWidth
+            self.playlistSidebar.setExpandedFolders(state.expandedPlaylistFolders)
+            self.sectionExpansion = state.sectionExpansion
+        } catch {
+            self.log.error("library.restoreState.failed", ["error": String(reflecting: error)])
+        }
+    }
+
+    // MARK: - Targeted track refresh
+
+    /// Fetch only the given tracks from the database and update their rows in-place.
+    ///
+    /// Use this instead of `loadCurrentDestination()` after a tag edit or track
+    /// identification so the table keeps its scroll position and selection.
+    public func refreshTracks(ids: [Int64]) async {
+        guard !ids.isEmpty else { return }
+        let repo = TrackRepository(database: self.database)
+        var updated: [Track] = []
+        for id in ids {
+            do {
+                let track = try await repo.fetch(id: id)
+                updated.append(track)
+            } catch {
+                // The row keeps the values it had before the edit, so the table
+                // silently contradicts what was just saved (#491).
+                self.log.warning("library.refreshTracks.fetchFailed", [
+                    "id": id,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+        guard !updated.isEmpty else { return }
+        self.tracks.updateRows(for: updated)
+    }
+
+    // MARK: - ReplayGain batch analysis
+
+    /// Analyse ReplayGain for a specific set of track IDs (e.g. the current selection).
+    ///
+    /// Only tracks whose IDs exist in the database are analysed; IDs that are not
+    /// found are silently skipped.  Any existing ReplayGain values for the supplied
+    /// tracks are replaced.
+    public func computeReplayGain(forTrackIDs ids: [Int64]) async {
+        guard self.replayGainProgress == nil else { return }
+        guard !ids.isEmpty else { return }
+        let repo = TrackRepository(database: self.database)
+        do {
+            let all = try await repo.fetchAll()
+            let selected = all.filter { ids.contains($0.id ?? -1) }
+            await self.runReplayGainBatch(tracks: selected, repo: repo)
+        } catch {
+            self.log.error("rg.selection.fetchFailed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Analyse only tracks that currently have no ReplayGain data, and give an
+    /// album gain to every album still without one whose tracks are all
+    /// measured, which covers a library analysed before album gain was
+    /// computed (#579).
+    public func computeMissingReplayGain() async {
+        guard self.replayGainProgress == nil else { return } // already running
+        let repo = TrackRepository(database: self.database)
+        do {
+            let all = try await repo.fetchAll()
+            let missing = all.filter { $0.replaygainTrackGain == nil }
+            let albumsWithoutGain = Set(all.filter { $0.replaygainAlbumGain == nil }.compactMap(\.albumID))
+            await self.runReplayGainBatch(tracks: missing, repo: repo, alsoAlbums: albumsWithoutGain)
+        } catch {
+            self.log.error("rg.batch.fetchFailed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Re-analyse every track in the library, replacing existing values.
+    public func recomputeAllReplayGain() async {
+        guard self.replayGainProgress == nil else { return }
+        let repo = TrackRepository(database: self.database)
+        do {
+            let all = try await repo.fetchAll()
+            await self.runReplayGainBatch(tracks: all, repo: repo)
+        } catch {
+            self.log.error("rg.batch.fetchFailed", ["error": String(reflecting: error)])
+        }
+    }
+
+    /// Runs off the main actor on the cooperative thread pool so multiple tracks
+    /// can be decoded and measured in parallel.
+    private nonisolated static func analyzeTrack(_ track: Track) async -> Result<Track, Error> {
+        let log = AppLogger.make(.audio)
+        do {
+            let url: URL
+            if let bookmarkData = track.fileBookmark {
+                url = try BookmarkBlob(data: bookmarkData).resolve()
+            } else {
+                guard let raw = URL(string: track.fileURL) else { throw URLError(.badURL) }
+                url = raw
+            }
+            defer { url.stopAccessingSecurityScopedResource() }
+            let rg = try await ReplayGainAnalyzer.analyze(url: url)
+            var updated = track
+            updated.replaygainTrackGain = rg.trackGainDB
+            updated.replaygainTrackPeak = rg.trackPeakLinear
+            return .success(updated)
+        } catch {
+            log.error("rg.batch.trackFailed", [
+                "url": track.fileURL,
+                "error": String(reflecting: error),
+            ])
+            return .failure(error)
+        }
+    }
+
+    /// Measure `tracks`, then compute the album gain of their albums and of
+    /// `alsoAlbums` (#579).
+    private func runReplayGainBatch(tracks: [Track], repo: TrackRepository, alsoAlbums: Set<Int64> = []) async {
+        guard !tracks.isEmpty else {
+            self.replayGainProgress = ReplayGainBatchProgress(done: 0, total: 0, failed: 0)
+            await ReplayGainAlbumPass.run(albumIDs: alsoAlbums, repo: repo)
+            return
+        }
+        self.replayGainProgress = ReplayGainBatchProgress(done: 0, total: tracks.count, failed: 0)
+
+        // Keep up to `concurrency` analysis tasks in flight at once.
+        // Cap at 8: each in-flight track holds ~30 MB of Float32 PCM samples.
+        let concurrency = min(ProcessInfo.processInfo.activeProcessorCount, 8)
+        var done = 0
+        var failed = 0
+        var nextIndex = 0
+        var measuredAlbums = alsoAlbums
+
+        await withTaskGroup(of: Result<Track, Error>.self) { group in
+            // Seed the initial pool.
+            while nextIndex < tracks.count, nextIndex < concurrency {
+                let track = tracks[nextIndex]
+                nextIndex += 1
+                group.addTask { await Self.analyzeTrack(track) }
+            }
+
+            // Drain results on the main actor; refill immediately after each.
+            for await result in group {
+                switch result {
+                case let .success(updatedTrack):
+                    do {
+                        // Only the gain columns: the row was read when the
+                        // batch started, and a play or edit since is kept.
+                        try await repo.setTrackReplayGain(from: updatedTrack)
+                        if let albumID = updatedTrack.albumID {
+                            measuredAlbums.insert(albumID)
+                        }
+                    } catch {
+                        self.log.error("rg.batch.updateFailed", ["error": String(reflecting: error)])
+                        failed += 1
+                    }
+                    done += 1
+
+                case .failure:
+                    failed += 1
+                    done += 1
+                }
+
+                self.replayGainProgress = ReplayGainBatchProgress(
+                    done: done,
+                    total: tracks.count,
+                    failed: failed
+                )
+
+                if nextIndex < tracks.count {
+                    let track = tracks[nextIndex]
+                    nextIndex += 1
+                    group.addTask { await Self.analyzeTrack(track) }
+                }
+            }
+        }
+
+        // The albums whose tracks were measured get their album gain (#579).
+        await ReplayGainAlbumPass.run(albumIDs: measuredAlbums, repo: repo)
+    }
+}
+
+// MARK: - ReplayGainBatchProgress
+
+/// Progress snapshot for a running or completed ReplayGain batch analysis.
+public struct ReplayGainBatchProgress: Sendable {
+    public let done: Int
+    public let total: Int
+    public let failed: Int
+
+    public var isComplete: Bool {
+        self.done == self.total
+    }
+
+    public var succeeded: Int {
+        self.done - self.failed
+    }
+}

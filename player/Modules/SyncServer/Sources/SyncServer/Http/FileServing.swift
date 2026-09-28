@@ -1,0 +1,467 @@
+import AudioEngine
+import Crypto
+import Foundation
+import Library
+import Metadata
+import Observability
+import Persistence
+import Podcasts
+
+/// The paired-only file endpoints (sync-protocol.md section 6). Every file is
+/// resolved by id or hash through the database and its stored location; the
+/// request never names a filesystem path, so directory traversal is structurally
+/// impossible. Track and episode bodies are streamed (never buffered whole);
+/// artwork and lyrics are small and buffered.
+///
+/// Tracks and episodes both support `Range` resume and `If-Match`/`ETag` (via the
+/// stored `content_hash`; episodes gained one in migration M032).
+///
+/// One v1 limitation, driven by the data model (not the wire contract):
+/// `/v1/chapters` returns 404 because chapters are fetched from the network on
+/// demand with no cached store to serve, and a serving handler must not make
+/// outbound requests. Caching chapters is a Podcasts-module follow-up.
+struct FileServing {
+    private let trackRepository: TrackRepository
+    private let episodeRepository: EpisodeRepository
+    private let episodeStateRepository: EpisodeStateRepository
+    private let coverArtRepository: CoverArtRepository
+    private let podcastRepository: PodcastRepository
+    private let playlistRepository: PlaylistRepository
+    private let profileRepository: SyncProfileRepository
+    private let smartService: SmartPlaylistService
+    private let lyricsService: LyricsService
+    private let downloadStore: DownloadStore
+    private let transcodeLedger: SyncTranscodeRepository
+    private let transcodeStore: TranscodeStore
+    private let transcodeCoordinator: TranscodeCoordinator?
+    private let log = AppLogger.make(.sync)
+
+    init(
+        database: Database,
+        downloadRoot: URL? = nil,
+        transcodeRoot: URL? = nil,
+        transcodeCoordinator: TranscodeCoordinator? = nil
+    ) {
+        self.trackRepository = TrackRepository(database: database)
+        self.episodeRepository = EpisodeRepository(database: database)
+        self.episodeStateRepository = EpisodeStateRepository(database: database)
+        self.coverArtRepository = CoverArtRepository(database: database)
+        self.podcastRepository = PodcastRepository(database: database)
+        self.playlistRepository = PlaylistRepository(database: database)
+        self.profileRepository = SyncProfileRepository(database: database)
+        self.smartService = SmartPlaylistService(database: database)
+        self.lyricsService = LyricsService(database: database, fetcher: nil)
+        self.downloadStore = DownloadStore(root: downloadRoot)
+        self.transcodeLedger = SyncTranscodeRepository(database: database)
+        self.transcodeStore = TranscodeStore(root: transcodeRoot)
+        self.transcodeCoordinator = transcodeCoordinator
+    }
+
+    func routes() -> [Router.Route] {
+        [
+            Router.Route("GET", "/v1/file/track/{trackId}", auth: .paired) { request, match in
+                await self.track(request, match)
+            },
+            Router.Route("GET", "/v1/file/episode/{episodeId}", auth: .paired) { request, match in
+                await self.episode(request, match)
+            },
+            Router.Route("GET", "/v1/artwork/{hash}", auth: .paired) { _, match in
+                await self.artwork(match)
+            },
+            Router.Route("GET", "/v1/lyrics/{trackId}", auth: .paired) { _, match in
+                await self.lyrics(match)
+            },
+            Router.Route("GET", "/v1/chapters/{episodeId}", auth: .paired) { _, _ in
+                Self.notFound
+            },
+        ]
+    }
+
+    // MARK: - Track audio
+
+    private func track(_ request: HttpRequest, _ match: Router.RouteMatch) async -> HttpResponse {
+        guard let idString = match.parameters["trackId"], let trackId = Int64(idString) else {
+            return Self.notFound
+        }
+        let track: Track
+        do {
+            track = try await self.trackRepository.fetch(id: trackId)
+        } catch {
+            return Self.notFound
+        }
+        guard !track.disabled else { return Self.notFound }
+
+        do {
+            guard try await self.isTrackInProfile(trackId) else { return Self.notFound }
+        } catch {
+            return Self.serverError
+        }
+
+        // ADR-088: under a transcode preset, a track the predicate marks for
+        // transcoding is served from its prepared artifact, never the source.
+        let transcode = await ManifestRoutes.loadDocument(self.profileRepository).transcode
+        if let preset = transcode.preset, TranscodeCoordinator.needsTranscode(track, preset: preset) {
+            return await self.transcodedTrack(request, track: track, trackId: trackId, preset: preset)
+        }
+
+        // If-Match compares the stored content hash, so reject a stale request
+        // before touching the file.
+        if let ifMatch = request.header("if-match"), let hash = track.contentHash, ifMatch != hash {
+            return .error(.notFound, message: "Precondition failed", status: 412)
+        }
+
+        guard let bookmark = track.fileBookmark else {
+            self.log.error("file.track.no_bookmark", ["id": trackId])
+            return Self.notFound
+        }
+
+        let size: Int64
+        do {
+            size = try await SecurityScope.withAccess(bookmark) { url in try Self.fileSize(url) }
+        } catch {
+            self.log.error("file.track.stale_bookmark", ["id": trackId, "error": String(reflecting: error)])
+            return Self.notFound
+        }
+
+        var headers: [String: String] = [
+            "content-type": Self.audioMIME(track.fileFormat),
+            "accept-ranges": "bytes",
+        ]
+        if let hash = track.contentHash {
+            headers["etag"] = hash
+        }
+
+        switch Self.resolveRange(request, totalSize: size) {
+        case .unsatisfiable:
+            return .error(.notFound, message: "Range not satisfiable", status: 416)
+        case let .full(fullSize):
+            return .streamed(status: 200, headers: headers, length: Int(fullSize)) { write in
+                try await SecurityScope.withAccess(bookmark) { url in
+                    try await Self.streamFile(url, offset: 0, length: fullSize, write: write)
+                }
+            }
+        case let .partial(start, length, contentRange):
+            headers["content-range"] = contentRange
+            return .streamed(status: 206, headers: headers, length: Int(length)) { write in
+                try await SecurityScope.withAccess(bookmark) { url in
+                    try await Self.streamFile(url, offset: start, length: length, write: write)
+                }
+            }
+        }
+    }
+
+    /// Serves the prepared artifact for a transcoded track (ADR-088). Ledger
+    /// fields are the truth (`ETag` = artifact `sha256`), `served_at` is
+    /// stamped when a response delivers the artifact through EOF, and
+    /// released bytes draw `503 busy` with `Retry-After` while the re-encode
+    /// is queued at the head of the coordinator's work.
+    private func transcodedTrack(
+        _ request: HttpRequest,
+        track: Track,
+        trackId: Int64,
+        preset: TranscodePreset
+    ) async -> HttpResponse {
+        guard let sourceHash = track.contentHash else { return Self.notFound }
+        let row: SyncTranscode?
+        do {
+            row = try await self.transcodeLedger.validRow(
+                trackID: trackId,
+                preset: preset.rawValue,
+                sourceContentHash: sourceHash
+            )
+        } catch {
+            self.log.error("file.track.ledger.failed", ["id": trackId, "error": String(reflecting: error)])
+            return Self.serverError
+        }
+        // No valid row: the manifest never advertised this track.
+        guard let row else { return Self.notFound }
+
+        // If-Match compares the artifact hash the manifest promised.
+        if let ifMatch = request.header("if-match"), ifMatch != row.sha256 {
+            return .error(.notFound, message: "Precondition failed", status: 412)
+        }
+
+        guard self.transcodeStore.exists(trackID: trackId, sourceContentHash: sourceHash, preset: preset) else {
+            // Bytes were released after a completed transfer; re-prepare and
+            // say busy (sync-protocol.md section 6). A hash change across the
+            // re-encode surfaces as an ordinary 412 on the retry.
+            if let coordinator = self.transcodeCoordinator {
+                await coordinator.requestUrgent(trackID: trackId)
+            }
+            var response = HttpResponse.error(.busy, message: "Preparing the file", status: 503)
+            response.headers["retry-after"] = "15"
+            return response
+        }
+        let url = self.transcodeStore.artifactURL(trackID: trackId, sourceContentHash: sourceHash, preset: preset)
+
+        var headers: [String: String] = [
+            "content-type": Self.audioMIME(preset.formatName),
+            "accept-ranges": "bytes",
+            "etag": row.sha256,
+        ]
+
+        let ledger = self.transcodeLedger
+        let stamp: @Sendable () async -> Void = {
+            do {
+                try await ledger.stampServed(
+                    trackID: trackId,
+                    preset: preset.rawValue,
+                    at: Int64(Date().timeIntervalSince1970)
+                )
+            } catch {
+                AppLogger.make(.sync).warning("file.track.stamp.failed", [
+                    "id": trackId,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+
+        switch Self.resolveRange(request, totalSize: row.size) {
+        case .unsatisfiable:
+            return .error(.notFound, message: "Range not satisfiable", status: 416)
+
+        case let .full(fullSize):
+            return .streamed(status: 200, headers: headers, length: Int(fullSize)) { write in
+                try await Self.streamFile(url, offset: 0, length: fullSize, write: write)
+                await stamp()
+            }
+
+        case let .partial(start, length, contentRange):
+            headers["content-range"] = contentRange
+            let reachesEOF = start + length == row.size
+            return .streamed(status: 206, headers: headers, length: Int(length)) { write in
+                try await Self.streamFile(url, offset: start, length: length, write: write)
+                if reachesEOF {
+                    await stamp()
+                }
+            }
+        }
+    }
+
+    // MARK: - Episode audio
+
+    private func episode(_ request: HttpRequest, _ match: Router.RouteMatch) async -> HttpResponse {
+        guard let episodeIdHash = match.parameters["episodeId"] else { return Self.notFound }
+        do {
+            guard await self.profileIncludesPodcasts() else { return Self.notFound }
+            let downloaded = try await self.episodeStateRepository.fetchByDownloadState([.downloaded])
+            guard let state = downloaded.first(where: { Self.guidHash($0.guid) == episodeIdHash }) else {
+                return Self.notFound
+            }
+            guard let content = try await self.episodeRepository.fetchByGUID(podcastID: state.podcastID, guid: state.guid) else {
+                return Self.notFound
+            }
+
+            // If-Match against the stored download hash (M032), before file I/O.
+            if let hash = state.contentHash, let ifMatch = request.header("if-match"), ifMatch != hash {
+                return .error(.notFound, message: "Precondition failed", status: 412)
+            }
+
+            let fileURL = self.downloadStore.fileURL(podcastID: state.podcastID, guid: state.guid, mime: content.audioMIME)
+            let size: Int64
+            do {
+                size = try Self.fileSize(fileURL)
+            } catch {
+                self.log.error("file.episode.missing", ["id": episodeIdHash])
+                return Self.notFound
+            }
+
+            var headers = ["content-type": Self.audioMIME(content.audioMIME ?? ""), "accept-ranges": "bytes"]
+            if let hash = state.contentHash {
+                headers["etag"] = hash
+            }
+            switch Self.resolveRange(request, totalSize: size) {
+            case .unsatisfiable:
+                return .error(.notFound, message: "Range not satisfiable", status: 416)
+            case let .full(fullSize):
+                return .streamed(status: 200, headers: headers, length: Int(fullSize)) { write in
+                    try await Self.streamFile(fileURL, offset: 0, length: fullSize, write: write)
+                }
+            case let .partial(start, length, contentRange):
+                var rangeHeaders = headers
+                rangeHeaders["content-range"] = contentRange
+                return .streamed(status: 206, headers: rangeHeaders, length: Int(length)) { write in
+                    try await Self.streamFile(fileURL, offset: start, length: length, write: write)
+                }
+            }
+        } catch {
+            self.log.error("file.episode.failed", ["error": String(reflecting: error)])
+            return Self.serverError
+        }
+    }
+
+    // MARK: - Artwork
+
+    private func artwork(_ match: Router.RouteMatch) async -> HttpResponse {
+        guard let hash = match.parameters["hash"] else { return Self.notFound }
+        do {
+            // Cover art first (the common case), then podcast show art (22-10).
+            // Both resolve the hash to a filesystem location through the
+            // database; the request never names a path, so traversal stays
+            // structurally impossible. Order matters only for correctness.
+            if let art = try await self.coverArtRepository.fetch(hash: hash) {
+                return self.serveArtworkFile(path: art.path, format: art.format, hash: hash)
+            }
+            if let podcast = try await self.podcastRepository.fetchByArtworkHash(hash),
+               let path = podcast.artworkPath {
+                return self.serveArtworkFile(path: path, format: URL(fileURLWithPath: path).pathExtension, hash: hash)
+            }
+            return Self.notFound
+        } catch {
+            return Self.serverError
+        }
+    }
+
+    /// Buffers and serves one artwork file (cover and show art are both small).
+    /// `path` came from the database, never the request; a gone file is a 404.
+    private func serveArtworkFile(path: String, format: String?, hash: String) -> HttpResponse {
+        let data: Data
+        do {
+            data = try Data(contentsOf: URL(fileURLWithPath: path))
+        } catch {
+            self.log.error("file.artwork.missing", ["hash": hash])
+            return Self.notFound
+        }
+        let headers = [
+            "content-type": Self.imageMIME(format),
+            "etag": hash,
+            "cache-control": "public, max-age=31536000, immutable",
+        ]
+        return HttpResponse(status: 200, headers: headers, body: data)
+    }
+
+    // MARK: - Lyrics
+
+    private struct LyricsPayload: Encodable {
+        let trackId: Int64
+        let kind: String
+        let text: String
+    }
+
+    private func lyrics(_ match: Router.RouteMatch) async -> HttpResponse {
+        guard let idString = match.parameters["trackId"], let trackId = Int64(idString) else {
+            return Self.notFound
+        }
+        do {
+            guard let document = try await self.lyricsService.lyrics(for: trackId) else { return Self.notFound }
+            let kind = switch document {
+            case .synced: "synced"
+            case .unsynced: "unsynced"
+            }
+            // The same serialization the manifest hashed for lyricsHash.
+            let payload = LyricsPayload(trackId: trackId, kind: kind, text: document.toLRC())
+            return try .json(data: JSONEncoder().encode(payload))
+        } catch {
+            return Self.serverError
+        }
+    }
+
+    // MARK: - Profile filtering (keep in sync with ManifestBuilder)
+
+    private func loadProfile() async -> SyncProfile {
+        await ManifestRoutes.loadProfile(self.profileRepository)
+    }
+
+    private func profileIncludesPodcasts() async -> Bool {
+        await self.loadProfile().includesPodcasts
+    }
+
+    private func isTrackInProfile(_ trackId: Int64) async throws -> Bool {
+        let membership = ProfileMembership(
+            playlistRepository: self.playlistRepository,
+            smartService: self.smartService
+        )
+        guard let ids = try await membership.selectedTrackIDs(profile: self.loadProfile()) else {
+            return true
+        }
+        return ids.contains(trackId)
+    }
+
+    // MARK: - Helpers
+
+    private static var notFound: HttpResponse {
+        .error(.notFound, message: "Not found", status: 404)
+    }
+
+    private static var serverError: HttpResponse {
+        .error(.internal, message: "Error", status: 500)
+    }
+
+    private static func guidHash(_ guid: String) -> String {
+        String(SHA256.hash(data: Data(guid.utf8)).map { String(format: "%02x", $0) }.joined().prefix(32))
+    }
+
+    private static func fileSize(_ url: URL) throws -> Int64 {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        return Int64(values.fileSize ?? 0)
+    }
+
+    /// A resolved `Range` request against a file of `totalSize` bytes.
+    private enum RangeResolution {
+        case full(size: Int64)
+        case partial(start: Int64, length: Int64, contentRange: String)
+        case unsatisfiable
+    }
+
+    private static func resolveRange(_ request: HttpRequest, totalSize: Int64) -> RangeResolution {
+        guard let header = request.header("range"), header.hasPrefix("bytes=") else {
+            return .full(size: totalSize)
+        }
+        let spec = header.dropFirst("bytes=".count)
+        let parts = spec.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let startPart = parts.first, let start = Int64(startPart) else {
+            return .full(size: totalSize)
+        }
+        guard start >= 0, start < totalSize else { return .unsatisfiable }
+        var end = totalSize - 1
+        if parts.count == 2, !parts[1].isEmpty, let explicitEnd = Int64(parts[1]) {
+            end = min(explicitEnd, totalSize - 1)
+        }
+        guard end >= start else { return .unsatisfiable }
+        return .partial(start: start, length: end - start + 1, contentRange: "bytes \(start)-\(end)/\(totalSize)")
+    }
+
+    private static func streamFile(
+        _ url: URL,
+        offset: Int64,
+        length: Int64,
+        write: @Sendable (Data) async throws -> Void
+    ) async throws {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        if offset > 0 {
+            try handle.seek(toOffset: UInt64(offset))
+        }
+        var remaining = length
+        while remaining > 0 {
+            try Task.checkCancellation()
+            let chunkSize = Int(min(remaining, 1 << 20))
+            guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else { break }
+            try await write(chunk)
+            remaining -= Int64(chunk.count)
+        }
+    }
+
+    private static func audioMIME(_ format: String) -> String {
+        switch format.lowercased() {
+        case "flac": "audio/flac"
+        case "mp3", "audio/mpeg": "audio/mpeg"
+        case "m4a", "aac", "mp4", "audio/mp4": "audio/mp4"
+        case "ogg", "oga": "audio/ogg"
+        case "opus": "audio/opus"
+        case "wav": "audio/wav"
+        case "aiff", "aif": "audio/aiff"
+        default: "application/octet-stream"
+        }
+    }
+
+    private static func imageMIME(_ format: String?) -> String {
+        switch format?.lowercased() {
+        case "jpg", "jpeg": "image/jpeg"
+        case "png": "image/png"
+        case "gif": "image/gif"
+        case "webp": "image/webp"
+        default: "application/octet-stream"
+        }
+    }
+}

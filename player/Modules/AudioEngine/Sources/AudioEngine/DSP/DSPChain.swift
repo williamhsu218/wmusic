@@ -1,0 +1,328 @@
+@preconcurrency import AVFoundation
+import Foundation
+import Observability
+
+// MARK: - DSPChain
+
+/// Owns, connects, and manages the full DSP signal chain.
+///
+/// **Chain topology** (all nodes always present; each individually bypassable):
+/// ```
+/// PlayerNode → TimePitch → EQ → BassBoost → Crossfeed → StereoExpander → Limiter → Mixer
+/// ```
+///
+/// ReplayGain is not a node here: it is per track, so the buffer pump applies
+/// it to each track's samples before they reach the player node (#573).
+///
+/// `TimePitch` is always first so pitch-corrected speed changes apply before any
+/// EQ or dynamics processing.  Its `timePitchAlgorithm` is fixed to `.spectral`
+/// at init — changing the algorithm while audio is playing causes a dropout.
+///
+/// Nodes are attached to the `AVAudioEngine` once at construction.
+/// Graph reconnection happens in `reconnect(format:engine:from:to:)` — called by
+/// `EngineGraph.start()` when the hardware sample rate is confirmed.
+///
+/// Thread-safety: all mutations are serialised by the owning `AudioEngine` actor.
+public final class DSPChain: @unchecked Sendable {
+    // @unchecked: AVFoundation nodes lack Sendable; safety provided by AudioEngine actor.
+
+    // MARK: - Nodes (public for testing)
+
+    /// Pitch-preserving time-stretch node.  Rate is 1.0× by default.
+    public let timePitch: AVAudioUnitTimePitch
+    public let eq: EQUnit
+    public let bassBoost: BassBoostUnit
+    public let crossfeed: CrossfeedUnit
+    public let stereoExpander: StereoExpanderUnit
+    public let limiter: LimiterUnit
+
+    private let log = AppLogger.make(.audio)
+
+    /// In-flight EQ gain ramp task — cancelled and replaced on each preset change.
+    private var eqRampTask: Task<Void, Never>?
+
+    /// In-flight bass-boost ramp task — cancelled and replaced on each slider move.
+    private var bassBoostRampTask: Task<Void, Never>?
+
+    // MARK: - Graph connection points
+
+    /// First node in the chain; connect the player node output here.
+    var inputNode: AVAudioNode {
+        self.timePitch
+    }
+
+    /// Last node in the chain; connect this to the main mixer.
+    var outputNode: AVAudioNode {
+        self.limiter.node
+    }
+
+    // MARK: - Init
+
+    public init() {
+        self.timePitch = AVAudioUnitTimePitch()
+        // Bypass the spectral phase-vocoder immediately so it does not burn CPU
+        // on every render cycle at unity rate. setRate(_:) un-bypasses it only
+        // when the user actually requests a rate other than 1.0×.
+        self.timePitch.bypass = true
+        self.eq = EQUnit()
+        self.bassBoost = BassBoostUnit()
+        self.crossfeed = CrossfeedUnit()
+        self.stereoExpander = StereoExpanderUnit()
+        self.limiter = LimiterUnit()
+    }
+
+    // MARK: - Engine integration
+
+    /// Attach all nodes to the engine. Call once on construction.
+    func attach(to engine: AVAudioEngine) {
+        engine.attach(self.timePitch)
+        engine.attach(self.eq.node)
+        engine.attach(self.bassBoost.node)
+        engine.attach(self.crossfeed.node)
+        engine.attach(self.stereoExpander.node)
+        engine.attach(self.limiter.node)
+    }
+
+    /// Connect the internal chain with the given format.
+    /// `from` is the player node output; `to` is the main mixer input.
+    func connect(
+        format: AVAudioFormat?,
+        engine: AVAudioEngine,
+        from playerNode: AVAudioPlayerNode,
+        to mixer: AVAudioMixerNode
+    ) {
+        // PlayerNode → TimePitch → EQ → BassBoost → Crossfeed → StereoExpander → Limiter → Mixer
+        engine.connect(playerNode, to: self.timePitch, format: format)
+        engine.connect(self.timePitch, to: self.eq.node, format: format)
+        engine.connect(self.eq.node, to: self.bassBoost.node, format: format)
+        engine.connect(self.bassBoost.node, to: self.crossfeed.node, format: format)
+        engine.connect(self.crossfeed.node, to: self.stereoExpander.node, format: format)
+        engine.connect(self.stereoExpander.node, to: self.limiter.node, format: format)
+        engine.connect(self.limiter.node, to: mixer, format: format)
+        // sampleRate is 0 when format is nil (engine picks default); that's intentional at init.
+        self.log.debug("dsp.chain.connected", ["sampleRate": format?.sampleRate ?? 0 as Double])
+    }
+
+    /// Disconnect all internal and boundary connections.
+    func disconnect(engine: AVAudioEngine, playerNode: AVAudioPlayerNode) {
+        engine.disconnectNodeOutput(playerNode)
+        engine.disconnectNodeOutput(self.timePitch)
+        engine.disconnectNodeOutput(self.eq.node)
+        engine.disconnectNodeOutput(self.bassBoost.node)
+        engine.disconnectNodeOutput(self.crossfeed.node)
+        engine.disconnectNodeOutput(self.stereoExpander.node)
+        engine.disconnectNodeOutput(self.limiter.node)
+    }
+
+    /// Set the playback rate (0.5×–2.0×) with pitch correction.
+    ///
+    /// At unity rate the `AVAudioUnitTimePitch` node is bypassed rather than set
+    /// to 1.0.  Setting rate=1.0 on a live phase-vocoder node can leave residual
+    /// stretched samples in its internal buffer, causing audible corruption.
+    /// Bypassing sidesteps the algorithm entirely and produces clean passthrough.
+    public func setRate(_ rate: Float) {
+        let clamped = rate.clamped(to: 0.5 ... 2.0)
+        let isUnity = abs(clamped - 1.0) < 0.001
+        if isUnity {
+            self.timePitch.bypass = true
+        } else {
+            self.timePitch.bypass = false
+            self.timePitch.rate = clamped
+        }
+        self.log.debug("dsp.rate.set", ["rate": rate, "bypass": isUnity])
+    }
+
+    // MARK: - DSP state application
+
+    /// Apply a complete `DSPState` snapshot to the chain.
+    public func apply(_ state: DSPState, presets: PresetStore) {
+        let resolvedPreset: EQPreset? = state.eqPresetID.flatMap { presets.preset(forID: $0) }
+
+        // EQ bypass logic:
+        // - Disabled by user → bypass
+        // - Enabled but preset is flat (all 0 dB) → bypass (saves 10 IIR biquads from the RT chain)
+        // - Enabled with non-flat preset → active
+        let eqWasActive = !self.eq.bypass
+        let eqWillBeActive = state.eqEnabled && !(resolvedPreset?.isFlat ?? true)
+
+        if eqWasActive, !eqWillBeActive {
+            // Disabling (or switching to Flat): ramp all bands to 0 dB then engage bypass
+            // so the IIR delay-line drains cleanly before it is discarded.
+            self.rampToFlatThenBypass()
+        } else if !eqWasActive, eqWillBeActive {
+            // Enabling with a non-flat preset: zero the bands so the freshly un-bypassed
+            // IIR filter starts at flat response (no discontinuity), then ramp to target.
+            self.eqRampTask?.cancel()
+            self.eqRampTask = nil
+            self.eq.reset()
+            self.eq.bypass = false
+            if let preset = resolvedPreset {
+                self.rampEQ(to: preset)
+            }
+        } else if let preset = resolvedPreset {
+            // No bypass state change: update the preset if needed.
+            if eqWillBeActive {
+                self.rampEQ(to: preset)
+            } else {
+                // Instant apply is safe while the EQ is bypassed.
+                self.eq.apply(preset: preset)
+            }
+        }
+
+        // Bass boost — ramp to avoid IIR discontinuity on gain/bypass changes.
+        self.rampBassBoost(to: state.bassBoostDB)
+
+        // Crossfeed
+        self.crossfeed.setAmount(state.crossfeedAmount)
+        self.crossfeed.bypass = state.crossfeedAmount < 1e-4
+
+        // Stereo expander
+        self.stereoExpander.setWidth(state.stereoWidth)
+        // At unity width, bypass to save a tiny bit of CPU and guarantee identity output.
+        self.stereoExpander.bypass = abs(state.stereoWidth - 1.0) < 1e-4
+
+        self.log.debug("dsp.state.applied", [
+            "eq": state.eqEnabled,
+            "preset": state.eqPresetID ?? "custom",
+            "bass": state.bassBoostDB,
+            "crossfeed": state.crossfeedAmount,
+            "width": state.stereoWidth,
+        ])
+    }
+
+    /// Interpolate EQ band gains from their current values to the target preset over ~60 ms.
+    ///
+    /// This prevents the audible pop that occurs when IIR biquad coefficients change
+    /// instantaneously mid-stream (the filter's delay-line state doesn't match the new
+    /// coefficients, producing a transient).  12 steps × 5 ms = 60 ms total — below the
+    /// threshold of audible latency and well above typical render-cycle durations.
+    private func rampEQ(to target: EQPreset) {
+        self.eqRampTask?.cancel()
+        let startGains = self.eq.node.bands.map { Double($0.gain) }
+        let startGlobal = Double(self.eq.node.globalGain)
+        let targetGains = target.bandGainsDB
+        let targetGlobal = target.outputGainDB
+
+        // Skip the ramp entirely when gains already match — avoids 12 Task
+        // wakeups on redundant pushToEngine() calls (e.g. settings re-apply).
+        let gainsMatch = startGlobal == targetGlobal
+            && startGains.count == targetGains.count
+            && zip(startGains, targetGains).allSatisfy { abs($0 - $1) < 1e-4 }
+        if gainsMatch {
+            return
+        }
+
+        let steps = 12
+        self.eqRampTask = Task { [weak self] in
+            for step in 1 ... steps {
+                guard !Task.isCancelled, let self else { return }
+                let t = Double(step) / Double(steps)
+                // Ease-in-out so the ramp feels smooth rather than linear.
+                let ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
+                for i in 0 ..< min(self.eq.node.bands.count, targetGains.count) {
+                    self.eq.node.bands[i].gain = Float(startGains[i] + (targetGains[i] - startGains[i]) * ease)
+                }
+                self.eq.node.globalGain = Float(startGlobal + (targetGlobal - startGlobal) * ease)
+                try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
+            }
+        }
+    }
+
+    /// Ramp all EQ band gains from their current values to 0 dB (flat), then
+    /// engage bypass. Prevents the audible pop from discarding the IIR
+    /// delay-line state when `bypass` is set while audio is flowing.
+    ///
+    /// 6 steps × 5 ms = 30 ms total — inaudible as a fade, long enough to
+    /// drain the IIR delay line to a near-zero state at any sample rate ≤ 192 kHz.
+    private func rampToFlatThenBypass() {
+        self.eqRampTask?.cancel()
+        let startGains = self.eq.node.bands.map { Double($0.gain) }
+        let startGlobal = Double(self.eq.node.globalGain)
+        let steps = 6
+        self.eqRampTask = Task { [weak self] in
+            for step in 1 ... steps {
+                guard !Task.isCancelled, let self else { return }
+                let t = Double(step) / Double(steps)
+                let ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
+                for (i, band) in self.eq.node.bands.enumerated() {
+                    let start = i < startGains.count ? startGains[i] : 0
+                    band.gain = Float(start * (1.0 - ease))
+                }
+                self.eq.node.globalGain = Float(startGlobal * (1.0 - ease))
+                try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.eq.bypass = true
+            self.log.debug("dsp.eq.bypass.engaged", [:])
+        }
+    }
+
+    /// Interpolate bass-boost gain from its current value to `targetDB` over ~60 ms,
+    /// managing the bypass flag pop-free.
+    ///
+    /// - If currently bypassed and target > 0: un-bypass first (gain is 0 = flat passthrough),
+    ///   then ramp up — no discontinuity because the IIR starts from a known-zero state.
+    /// - If currently active and target == 0: ramp to 0 first, then engage bypass — the
+    ///   IIR delay-line drains to near-zero before it is discarded.
+    /// - Otherwise: ramp between current and target with the node remaining active.
+    ///
+    /// Each call cancels any in-flight ramp, so rapid slider moves coalesce naturally.
+    private func rampBassBoost(to targetDB: Double) {
+        self.bassBoostRampTask?.cancel()
+        let targetClamped = targetDB.clamped(to: 0 ... 12)
+        let startDB = self.bassBoost.gainDB
+        if !self.bassBoost.node.bypass, targetClamped == startDB {
+            return
+        }
+        if self.bassBoost.node.bypass, targetClamped == 0 {
+            return
+        }
+
+        // Un-bypass at gain=0 so the filter starts from a flat (zero-gain) state.
+        // Reset the IIR delay lines first — without this, stale state from the
+        // previous active period causes a transient pop on the first render cycle.
+        if self.bassBoost.node.bypass, targetClamped > 0 {
+            self.bassBoost.reset()
+            self.bassBoost.node.bypass = false
+        }
+
+        let steps = 12
+        self.bassBoostRampTask = Task { [weak self] in
+            for step in 1 ... steps {
+                guard !Task.isCancelled, let self else { return }
+                let t = Double(step) / Double(steps)
+                let ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
+                self.bassBoost.node.bands.first?.gain = Float(startDB + (targetClamped - startDB) * ease)
+                try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.bassBoost.node.bands.first?.gain = Float(targetClamped)
+            if targetClamped == 0 {
+                self.bassBoost.node.bypass = true
+            }
+            self.log.debug("dsp.bassboost.ramp.done", ["targetDB": targetClamped])
+        }
+    }
+
+    /// Reset everything to safe defaults (called on engine stop / new load).
+    public func reset() {
+        self.eqRampTask?.cancel()
+        self.eqRampTask = nil
+        self.bassBoostRampTask?.cancel()
+        self.bassBoostRampTask = nil
+        self.eq.reset()
+        self.eq.bypass = false
+        self.bassBoost.reset()
+        self.bassBoost.setGainDB(0)
+        self.crossfeed.bypass = true
+        self.stereoExpander.bypass = true
+    }
+}
+
+// MARK: - Comparable clamp helper
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}

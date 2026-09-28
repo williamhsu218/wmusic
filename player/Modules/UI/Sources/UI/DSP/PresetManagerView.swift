@@ -1,0 +1,144 @@
+import AudioEngine
+import SwiftUI
+
+// MARK: - PresetManagerView
+
+/// Manages user-created EQ presets: rename, duplicate, delete.
+/// Built-in presets are shown as read-only references.
+public struct PresetManagerView: View {
+    @Bindable var vm: DSPViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var renameID: EQPreset.ID?
+    @State private var renameDraft = ""
+
+    public init(vm: DSPViewModel) {
+        self.vm = vm
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            Text(localized: "Manage EQ Presets")
+                .font(.headline)
+                .padding()
+
+            Divider()
+
+            List {
+                if !BuiltInPresets.all.isEmpty {
+                    Section(L10n.string("Built-in")) {
+                        ForEach(BuiltInPresets.all) { preset in
+                            self.presetRow(preset, isBuiltIn: true)
+                        }
+                    }
+                }
+
+                let userPresets = self.vm.presets.filter { !$0.isBuiltIn }
+                if !userPresets.isEmpty {
+                    Section(L10n.string("Your Presets")) {
+                        ForEach(userPresets) { preset in
+                            self.presetRow(preset, isBuiltIn: false)
+                        }
+                        .onDelete { offsets in
+                            for i in offsets {
+                                self.vm.deleteUserPreset(id: userPresets[i].id)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button(L10n.string("Done")) { self.dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(width: 360, height: 480)
+    }
+
+    // MARK: - Row
+
+    private func presetRow(_ preset: EQPreset, isBuiltIn: Bool) -> some View {
+        HStack {
+            if self.renameID == preset.id {
+                TextField(L10n.string("Name"), text: self.$renameDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { self.commitRename(preset: preset) }
+                    .accessibilityLabel(L10n.string("Rename preset"))
+                Button(L10n.string("OK")) { self.commitRename(preset: preset) }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            } else {
+                Text(preset.displayName)
+                Spacer()
+                if !isBuiltIn {
+                    Button {
+                        self.renameDraft = preset.name
+                        self.renameID = preset.id
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.string("Rename \(preset.displayName)"))
+                    .help(L10n.string("Renames this preset."))
+
+                    Button { self.duplicate(preset: preset) } label: {
+                        Image(systemName: "plus.square.on.square")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.string("Duplicate \(preset.displayName)"))
+                    .help(L10n.string("Makes a copy you can change without touching this one."))
+
+                    Button(role: .destructive) {
+                        self.vm.deleteUserPreset(id: preset.id)
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.string("Delete \(preset.displayName)"))
+                    .help(L10n.string("Deletes this preset. If it is the one in use, the equaliser goes back to Flat."))
+                } else {
+                    Label(L10n.string("Built-in"), systemImage: "lock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .labelStyle(.iconOnly)
+                }
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func commitRename(preset: EQPreset) {
+        let name = self.renameDraft.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { self.renameID = nil
+            return
+        }
+        let updated = EQPreset(
+            id: preset.id,
+            name: name,
+            bandGainsDB: preset.bandGainsDB,
+            isBuiltIn: false,
+            outputGainDB: preset.outputGainDB
+        )
+        self.vm.presetStore.save(updated)
+        self.vm.presets = self.vm.presetStore.allPresets
+        self.renameID = nil
+    }
+
+    private func duplicate(preset: EQPreset) {
+        let copy = EQPreset(
+            id: UUID().uuidString,
+            name: L10n.string("\(preset.displayName) Copy"),
+            bandGainsDB: preset.bandGainsDB,
+            isBuiltIn: false,
+            outputGainDB: preset.outputGainDB
+        )
+        self.vm.presetStore.save(copy)
+        self.vm.presets = self.vm.presetStore.allPresets
+    }
+}

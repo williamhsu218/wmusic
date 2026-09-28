@@ -1,0 +1,171 @@
+import Foundation
+import Observability
+import Persistence
+import Playback
+import Podcasts
+import UI
+
+// MARK: - PodcastService: PodcastLibraryDataSource
+
+/// Empty conformance: the four required methods have the same signatures
+/// in both the protocol and `PodcastService`, so no implementation body is
+/// needed.
+extension PodcastService: @retroactive PodcastLibraryDataSource {}
+
+// MARK: - PodcastService: PodcastTranscriptProviding
+
+/// Empty conformance: `PodcastService.transcript(podcastID:guid:)` matches the
+/// seam signature exactly, so no implementation body is needed.
+extension PodcastService: @retroactive PodcastTranscriptProviding {}
+
+// MARK: - AppPodcastActions
+
+/// Concrete `PodcastActions` adapter that bridges the UI seam to the real
+/// `Podcasts` and `Playback` modules. Constructed once in `buildGraph` and
+/// injected into `LibraryViewModel`.
+struct AppPodcastActions: PodcastActions {
+    let service: PodcastService
+    let player: QueuePlayer
+    let downloads: EpisodeDownloadManager?
+
+    func subscribe(feedURL: URL, podcastIndexID: Int?, itunesCollectionID: Int?) async throws -> Int64 {
+        try await self.service.subscribe(
+            feedURL: feedURL,
+            podcastIndexID: podcastIndexID,
+            itunesCollectionID: itunesCollectionID
+        )
+    }
+
+    func unsubscribe(podcastID: Int64) async throws {
+        try await self.service.unsubscribe(podcastID: podcastID)
+    }
+
+    func refresh(podcastID: Int64) async throws {
+        _ = try await self.service.refresh(podcastID: podcastID)
+    }
+
+    func refreshAll() async {
+        await self.service.refreshAllStale()
+    }
+
+    func setAutoDownload(_ on: Bool, podcastID: Int64) async throws {
+        try await self.service.setAutoDownload(on, podcastID: podcastID)
+    }
+
+    func setPlaybackSpeed(_ speed: Double?, podcastID: Int64) async throws {
+        try await self.service.setPlaybackSpeed(speed, podcastID: podcastID)
+    }
+
+    func setEpisodeSort(_ sort: String?, podcastID: Int64) async throws {
+        try await self.service.setEpisodeSort(sort, podcastID: podcastID)
+    }
+
+    func setRetentionLimit(_ limit: Int?, podcastID: Int64) async throws {
+        try await self.service.setRetentionLimit(limit, podcastID: podcastID)
+    }
+
+    /// Builds a podcast `QueueItem` and hands it to `QueuePlayer.play(items:)`.
+    ///
+    /// Source format fields are intentionally generic: the real format is
+    /// sniffed when `QueuePlayer` resolves the `.podcast` source via
+    /// `AppPodcastResolver`; the values here only gate gapless compatibility
+    /// checks, which don't apply to podcast episodes.
+    func play(episode: EpisodeListItem, podcast: Podcast) async {
+        guard let feedURL = URL(string: podcast.feedURL) else { return }
+        let source = PlayableSource.podcast(feedURL: feedURL, episodeGUID: episode.episode.guid)
+        let item = QueueItem(
+            trackID: -1,
+            bookmark: nil,
+            fileURL: "",
+            duration: episode.episode.duration ?? 0,
+            sourceFormat: AudioSourceFormat(
+                sampleRate: 44100,
+                bitDepth: 16,
+                channelCount: 2,
+                isInterleaved: false,
+                codec: "mp3"
+            ),
+            title: episode.episode.title,
+            artistName: podcast.title,
+            albumName: podcast.title,
+            playableSource: source
+        )
+        do {
+            try await self.player.play(items: [item], startingAt: 0)
+        } catch {
+            // Keeping PodcastActions non-throwing is right, but dropping the
+            // error is not: the player's own log line cannot say which episode
+            // the person pressed play on. Same fault as a `try?` and invisible
+            // to a search for one (#493).
+            AppLogger.make(.podcasts).warning("podcast.play.failed", [
+                "guid": episode.episode.guid,
+                "error": String(reflecting: error),
+            ])
+        }
+    }
+
+    func markPlayed(podcastID: Int64, guid: String) async {
+        await self.service.markPlayed(podcastID: podcastID, guid: guid)
+    }
+
+    func markUnplayed(podcastID: Int64, guid: String) async {
+        await self.service.markUnplayed(podcastID: podcastID, guid: guid)
+    }
+
+    func markAllPlayed(podcastID: Int64) async {
+        await self.service.markAllPlayed(podcastID: podcastID)
+    }
+
+    func download(podcastID: Int64, guid: String) async {
+        await self.downloads?.download(podcastID: podcastID, guid: guid)
+    }
+
+    func removeDownload(podcastID: Int64, guid: String) async {
+        await self.downloads?.removeDownload(podcastID: podcastID, guid: guid)
+    }
+
+    /// Maps the download manager's progress stream to the UI seam type. The
+    /// manager's stream has one consumer, so this is subscribed once, by
+    /// `PodcastsViewModel` (see the protocol's note).
+    func downloadProgress() async -> AsyncStream<UIEpisodeDownloadProgress> {
+        guard let downloads else { return AsyncStream { $0.finish() } }
+        let source = downloads.progress
+        return AsyncStream { continuation in
+            let pump = Task {
+                for await event in source {
+                    continuation.yield(UIEpisodeDownloadProgress(
+                        podcastID: event.podcastID,
+                        guid: event.guid,
+                        fractionComplete: event.fractionComplete,
+                        status: event.status
+                    ))
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in pump.cancel() }
+        }
+    }
+
+    func chapters(podcastID: Int64, guid: String) async throws -> [UIChapter] {
+        let chapters = try await self.service.chapters(podcastID: podcastID, guid: guid)
+        return chapters.map {
+            UIChapter(id: $0.id, startTime: $0.startTime, title: $0.title, imageURL: $0.imageURL, url: $0.url)
+        }
+    }
+
+    func importOPML(data: Data, progress: @escaping @Sendable (Int, Int) -> Void) async throws -> UIOPMLImportSummary {
+        let summary = try await self.service.importOPML(data: data, progress: progress)
+        func map(_ items: [OPMLImportItem]) -> [UIOPMLImportItem] {
+            items.map { UIOPMLImportItem(title: $0.title, feedURL: $0.feedURL, reason: $0.reason) }
+        }
+        return UIOPMLImportSummary(
+            succeeded: map(summary.succeeded),
+            alreadySubscribed: map(summary.alreadySubscribed),
+            failed: map(summary.failed)
+        )
+    }
+
+    func exportOPML() async throws -> Data {
+        try await self.service.exportOPML()
+    }
+}

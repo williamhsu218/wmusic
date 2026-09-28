@@ -1,0 +1,132 @@
+import Foundation
+import Persistence
+
+// MARK: - LibraryViewModel + Love / Rating
+
+/// Love and rating actions on the current track-table selection.
+///
+/// Used by the global Track menu commands (`⌘L`, `⌘1`–`⌘5`) and by the
+/// right-click context menu.  Persists via `TrackRepository.update(_:)`
+/// and refreshes affected rows so the UI reflects the change without
+/// reloading the whole destination.
+public extension LibraryViewModel {
+    /// Toggles the `loved` flag on an explicit set of tracks (bypasses VM selection).
+    ///
+    /// All-loved → unlove all; otherwise love all — consistent with
+    /// `toggleLovedForCurrentSelection()`.
+    func toggleLoved(for tracks: [Track]) {
+        guard !tracks.isEmpty else { return }
+        let newValue = !tracks.allSatisfy(\.loved)
+        Task { await self.applyLoved(newValue, to: tracks) }
+    }
+
+    /// Toggles the `loved` flag on every track in the current selection.
+    ///
+    /// If the selection is heterogeneous (some loved, some not), all
+    /// tracks become loved.  Otherwise the flag is flipped.
+    func toggleLovedForCurrentSelection() {
+        let selectedIDs = self.tracks.selection
+        let selected = self.tracks.tracks.filter { selectedIDs.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        let newValue = !selected.allSatisfy(\.loved)
+        Task { await self.applyLoved(newValue, to: selected) }
+    }
+
+    /// Toggles the `loved` flag on the currently-playing track.
+    ///
+    /// No-op if nothing is playing.
+    func toggleLovedForNowPlaying() {
+        guard let trackID = self.nowPlaying.nowPlayingTrackID else { return }
+        let currentlyLoved = self.nowPlaying.nowPlayingIsLoved
+        let newValue = !currentlyLoved
+        Task {
+            let repo = Persistence.TrackRepository(database: self.database)
+            var track: Track
+            do {
+                track = try await repo.fetch(id: trackID)
+            } catch {
+                // The user pressed Love; nothing happening with no explanation
+                // is the one outcome this must not have (#480).
+                self.log.error("love.fetch.failed", ["track": trackID, "error": String(reflecting: error)])
+                self.showToast(ToastMessage(text: L10n.string("Couldn’t update Loved for that track.")))
+                return
+            }
+            track.loved = newValue
+            await self.applyLoved(newValue, to: [track])
+        }
+    }
+
+    /// Sets the rating (0–5 stars, stored as 0–100) on every track in the
+    /// current selection.
+    ///
+    /// - Parameter stars: 0–5.  Values outside the range are clamped.
+    func setRatingForCurrentSelection(stars: Int) {
+        let clamped = max(0, min(5, stars))
+        let value = clamped * 20
+        let selectedIDs = self.tracks.selection
+        let selected = self.tracks.tracks.filter { selectedIDs.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        Task { await self.applyRating(value, to: selected) }
+    }
+
+    /// Sets the rating (0–5 stars, stored as 0–100) on explicit tracks,
+    /// bypassing the ViewModel selection.  Used by the context menu, which
+    /// already has the target tracks in hand.
+    ///
+    /// - Parameters:
+    ///   - stars: 0–5.  Values outside the range are clamped.
+    ///   - tracks: The tracks to update.
+    func setRating(stars: Int, for tracks: [Track]) {
+        let clamped = max(0, min(5, stars))
+        let value = clamped * 20
+        guard !tracks.isEmpty else { return }
+        Task { await self.applyRating(value, to: tracks) }
+    }
+
+    // MARK: - Persistence helpers
+
+    private func applyLoved(_ loved: Bool, to tracks: [Track]) async {
+        Haptics.stateChange()
+        let repo = TrackRepository(database: self.database)
+        var updatedIDs: [Int64] = []
+        for var track in tracks {
+            track.loved = loved
+            do {
+                try await repo.update(track)
+                if let id = track.id {
+                    updatedIDs.append(id)
+                    // Keep the now-playing strip in sync without a round-trip.
+                    if id == self.nowPlaying.nowPlayingTrackID {
+                        self.nowPlaying.updateNowPlayingLoved(loved)
+                    }
+                    // Fan out to remote scrobble services (Last.fm, ListenBrainz).
+                    // Fire-and-forget — network failures are logged inside ScrobbleService.
+                    if let svc = self.scrobbleService {
+                        Task { await svc.love(trackID: id, loved: loved) }
+                    }
+                }
+            } catch {
+                self.log.error("library.love.failed", ["error": String(reflecting: error)])
+            }
+        }
+        await self.refreshTracks(ids: updatedIDs)
+    }
+
+    private func applyRating(_ rating: Int, to tracks: [Track]) async {
+        Haptics.stateChange()
+        let repo = TrackRepository(database: self.database)
+        var updatedIDs: [Int64] = []
+        for var track in tracks {
+            track.rating = rating
+            do {
+                try await repo.update(track)
+                if let id = track.id {
+                    updatedIDs.append(id)
+                }
+            } catch {
+                self.log.error("library.rating.failed", ["error": String(reflecting: error)])
+            }
+        }
+        await self.refreshTracks(ids: updatedIDs)
+    }
+}

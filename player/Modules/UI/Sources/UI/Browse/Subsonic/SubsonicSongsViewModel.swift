@@ -1,0 +1,183 @@
+import Foundation
+import Observability
+import Subsonic
+import SwiftSonic
+import SwiftUI
+
+// MARK: - SubsonicSongsViewModel
+
+/// Drives the per-server Songs destination (ADR-035 step 10).
+///
+/// Subsonic has no efficient "all songs" endpoint, so this view model
+/// repeatedly calls `getRandomSongs` to surface a deep but shuffled sample of
+/// the server's library. "Refresh" reseeds the sample; "Load more" appends.
+@MainActor
+public final class SubsonicSongsViewModel: ObservableObject, SubsonicAnnotationObserving {
+    public static let pageSize = 100
+
+    public let serverID: UUID
+
+    @Published public private(set) var songs: [Song] = [] {
+        didSet { self.rebuildRows() }
+    }
+
+    /// Decorated rows for `SubsonicSongTable`, owned here rather than mapped
+    /// in the view's body, so the O(n) decoration runs once per change of the
+    /// song list, the annotation overrides or the server name instead of once
+    /// per re-render (#475).
+    @Published private(set) var rows: [SubsonicSongTableRow] = [] {
+        didSet { self.rowsVersion &+= 1 }
+    }
+
+    /// Moves on every write to `rows` via `didSet`, so no path can forget it;
+    /// `SubsonicSongTable` skips its per-row walks while it holds (#455).
+    private(set) var rowsVersion = 0
+
+    /// Display name of this server, carried on every row. Set by the view,
+    /// which reads it from the sidebar server list; a rename rebuilds the rows.
+    public var serverName: String {
+        didSet {
+            guard self.serverName != oldValue else { return }
+            self.rebuildRows()
+        }
+    }
+
+    @Published public private(set) var isLoading = false
+    @Published public private(set) var hasMorePages = true
+    @Published public var errorMessage: String?
+
+    private let dataSource: any SubsonicBrowseDataSource
+    private let cache: (any SubsonicMetadataCaching)?
+    /// Held strongly: the coordinator outlives this view model, and its own
+    /// reference back to here is weak.
+    private let annotations: SubsonicAnnotationCoordinator?
+    private let log = AppLogger.make(.ui)
+
+    private static let cacheKind = "songs.randomSample"
+    private static let cacheEntityID = "default"
+
+    public init(
+        serverID: UUID,
+        dataSource: any SubsonicBrowseDataSource,
+        cache: (any SubsonicMetadataCaching)? = nil,
+        annotations: SubsonicAnnotationCoordinator? = nil,
+        serverName: String = ""
+    ) {
+        self.serverID = serverID
+        self.dataSource = dataSource
+        self.cache = cache
+        self.annotations = annotations
+        self.serverName = serverName
+        annotations?.addObserver(self)
+    }
+
+    // MARK: - Rows
+
+    /// Rebuilds every row from the current song list and overrides.
+    private func rebuildRows() {
+        let serverID = self.serverID
+        let serverName = self.serverName
+        let annotations = self.annotations
+        self.rows = self.songs.map {
+            SubsonicSongTableRow.make(
+                song: $0, serverID: serverID, serverName: serverName, annotations: annotations
+            )
+        }
+    }
+
+    /// A star or rating moved: the stored rows are now stale (#475).
+    public func annotationOverridesDidChange() {
+        self.rebuildRows()
+    }
+
+    /// Initial load — populates the random sample once per view lifetime.
+    /// Idempotent: if `songs` is already non-empty (from a prior in-session
+    /// fetch) or the persisted cache hydrates one, no network re-fetch is
+    /// issued. This stops the sample from re-shuffling every time `.task`
+    /// re-fires (e.g. on view re-appearance) and avoids the visible flash of
+    /// "cached snapshot → fresh random batch replaces it" on launch.
+    /// Use `refresh()` to explicitly reseed.
+    public func load() async {
+        if !self.songs.isEmpty {
+            return
+        }
+        await self.hydrateFromCache()
+        if !self.songs.isEmpty {
+            return
+        }
+        self.hasMorePages = true
+        await self.loadMore(replacingSample: true)
+    }
+
+    /// Explicit user-triggered reshuffle: discards the current sample and
+    /// fetches a fresh random batch from the server. Used by the toolbar's
+    /// Refresh button.
+    public func refresh() async {
+        self.songs = []
+        self.hasMorePages = true
+        await self.loadMore(replacingSample: true)
+    }
+
+    /// Appends another page of random songs. The server controls the seed,
+    /// so duplicates across pages are possible. We dedupe defensively.
+    public func loadMore() async {
+        await self.loadMore(replacingSample: false)
+    }
+
+    private func loadMore(replacingSample: Bool) async {
+        guard !self.isLoading, self.hasMorePages else { return }
+        self.isLoading = true
+        defer { self.isLoading = false }
+
+        do {
+            let batch = try await self.dataSource.getRandomSongs(
+                serverID: self.serverID,
+                size: Self.pageSize
+            )
+            if batch.isEmpty {
+                self.hasMorePages = false
+                return
+            }
+            if replacingSample {
+                self.songs = batch
+                await self.saveToCache(batch)
+            } else {
+                let existing = Set(self.songs.map(\.id))
+                let appended = batch.filter { !existing.contains($0.id) }
+                self.songs.append(contentsOf: appended)
+            }
+            // If the server returned a short page, assume we've sampled all
+            // it's willing to give us in this session.
+            if batch.count < Self.pageSize {
+                self.hasMorePages = false
+            }
+            self.errorMessage = nil
+        } catch {
+            self.log.error("subsonic.songs.load.failed", ["error": String(reflecting: error)])
+            self.errorMessage = (error as? LocalizedError)?.errorDescription
+                ?? "Could not load songs from this server."
+        }
+    }
+
+    private func hydrateFromCache() async {
+        guard let cache = self.cache else { return }
+        guard let data = await cache.loadCache(
+            serverID: self.serverID,
+            entityKind: Self.cacheKind,
+            entityID: Self.cacheEntityID
+        ) else { return }
+        guard let cached = try? JSONDecoder().decode([Song].self, from: data) else { return }
+        self.songs = cached
+    }
+
+    private func saveToCache(_ songs: [Song]) async {
+        guard let cache = self.cache else { return }
+        guard let payload = try? JSONEncoder().encode(songs) else { return }
+        await cache.saveCache(
+            serverID: self.serverID,
+            entityKind: Self.cacheKind,
+            entityID: Self.cacheEntityID,
+            payload: payload
+        )
+    }
+}

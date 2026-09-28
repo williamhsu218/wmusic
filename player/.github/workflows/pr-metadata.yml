@@ -1,0 +1,99 @@
+# PR metadata checks: cheap Linux jobs that guard the two things a squash
+# merge turns into permanent history. Re-run on title edits and label changes
+# so fixing either does not re-run the full suite. See ADR-033.
+name: PR Metadata
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    name: Conventional Commit title
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check the PR title (it becomes the squash commit subject)
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|refactor|docs|chore|ci|build|test|style|revert)(\([a-z0-9._-]+\))?!?: [^ ].*$'
+          if [[ "$TITLE" =~ $pattern ]]; then
+            echo "OK: '$TITLE'"
+          else
+            echo "::error::PR title must be a Conventional Commit, e.g. 'fix(subsonic): retry failed logins' (types: feat fix perf refactor docs chore ci build test style revert; scope = module). Got: '$TITLE'"
+            exit 1
+          fi
+          # U+2014 (em dash) as bytes, so this file does not contain one itself.
+          if [[ "$TITLE" == *$'\xe2\x80\x94'* ]]; then
+            echo "::error::PR title contains an em dash; use plain punctuation."
+            exit 1
+          fi
+
+  changelog:
+    name: Release note in CHANGELOG Unreleased
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require a note for user-visible changes
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          type="${TITLE%%[(!:]*}"
+          case "$type" in
+            feat|fix|perf) ;;
+            *) echo "Type '$type' needs no release note."; exit 0 ;;
+          esac
+          if [[ " $LABELS " == *" skip-changelog "* ]]; then
+            echo "skip-changelog label present; not requiring a note."
+            exit 0
+          fi
+
+          # Lines this PR adds inside the Unreleased section. Compare the
+          # section extracted from the base and head files rather than
+          # parsing the diff: a diff hunk only carries three context lines,
+          # so once Unreleased holds an earlier note the heading falls out
+          # of the hunk and diff-parsing misses the addition (bit #434).
+          section() {
+            git show "$1:CHANGELOG.md" 2>/dev/null | awk '
+              /^## \[Unreleased\]/ { inside = 1; next }
+              /^## \[/ { inside = 0 }
+              inside { print }
+            '
+          }
+          added="$(diff <(section "$BASE") <(section "$HEAD") | sed -n 's/^> //p' | grep -v '^[[:space:]]*$' || true)"
+          if [[ -z "$added" ]]; then
+            echo "::error::This is a '$type' PR but CHANGELOG.md gained nothing under '## [Unreleased]'. Add a short, user-facing note there (it becomes the release notes and the Sparkle update prompt), or add the 'skip-changelog' label if this change is not user-visible."
+            exit 1
+          fi
+          echo "Release note added:"
+          echo "$added"
+
+          # The note is what a listener reads in the update prompt: plain
+          # sentences, no code names, no PR numbers. Developer detail goes in
+          # the generated "For developers" list at release time.
+          if grep -qE '`|\(#[0-9]+\)|\b(refactor|refactored|implemented|ViewModel|Repository|actor|struct|enum|protocol)\b' <<<"$added"; then
+            echo "::error::The Unreleased note reads like a commit message (backticks, a PR number, or code vocabulary). Rewrite it for a listener: what changes for them, in one or two plain sentences."
+            exit 1
+          fi

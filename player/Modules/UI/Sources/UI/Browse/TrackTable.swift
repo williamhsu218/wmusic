@@ -1,0 +1,380 @@
+import AppKit
+import Library
+import Persistence
+import SwiftUI
+
+// MARK: - TrackContextMenuActions
+
+/// All callbacks needed to power the track context menu from AppKit.
+/// Each closure is called synchronously on the main thread by AppKit;
+/// async library calls are wrapped in Task inside the closures.
+public struct TrackContextMenuActions {
+    /// Play a single track immediately.
+    public let playNow: (Track) -> Void
+    /// Play a single track immediately, replacing the queue with just that
+    /// one track (no surrounding context).  Used by Option+double-click as
+    /// an explicit "play this and nothing else" gesture.
+    public let playSingle: (Track) -> Void
+    /// Play all tracks from the same album as `track`, replacing the queue.
+    public let playAlbum: (Track) -> Void
+    /// Play all tracks from the same album as `track`, replacing the queue, shuffled.
+    public let shuffleAlbum: (Track) -> Void
+    /// Play all tracks by the same artist as `track`, replacing the queue.
+    public let playArtist: (Track) -> Void
+    /// Insert tracks next in the queue.
+    public let playNext: ([Track]) -> Void
+    /// Append tracks to the end of the queue.
+    public let addToQueue: ([Track]) -> Void
+    /// Add tracks to an existing playlist by ID.
+    public let addToPlaylist: (Int64, [Track]) -> Void
+    /// Create a new playlist pre-populated with the selected tracks.
+    public let newPlaylistFromSelection: ([Track]) -> Void
+    /// Toggle the loved state on the given tracks (all-loved → unlove all; otherwise love all).
+    public let love: ([Track]) -> Void
+    /// Navigate the library to the track's artist.
+    public let goToArtist: (Int64) -> Void
+    /// Navigate the library to the track's album.
+    public let goToAlbum: (Int64) -> Void
+    /// Reveal the track's file in Finder.
+    public let showInFinder: (Track) -> Void
+    /// Trigger a metadata re-scan for the track's file.
+    public let rescanFile: (Track) -> Void
+    /// Show the track inspector for the selected tracks.
+    public let getInfo: ([Track]) -> Void
+    /// Open the acoustic identify-track sheet for a single track.
+    public let identify: (Track) -> Void
+    /// Remove tracks from the library without deleting files.
+    public let removeFromLibrary: ([Track]) -> Void
+    /// Delete the selected tracks' files from disk and remove them from the library.
+    public let deleteFromDisk: ([Track]) -> Void
+    /// Copy track metadata to the clipboard.
+    public let copy: ([TrackRow]) -> Void
+    /// Set or clear the shuffle-exclusion flag for a track.
+    public let toggleShuffle: (Int64, Bool) -> Void
+    /// Compute ReplayGain for the selected tracks, replacing any existing values.
+    public let computeReplayGain: ([Track]) -> Void
+    /// Set a star rating (0–5) on the selected tracks.
+    public let rate: ([Track], Int) -> Void
+    /// Remove the selected tracks from the current playlist.
+    /// `nil` means this view is not inside a playlist — the menu item is hidden.
+    public let removeFromPlaylist: (([Track]) -> Void)?
+    /// Open the lyrics editor pane for the selected track.
+    /// `nil` disables the menu item.
+    public let editLyrics: ((Track) -> Void)?
+    /// Fetch lyrics from LRClib for the selected track, replacing any existing lyrics.
+    /// `nil` means LRClib is not enabled or the feature is not wired — the menu item is hidden.
+    public let fetchLyricsFromLRClib: ((Track) -> Void)?
+}
+
+// MARK: - TrackTable
+
+/// Wraps `NSTableView` in SwiftUI using diffable data source.
+/// Replaces SwiftUI `Table` to avoid gesture-recogniser contention on rows.
+public struct TrackTable: NSViewRepresentable {
+    /// The AppKit scroll view that hosts the table.
+    public typealias NSViewType = NSScrollView
+    /// The coordinator type — lives in `TrackTableCoordinator.swift`.
+    public typealias Coordinator = TrackTableCoordinator
+
+    let rows: [TrackRow]
+    /// The view model's counter for `rows` (#450). `updateNSView` walks the
+    /// rows only when this moved since the last apply; a parent re-render with
+    /// unchanged rows then costs nothing per row. Deliberately has no default:
+    /// a caller that left it out would render its first rows and then never
+    /// react to another rows change, with no error to show for it (#454).
+    let rowsVersion: Int
+    @Binding var selection: Set<Track.ID>
+    @Binding var sortOrder: [KeyPathComparator<TrackRow>]
+    let nowPlayingTrackID: Track.ID?
+    let sortable: Bool
+    let playlistNodes: [PlaylistNode]
+    let actions: TrackContextMenuActions
+    /// Each increment triggers a scroll-to-now-playing in `updateNSView`.
+    let scrollRequest: Int
+    /// Track a pending scroll request targets; `nil` scrolls to now-playing.
+    let scrollTargetTrackID: Int64?
+    /// When non-nil the table allows intra-table drag-reorder and calls this
+    /// closure (on the main thread) with SwiftUI-style `(source, destination)` indices.
+    let onMove: ((IndexSet, Int) -> Void)?
+    @AppStorage("appearance.rowDensity") private var rowDensity = "spacious"
+
+    // MARK: NSViewRepresentable
+
+    /// Creates the coordinator that owns the diffable data source.
+    public func makeCoordinator() -> TrackTableCoordinator {
+        TrackTableCoordinator(parent: self)
+    }
+
+    /// Builds the `NSScrollView` + `NSTableView` hierarchy on first use.
+    public func makeNSView(context: Context) -> NSScrollView {
+        let coordinator = context.coordinator
+
+        let tableView = ContextMenuTableView()
+        tableView.identifier = NSUserInterfaceItemIdentifier(A11y.TracksTable.table)
+        // NSUserInterfaceItemIdentifier does not surface to the accessibility
+        // tree; XCUITest needs the AX identifier set explicitly.
+        tableView.setAccessibilityIdentifier(A11y.TracksTable.table)
+        tableView.setAccessibilityLabel(L10n.string("Track List"))
+        tableView.setAccessibilityRoleDescription(L10n.string("Music track list"))
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.style = .inset
+        tableView.allowsMultipleSelection = true
+        tableView.allowsColumnReordering = true
+        tableView.allowsColumnResizing = true
+        tableView.allowsColumnSelection = false
+        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        tableView.refusesFirstResponder = false // Ensure Tab key can reach the table.
+
+        // When reorder is enabled, allow move locally and copy externally.
+        if self.onMove != nil {
+            tableView.setDraggingSourceOperationMask([.move], forLocal: true)
+        } else {
+            tableView.setDraggingSourceOperationMask(.copy, forLocal: true)
+        }
+        tableView.setDraggingSourceOperationMask(.copy, forLocal: false)
+        if self.onMove != nil {
+            tableView.registerForDraggedTypes([.string])
+        }
+
+        tableView.delegate = coordinator
+        tableView.doubleAction = #selector(TrackTableCoordinator.doubleClickAction(_:))
+        tableView.target = coordinator
+        self.configureCallbacks(for: tableView, coordinator: coordinator)
+
+        let autosaveName = self.sortable
+            ? "bocan.tracksTable.sortable.v4"
+            : "bocan.tracksTable.plain.v4"
+        Self.addColumns(to: tableView, sortable: self.sortable, autosaveName: autosaveName)
+        // Arm autosave only after the columns exist: setting `autosaveName` is
+        // the trigger that restores saved order/width, and it restores onto
+        // whatever columns are present at that moment. Armed before
+        // `addColumns`, every restore was a no-op on an empty table and each
+        // rebuild re-saved the default order, so a dragged arrangement never
+        // survived leaving the view (#369).
+        tableView.autosaveTableColumns = true
+        tableView.autosaveName = autosaveName
+        // The restore may also carry hidden flags from NSTableView's own
+        // store; the header-menu visibility preference stays authoritative.
+        Self.applySavedVisibility(to: tableView, autosaveName: autosaveName)
+        Self.buildHeaderMenu(for: tableView, coordinator: coordinator)
+
+        // nonisolated(unsafe) lets the cell-provider closure capture the coordinator
+        // without triggering Swift 6 concurrency warnings.  Safe because AppKit
+        // always calls the cell-provider on the main thread.
+        let cellCoord = coordinator
+        let dataSource = TrackDiffableDataSource(tableView: tableView) { tv, column, _, itemID in
+            MainActor.assumeIsolated {
+                cellCoord.cellView(for: column, trackID: itemID, in: tv) ?? NSTableCellView()
+            }
+        }
+        coordinator.dataSource = dataSource
+        dataSource.coordinator = coordinator
+        dataSource.onMove = self.onMove
+        coordinator.tableView = tableView
+
+        return self.makeScrollView(wrapping: tableView)
+    }
+
+    private func makeScrollView(wrapping tableView: NSTableView) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        return scrollView
+    }
+
+    private func configureCallbacks(for tableView: ContextMenuTableView, coordinator: Coordinator) {
+        tableView.menuProvider = { [weak coordinator] in
+            coordinator?.buildContextMenu() ?? NSMenu()
+        }
+        tableView.deleteKeyHandler = { [weak coordinator] in
+            coordinator?.handleRemoveFromPlaylistKeyDown() ?? false
+        }
+        tableView.returnKeyHandler = { [weak coordinator] in
+            coordinator?.handleReturnKeyDown()
+        }
+    }
+
+    /// Pushes state changes from SwiftUI into the existing `NSTableView`.
+    public func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+
+        guard let tableView = coordinator.tableView,
+              let dataSource = coordinator.dataSource else { return }
+
+        // 1 — Decide what moved since the last apply (#450). The rows version
+        // gates every per-row walk, so a parent re-render with unchanged
+        // inputs does no per-row work at all.
+        // `Track.ID` is `Int64?`, so `nowPlayingTrackID` is a double optional;
+        // the plan keys on the wrapped `Int64`, and nothing playing is `nil`.
+        let nowPlayingID: Int64? = self.nowPlayingTrackID.flatMap(\.self)
+        let plan = TrackTableUpdatePlan.make(
+            rowsVersion: self.rowsVersion,
+            ids: { self.rows.compactMap(\.id) },
+            nowPlayingID: nowPlayingID,
+            selection: self.selection,
+            applied: coordinator.applied
+        )
+        switch plan.rowsWork {
+        case .structural:
+            self.applyStructuralChange(ids: plan.ids ?? [], coordinator: coordinator, dataSource: dataSource)
+
+        case .reconfigure:
+            // 2 — Same ID set: reconfigure rows whose displayed content changed
+            // (love toggled, play count bumped, rating, in-place tag edits) and
+            // the rows gaining or losing the now-playing highlight.  Without
+            // this the NSTableView keeps rendering stale cells until a reload.
+            self.reconfigureChangedRows(coordinator: coordinator, dataSource: dataSource)
+
+        case .unchanged:
+            // Rows unchanged; only the highlight may have moved.
+            Self.reload(rows: plan.highlightReload, coordinator: coordinator, dataSource: dataSource)
+        }
+        coordinator.applied = plan.applied(
+            after: coordinator.applied,
+            rowsVersion: self.rowsVersion,
+            nowPlayingID: nowPlayingID,
+            selection: self.selection
+        )
+
+        // 3 — Selection changed externally (e.g. syncSelectionToNowPlaying),
+        // or the rows did: recomputing the index set walks every row.
+        if plan.syncSelection {
+            let expectedIndexes = IndexSet(
+                coordinator.rows.enumerated()
+                    .compactMap { idx, row -> Int? in
+                        guard let id = row.id, selection.contains(id) else { return nil }
+                        return idx
+                    }
+            )
+            if tableView.selectedRowIndexes != expectedIndexes {
+                coordinator.isSyncingSelection = true
+                tableView.selectRowIndexes(expectedIndexes, byExtendingSelection: false)
+                coordinator.isSyncingSelection = false
+            }
+        }
+
+        // 4 — Sort indicator changed externally (e.g. "Clear Sort" button).
+        coordinator.syncSortIfNeeded(sortOrder: self.sortOrder)
+
+        // 5 — Row density changed in Appearance settings.
+        // The coordinator's heightOfRow delegate method reads UserDefaults directly;
+        // noteHeightOfRows triggers NSTableView to re-query it for every row.
+        if coordinator.lastRowDensity != self.rowDensity {
+            coordinator.lastRowDensity = self.rowDensity
+            tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0 ..< tableView.numberOfRows))
+        }
+
+        // 6 — onMove callback changed (e.g. playlist loaded or kind toggled).
+        dataSource.onMove = self.onMove
+
+        // 7 — Scroll to the now-playing track when requested.
+        self.applyScrollIfNeeded(coordinator: coordinator, tableView: tableView)
+    }
+
+    /// A different set of track IDs: rebuild the rows dictionary and apply a
+    /// new snapshot.
+    private func applyStructuralChange(
+        ids: [Int64],
+        coordinator: TrackTableCoordinator,
+        dataSource: TrackDiffableDataSource
+    ) {
+        coordinator.updateRows(self.rows)
+
+        // NSDiffableDataSourceSnapshot requires unique item identifiers.
+        // Guard against duplicate track IDs (e.g. the same track added
+        // twice to a playlist) by deduplicating while preserving order.
+        var seen = Set<Int64>()
+        let uniqueIDs = ids.filter { seen.insert($0).inserted }
+
+        var snapshot = NSDiffableDataSourceSnapshot<Int, Int64>()
+        snapshot.appendSections([0])
+        snapshot.appendItems(uniqueIDs)
+        let animated = coordinator.hasAppliedInitialSnapshot && !self.rows.isEmpty
+        dataSource.apply(snapshot, animatingDifferences: animated)
+        coordinator.hasAppliedInitialSnapshot = true
+    }
+
+    /// Reloads only the rows whose rendered content changed (or whose
+    /// now-playing highlight is gained/lost) while the set of track IDs is
+    /// unchanged.  `reloadItems` re-runs the cell provider for those identifiers
+    /// without disturbing the row order or scroll position; the selection needs
+    /// putting back by hand (see `applyPreservingSelection`).
+    private func reconfigureChangedRows(
+        coordinator: TrackTableCoordinator,
+        dataSource: TrackDiffableDataSource
+    ) {
+        let oldRowsByID = coordinator.rowsByID
+        var changed: [Int64] = []
+        for row in self.rows {
+            guard let id = row.id else { continue }
+            if let old = oldRowsByID[id], !old.hasSameContent(as: row) {
+                changed.append(id)
+            }
+        }
+        // The now-playing highlight depends on `nowPlayingTrackID`, not on row
+        // content, so the outgoing and incoming now-playing rows must refresh
+        // too, even when their underlying values are identical.
+        let nowPlayingID: Int64? = self.nowPlayingTrackID.flatMap(\.self)
+        if coordinator.applied.nowPlayingID != nowPlayingID {
+            if let oldID = coordinator.applied.nowPlayingID {
+                changed.append(oldID)
+            }
+            if let newID = nowPlayingID {
+                changed.append(newID)
+            }
+        }
+        coordinator.updateRows(self.rows)
+        Self.reload(rows: changed, coordinator: coordinator, dataSource: dataSource)
+    }
+
+    /// Reloads the given rows in place, ignoring IDs the snapshot does not hold
+    /// and duplicates. A no-op for an empty list.
+    private static func reload(
+        rows changed: [Int64],
+        coordinator: TrackTableCoordinator,
+        dataSource: TrackDiffableDataSource
+    ) {
+        guard !changed.isEmpty else { return }
+        var snapshot = dataSource.snapshot()
+        let existing = Set(snapshot.itemIdentifiers(inSection: 0))
+        var seen = Set<Int64>()
+        let valid = changed.filter { existing.contains($0) && seen.insert($0).inserted }
+        guard !valid.isEmpty else { return }
+        snapshot.reloadItems(valid)
+        applyPreservingSelection(snapshot, to: dataSource, in: coordinator.tableView) { syncing in
+            // The restored selection is the same set of IDs, so republishing it
+            // would only spend a SwiftUI pass.
+            coordinator.isSyncingSelection = syncing
+        }
+    }
+
+    private func applyScrollIfNeeded(coordinator: TrackTableCoordinator, tableView: NSTableView) {
+        guard self.scrollRequest != coordinator.lastScrollRequest else { return }
+        coordinator.lastScrollRequest = self.scrollRequest
+        // nowPlayingTrackID is Track.ID? (a double optional); flatten it.
+        let target: Int64? = self.scrollTargetTrackID ?? self.nowPlayingTrackID.flatMap(\.self)
+        if let target,
+           let idx = coordinator.rows.firstIndex(where: { $0.id == target }) {
+            tableView.scrollRowToVisible(idx)
+        }
+    }
+
+    // MARK: - Row density
+
+    private var desiredRowHeight: CGFloat {
+        switch self.rowDensity {
+        case "compact":
+            22
+
+        case "spacious":
+            36
+
+        default:
+            28
+        }
+    }
+}

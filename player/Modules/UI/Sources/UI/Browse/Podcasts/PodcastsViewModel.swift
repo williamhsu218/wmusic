@@ -1,0 +1,495 @@
+import Foundation
+import Observability
+import Persistence
+
+// MARK: - PodcastsViewModel
+
+/// Drives `PodcastsHomeView` (subscribed grid + Add bar) and `PodcastShowView`
+/// (episode list). Owned by `LibraryViewModel`.
+@MainActor
+public final class PodcastsViewModel: ObservableObject {
+    // MARK: - Published state
+
+    @Published public private(set) var subscribed: [Podcast] = []
+    /// Continue Listening rail contents (ADR-054): started-not-finished
+    /// episodes across all shows, newest activity first. Empty hides the rail.
+    /// `internal(set)` so the extension file can assign from its observation.
+    @Published public internal(set) var continueListening: [ContinueListeningItem] = []
+    @Published public private(set) var podcastEpisodeCounts: [Int64: Int] = [:]
+    /// Unread (not-yet-played) counts keyed by podcast ID; absent/zero means no badge.
+    /// Kept live by `unplayedCountsTask` so a mark-played write clears the badge.
+    @Published public private(set) var podcastUnplayedCounts: [Int64: Int] = [:]
+    @Published public private(set) var isLoading = false
+    /// `internal(set)` so the downloads extension can reflect an auto-download
+    /// change on the open show.
+    @Published public internal(set) var currentShow: Podcast?
+    /// Episodes for the currently open show. Populated by `loadShow(_:)`.
+    @Published public private(set) var episodes: [EpisodeListItem] = []
+    @Published public var addBarText = ""
+    /// Set by `openShow(_:)` and observed by `PodcastsGridView` to trigger navigation.
+    @Published public var selectedShowID: Int64?
+
+    /// Podcasts-grid vertical scroll offset, snapshotted when opening a show so
+    /// the grid can restore it when it's rebuilt on return (mirrors the
+    /// album-grid scroll restore, #349). Plain `var`, not `@Published`: it must
+    /// not trigger a re-render.
+    public var gridScrollOffset: Double = 0
+
+    /// Current grid sort order. Owned here (not via `@AppStorage` in the view)
+    /// so the persisted preference is known before `subscribed` is first sorted.
+    /// Persisted in UserDefaults under ``sortOrderKey``.
+    @Published public private(set) var sortOrder: PodcastSortOrder
+
+    // MARK: - ADR-045: search + detail state
+
+    @Published public internal(set) var searchResults: [UIPodcastSearchResult] = []
+    @Published public internal(set) var searchState: PodcastSearchState = .idle
+    @Published public internal(set) var addByURLCandidate: URL?
+    /// Controls the detail sheet. Publicly settable so SwiftUI's sheet binding can dismiss it.
+    @Published public var showingDetail = false
+    @Published public internal(set) var currentDetail: PodcastDetail?
+    @Published public internal(set) var isLoadingDetail = false
+    @Published public internal(set) var detailError: String?
+    /// Set when `subscribe(fromDetail:)` fails; `PodcastDetailView` shows it
+    /// inline near the Subscribe button. Without this the failure was only
+    /// logged -- the button silently did nothing, indistinguishable from an
+    /// unresponsive click.
+    @Published public internal(set) var subscribeError: String?
+    /// Chapters for the currently-playing episode, loaded by the Now Playing strip.
+    @Published public internal(set) var nowPlayingChapters: [UIChapter] = []
+    /// The currently-playing episode, resolved for the player-bar Show Notes sheet.
+    @Published public internal(set) var nowPlayingEpisode: EpisodeListItem?
+    /// The playing show's `podcast:person` credits, used as the Show Notes fallback
+    /// when the episode declares none.
+    @Published public internal(set) var nowPlayingShowPersons: [PodcastPerson] = []
+    /// The playing show's `podcast:podroll` recommendations, shown atop Show Notes.
+    @Published public internal(set) var nowPlayingPodroll: [PodcastPodrollItem] = []
+    /// How far each running download has got, keyed by
+    /// ``downloadKey(podcastID:guid:)``. Only downloads in flight appear: an
+    /// episode that finished, failed or was removed drops out, because its
+    /// persisted state already tells the badge what to draw. The fraction is
+    /// the one thing the database does not store (#551).
+    @Published public internal(set) var downloadProgress: [String: Double] = [:]
+
+    // MARK: - Dependencies
+
+    private let library: (any PodcastLibraryDataSource)?
+    let actions: (any PodcastActions)?
+    let searchProvider: (any PodcastSearchProviding)?
+    let transcriptProvider: (any PodcastTranscriptProviding)?
+    let log = AppLogger.make(.ui)
+
+    // MARK: - Observation tasks
+
+    // nonisolated(unsafe): assigned only from @MainActor methods and read once
+    // from the nonisolated `deinit`. Task handles are Sendable. See #279.
+    private nonisolated(unsafe) var subscribedTask: Task<Void, Never>?
+    private nonisolated(unsafe) var episodesTask: Task<Void, Never>?
+    private nonisolated(unsafe) var unplayedCountsTask: Task<Void, Never>?
+    nonisolated(unsafe) var continueListeningTask: Task<Void, Never>?
+    nonisolated(unsafe) var detailTask: Task<Void, Never>?
+    nonisolated(unsafe) var downloadProgressTask: Task<Void, Never>?
+
+    // MARK: - Init
+
+    /// UserDefaults key backing ``sortOrder`` (read at init, written by
+    /// ``setSortOrder(_:)``).
+    public static let sortOrderKey = "podcasts.sortOrder"
+
+    public init(
+        library: (any PodcastLibraryDataSource)?,
+        actions: (any PodcastActions)?,
+        searchProvider: (any PodcastSearchProviding)? = nil,
+        transcriptProvider: (any PodcastTranscriptProviding)? = nil
+    ) {
+        self.library = library
+        self.actions = actions
+        self.searchProvider = searchProvider
+        self.transcriptProvider = transcriptProvider
+        let raw = UserDefaults.standard.string(forKey: Self.sortOrderKey)
+        self.sortOrder = raw.flatMap(PodcastSortOrder.init(rawValue:)) ?? .podcastName
+    }
+
+    deinit {
+        subscribedTask?.cancel()
+        episodesTask?.cancel()
+        unplayedCountsTask?.cancel()
+        continueListeningTask?.cancel()
+        detailTask?.cancel()
+        downloadProgressTask?.cancel()
+    }
+
+    // MARK: - Transcripts
+
+    /// Fetches (cache-first) and parses an episode transcript, off the main actor.
+    /// Returns nil when there is no provider, no transcript, or the fetch fails;
+    /// the viewer renders that as its empty state.
+    func loadTranscript(podcastID: Int64, guid: String) async -> TranscriptContent? {
+        guard let transcriptProvider else { return nil }
+        do {
+            let record = try await transcriptProvider.transcript(podcastID: podcastID, guid: guid)
+            let content = record.content
+            let format = record.format
+            return await Task.detached { TranscriptParser.parse(content, format: format) }.value
+        } catch {
+            self.log.debug("podcasts.loadTranscript.failed", ["error": String(reflecting: error)])
+            return nil
+        }
+    }
+
+    /// Loads chapters for the currently-playing episode into `nowPlayingChapters`.
+    /// Best-effort: any failure leaves the list empty so the UI hides the affordance.
+    func loadChapters(podcastID: Int64, guid: String) async {
+        guard let actions else {
+            self.nowPlayingChapters = []
+            return
+        }
+        do {
+            self.nowPlayingChapters = try await actions.chapters(podcastID: podcastID, guid: guid)
+        } catch {
+            self.log.debug("podcasts.loadChapters.failed", ["error": String(reflecting: error)])
+            self.nowPlayingChapters = []
+        }
+    }
+
+    /// Resolves the playing episode and its show's hosts for the player-bar Show
+    /// Notes sheet. Best-effort: any failure leaves the fields nil/empty so the
+    /// sheet shows its own empty state.
+    func loadNowPlayingShowNotes(podcastID: Int64, guid: String) async {
+        guard let library else {
+            self.nowPlayingEpisode = nil
+            self.nowPlayingShowPersons = []
+            return
+        }
+        do {
+            async let episodes = library.episodes(podcastID: podcastID)
+            async let shows = library.subscribedPodcasts()
+            self.nowPlayingEpisode = try await episodes.first { $0.episode.guid == guid }
+            let show = try await shows.first { $0.id == podcastID }
+            self.nowPlayingShowPersons = show?.persons ?? []
+            self.nowPlayingPodroll = show?.podroll ?? []
+        } catch {
+            self.log.debug("podcasts.loadNowPlayingShowNotes.failed", ["error": String(reflecting: error)])
+            self.nowPlayingEpisode = nil
+            self.nowPlayingShowPersons = []
+            self.nowPlayingPodroll = []
+        }
+    }
+
+    /// Resolves a podroll recommendation's title and artwork by fetching its feed
+    /// detail. Best-effort: returns nil when there is no search provider or the
+    /// fetch fails, so the card falls back to the feed's host name.
+    func resolvePodroll(_ url: URL) async -> PodrollPreview? {
+        guard let searchProvider else { return nil }
+        do {
+            let detail = try await searchProvider.detail(feedURL: url, hint: nil)
+            return PodrollPreview(title: detail.title, artworkURL: detail.artworkURL)
+        } catch {
+            self.log.debug("podcasts.resolvePodroll.failed", ["error": String(reflecting: error)])
+            return nil
+        }
+    }
+
+    /// Clears the now-playing podcast context (chapters, Show Notes episode, and
+    /// show hosts) when the playing item is not a podcast (or stops).
+    func clearNowPlayingChapters() {
+        self.nowPlayingChapters = []
+        self.nowPlayingEpisode = nil
+        self.nowPlayingShowPersons = []
+        self.nowPlayingPodroll = []
+    }
+
+    // MARK: - OPML import / export
+
+    /// Imports an OPML subscription list via the actions seam, returning a
+    /// partitioned summary. `progress` is called `(completed, total)` per attempt.
+    func importOPML(
+        data: Data,
+        progress: @escaping @Sendable (Int, Int) -> Void
+    ) async throws -> UIOPMLImportSummary {
+        guard let actions else { return UIOPMLImportSummary() }
+        return try await actions.importOPML(data: data, progress: progress)
+    }
+
+    /// Serializes the current subscriptions to OPML 2.0 data via the actions seam.
+    func exportOPML() async throws -> Data {
+        guard let actions else { return Data() }
+        return try await actions.exportOPML()
+    }
+
+    // MARK: - Home
+
+    /// Fetches the subscribed-show list once, then starts a live observation so
+    /// the grid updates automatically on subscribe/unsubscribe/refresh.
+    public func loadSubscribed() async {
+        guard let library else { return }
+        self.isLoading = true
+        do {
+            let fetched = try await library.subscribedPodcasts()
+            // Counts first: the count-based sorts read them.
+            self.podcastEpisodeCounts = await self.episodeCounts(library)
+            self.podcastUnplayedCounts = await self.unplayedCounts(library)
+            self.subscribed = self.sortedPodcasts(fetched)
+        } catch {
+            self.log.error("podcasts.loadSubscribed.failed", ["error": String(reflecting: error)])
+        }
+        self.isLoading = false
+        self.startObserveSubscribed(library: library)
+        self.startObserveUnplayedCounts(library: library)
+        self.startObserveContinueListening(library: library)
+        self.startObserveDownloadProgress()
+        self.healMissingArtwork()
+    }
+
+    // The download methods (auto-download, live progress) live in
+    // PodcastsViewModel+Downloads.swift (file_length headroom).
+
+    // startObserveContinueListening / resume live in
+    // PodcastsViewModel+ContinueListening.swift (file_length headroom).
+
+    /// Keeps `podcastUnplayedCounts` live off the state-table observation, so a
+    /// mark-played (or mark-all) write clears the badge with no manual refresh.
+    private func startObserveUnplayedCounts(library: any PodcastLibraryDataSource) {
+        self.unplayedCountsTask?.cancel()
+        self.unplayedCountsTask = Task { [weak self] in
+            let stream = await library.observeUnplayedCounts()
+            do {
+                for try await counts in stream {
+                    guard let self else { return }
+                    try Task.checkCancellation()
+                    self.podcastUnplayedCounts = counts
+                    // Re-sort only when the order depends on this count, to avoid
+                    // republishing `subscribed` on every playback-state change.
+                    if self.sortOrder == .unplayedCount {
+                        self.subscribed = self.sortedPodcasts(self.subscribed)
+                    }
+                }
+            } catch is CancellationError {
+                // Expected when the task is cancelled on navigation.
+            } catch {
+                self?.log.warning("podcasts.observeUnplayed.failed", ["error": String(reflecting: error)])
+            }
+        }
+    }
+
+    /// Fires background refreshes for any subscribed shows whose artwork file has
+    /// gone missing (e.g. macOS purged the old Caches location after an update).
+    /// Staggered by 0.5 s so it doesn't hammer the network on launch.
+    private func healMissingArtwork() {
+        let stale = self.subscribed.filter { podcast in
+            guard let path = podcast.artworkPath else { return false }
+            return !FileManager.default.fileExists(atPath: path)
+        }
+        guard !stale.isEmpty else { return }
+        self.log.debug("podcasts.artwork.stale", ["count": stale.count])
+        let actions = self.actions
+        let log = self.log
+        // .utility, not .background: each refresh writes the database, and a
+        // .background thread holding a GRDB pool connection while a
+        // user-initiated read waits on the pool semaphore (no priority
+        // inheritance) trips Xcode's priority-inversion diagnostic.
+        Task.detached(priority: .utility) {
+            for podcast in stale {
+                guard let id = podcast.id else { continue }
+                do {
+                    try await actions?.refresh(podcastID: id)
+                } catch {
+                    // The heal pass leaves no trace of the show it gave up on.
+                    log.warning("podcasts.artworkHeal.refreshFailed", ["id": id, "error": String(reflecting: error)])
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+        }
+    }
+
+    private func startObserveSubscribed(library: any PodcastLibraryDataSource) {
+        self.subscribedTask?.cancel()
+        self.subscribedTask = Task { [weak self] in
+            let stream = await library.observeSubscribed()
+            do {
+                for try await podcasts in stream {
+                    guard let self else { return }
+                    try Task.checkCancellation()
+                    // Episode counts first: the count-based sorts read them.
+                    self.podcastEpisodeCounts = await self.episodeCounts(library)
+                    self.subscribed = self.sortedPodcasts(podcasts)
+                }
+            } catch is CancellationError {
+                // Expected when the task is cancelled on navigation.
+            } catch {
+                self?.log.warning("podcasts.observe.failed", ["error": String(reflecting: error)])
+            }
+        }
+    }
+
+    /// Signals navigation to a show's episode list. The grid view observes
+    /// `selectedShowID` and calls `library.selectDestination(.podcastShow(id))`.
+    public func openShow(_ id: Int64) {
+        self.selectedShowID = id
+    }
+
+    /// Changes the grid sort order, persists it, and re-sorts in place (no refetch).
+    public func setSortOrder(_ order: PodcastSortOrder) {
+        guard order != self.sortOrder else { return }
+        self.sortOrder = order
+        UserDefaults.standard.set(order.rawValue, forKey: Self.sortOrderKey)
+        self.subscribed = self.sortedPodcasts(self.subscribed)
+    }
+
+    /// Sorts `items` by the current ``sortOrder``. The count-based orders fall
+    /// back to podcast title as a secondary key. Uses `localizedStandardCompare`
+    /// so numbers and diacritics order naturally.
+    private func sortedPodcasts(_ items: [Podcast]) -> [Podcast] {
+        switch self.sortOrder {
+        case .podcastName:
+            items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+
+        case .unplayedCount:
+            items.sorted { lhs, rhs in
+                let lcount = lhs.id.flatMap { self.podcastUnplayedCounts[$0] } ?? 0
+                let rcount = rhs.id.flatMap { self.podcastUnplayedCounts[$0] } ?? 0
+                if lcount != rcount {
+                    return lcount > rcount
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+
+        case .totalEpisodes:
+            items.sorted { lhs, rhs in
+                let lcount = lhs.id.flatMap { self.podcastEpisodeCounts[$0] } ?? 0
+                let rcount = rhs.id.flatMap { self.podcastEpisodeCounts[$0] } ?? 0
+                if lcount != rcount {
+                    return lcount > rcount
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+        }
+    }
+
+    // MARK: - Show
+
+    /// Fetches the show metadata and episode list, then starts a live observation
+    /// so the episode table updates when playback state changes.
+    public func loadShow(_ id: Int64) async {
+        guard let library else { return }
+        self.isLoading = true
+        do {
+            let podcasts = try await library.subscribedPodcasts()
+            self.currentShow = podcasts.first { $0.id == id }
+            let order = self.currentShow?.resolvedEpisodeSort ?? .newest
+            self.episodes = try await library.episodes(podcastID: id, order: order)
+        } catch {
+            self.log.error("podcasts.loadShow.failed", ["id": id, "error": String(reflecting: error)])
+        }
+        self.isLoading = false
+        let order = self.currentShow?.resolvedEpisodeSort ?? .newest
+        self.startObserveEpisodes(podcastID: id, order: order, library: library)
+    }
+
+    private func startObserveEpisodes(
+        podcastID: Int64,
+        order: EpisodeSortOrder,
+        library: any PodcastLibraryDataSource
+    ) {
+        self.episodesTask?.cancel()
+        self.episodesTask = Task { [weak self] in
+            let stream = await library.observeEpisodes(podcastID: podcastID, order: order)
+            do {
+                for try await items in stream {
+                    guard let self else { return }
+                    try Task.checkCancellation()
+                    self.episodes = items
+                }
+            } catch is CancellationError {
+                // Expected when the task is cancelled on navigation.
+            } catch {
+                self?.log.warning("podcasts.observeEpisodes.failed", ["error": String(reflecting: error)])
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    public func refreshAll() async {
+        await self.actions?.refreshAll()
+    }
+
+    public func refreshCurrentShow() async {
+        guard let id = currentShow?.id else { return }
+        do {
+            try await self.actions?.refresh(podcastID: id)
+        } catch {
+            self.log.error("podcasts.refreshShow.failed", ["id": id, "error": String(reflecting: error)])
+        }
+    }
+
+    public func unsubscribe(_ id: Int64) async {
+        do {
+            try await self.actions?.unsubscribe(podcastID: id)
+        } catch {
+            self.log.error("podcasts.unsubscribe.failed", ["id": id, "error": String(reflecting: error)])
+        }
+    }
+
+    public func markAllPlayed() async {
+        guard let id = currentShow?.id else { return }
+        await self.actions?.markAllPlayed(podcastID: id)
+    }
+
+    /// Marks every episode of every subscribed show as played. Backs the
+    /// "Mark All as Played" toolbar action on the Podcasts home view.
+    public func markAllSubscribedPlayed() async {
+        guard let actions else { return }
+        for id in self.subscribed.compactMap(\.id) {
+            await actions.markAllPlayed(podcastID: id)
+        }
+    }
+
+    // MARK: - Per-show settings
+
+    /// Persists the per-show playback-speed override (nil = app default). Keeps
+    /// `currentShow` in sync so the open show reflects the change immediately.
+    public func setPlaybackSpeed(_ speed: Double?, podcastID: Int64) async {
+        do {
+            try await self.actions?.setPlaybackSpeed(speed, podcastID: podcastID)
+            if self.currentShow?.id == podcastID {
+                self.currentShow?.playbackSpeed = speed
+            }
+        } catch {
+            self.log.error("podcasts.setPlaybackSpeed.failed", ["id": podcastID, "error": String(reflecting: error)])
+        }
+    }
+
+    /// Persists the per-show episode-sort override and, if it is the open show,
+    /// re-resolves the order and restarts the live episode observation.
+    public func setEpisodeSort(_ sort: String?, podcastID: Int64) async {
+        do {
+            try await self.actions?.setEpisodeSort(sort, podcastID: podcastID)
+        } catch {
+            self.log.error("podcasts.setEpisodeSort.failed", ["id": podcastID, "error": String(reflecting: error)])
+            return
+        }
+        guard self.currentShow?.id == podcastID, let library else { return }
+        self.currentShow?.episodeSort = sort
+        let order = self.currentShow?.resolvedEpisodeSort ?? .newest
+        do {
+            self.episodes = try await library.episodes(podcastID: podcastID, order: order)
+        } catch {
+            // The rows keep their old order, so the sort looks like it did nothing.
+            self.log.warning("podcasts.episodes.reload.failed", ["id": podcastID, "error": String(reflecting: error)])
+        }
+        self.startObserveEpisodes(podcastID: podcastID, order: order, library: library)
+    }
+
+    /// Persists the per-show retention limit (nil = keep all).
+    public func setRetentionLimit(_ limit: Int?, podcastID: Int64) async {
+        do {
+            try await self.actions?.setRetentionLimit(limit, podcastID: podcastID)
+            if self.currentShow?.id == podcastID {
+                self.currentShow?.retentionLimit = limit
+            }
+        } catch {
+            self.log.error("podcasts.setRetentionLimit.failed", ["id": podcastID, "error": String(reflecting: error)])
+        }
+    }
+}

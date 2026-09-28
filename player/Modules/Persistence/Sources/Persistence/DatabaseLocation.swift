@@ -1,0 +1,68 @@
+import Foundation
+import Observability
+
+/// Resolves the filesystem path for the SQLite database file.
+///
+/// The canonical location is `~/Library/Application Support/WMusic/library.sqlite`.
+/// Pass `.inMemory` when running tests to avoid touching the filesystem.
+public enum DatabaseLocation: Sendable {
+    /// The canonical on-disk path inside `Application Support/WMusic/`.
+    case application
+
+    /// An ephemeral, per-connection in-memory database (for tests).
+    case inMemory
+
+    /// A caller-supplied URL, for migration helpers and CI fixtures.
+    case custom(URL)
+
+    // MARK: - Internal
+
+    /// The resolved URL, or `nil` for in-memory databases.
+    var url: URL? {
+        switch self {
+        case .application:
+            Self.applicationSupportURL
+
+        case .inMemory:
+            nil
+
+        case let .custom(url):
+            url
+        }
+    }
+
+    /// The on-disk database file inside `applicationSupportDirectory`.
+    private static var applicationSupportURL: URL {
+        self.applicationSupportDirectory.appendingPathComponent("library.sqlite")
+    }
+
+    // MARK: - Public
+
+    /// The `Application Support/WMusic` directory, created if it does not exist.
+    ///
+    /// Public so the app's other launch-time files (single-instance lock,
+    /// crash sentinel) resolve the same directory as the database. If the
+    /// system reports no Application Support directory it falls back to the
+    /// conventional path under the home directory rather than trapping.
+    public static var applicationSupportDirectory: URL {
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+
+        let dir = base.appendingPathComponent("WMusic", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: dir,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+        } catch {
+            AppLogger.make(.persistence).warning(
+                "db.directory.create.failed",
+                ["error": String(reflecting: error)]
+            )
+        }
+        return dir
+    }
+}

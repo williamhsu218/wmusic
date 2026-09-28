@@ -1,0 +1,414 @@
+import AudioEngine
+import Foundation
+import Persistence
+import Testing
+@testable import Playback
+
+// MARK: - QueuePlayerTests
+
+@Suite("QueuePlayer")
+struct QueuePlayerTests {
+    // These tests verify the queue-player state machine without performing
+    // actual audio decoding. They use a lightweight in-memory database.
+
+    @Test("QueuePlayer can be initialised without crashing")
+    func initDoesNotCrash() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        _ = QueuePlayer(engine: engine, database: db)
+    }
+
+    @Test("playNext enqueues items after current")
+    func playNextEnqueues() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+
+        let repo = TrackRepository(database: db)
+        let ids = try await insertTestTracks(repo: repo, count: 3)
+
+        // Populate queue without playing audio files.
+        try await player.addToQueue([ids[0], ids[1]])
+        let initial = await player.queue.items
+        await player.queue.replace(with: initial, startAt: 0) // set current to index 0
+
+        // playNext inserts ids[2] immediately after current (index 0).
+        try await player.playNext([ids[2]])
+
+        let queueItems = await player.queue.items
+        #expect(queueItems.count == 3)
+        #expect(queueItems[1].trackID == ids[2])
+    }
+
+    @Test("addToQueue appends to end")
+    func addToQueueAppends() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+
+        let repo = TrackRepository(database: db)
+        let ids = try await insertTestTracks(repo: repo, count: 2)
+        let extraID = try await repo.insert(self.makeTrack(n: 99))
+
+        try await player.addToQueue(ids)
+        try await player.addToQueue([extraID])
+
+        let queueItems = await player.queue.items
+        #expect(queueItems.last?.trackID == extraID)
+    }
+
+    @Test("setRepeat changes queue repeat mode")
+    func setRepeatChangesMode() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+        await player.setRepeat(.all)
+        let mode = await player.queue.repeatMode
+        #expect(mode == .all)
+    }
+
+    @Test("setShuffle toggles shuffle state")
+    func setShuffleToggles() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+        let repo = TrackRepository(database: db)
+        let ids = try await insertTestTracks(repo: repo, count: 5)
+
+        // Populate queue without starting playback.
+        try await player.addToQueue(ids)
+
+        await player.setShuffle(true)
+        let state = await player.queue.shuffleState
+        if case .on = state {} else {
+            Issue.record("Expected .on, got \(state)")
+        }
+
+        await player.setShuffle(false)
+        let state2 = await player.queue.shuffleState
+        #expect(state2 == .off)
+    }
+
+    @Test("setStopAfterCurrent sets flag on queue")
+    func setStopAfterCurrentSetsFlag() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+
+        await player.setStopAfterCurrent(true)
+        let flag = await player.queue.stopAfterCurrent
+        #expect(flag == true)
+
+        await player.setStopAfterCurrent(false)
+        let flag2 = await player.queue.stopAfterCurrent
+        #expect(flag2 == false)
+    }
+
+    @Test("setStopAfterCurrent emits stopAfterCurrentChanged change")
+    func setStopAfterCurrentEmitsChange() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+
+        // Subscribe synchronously *before* triggering the change to avoid a race
+        // where the emit runs before the subscriber is registered.
+        let stream = await player.queue.changes()
+        let flag = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            Task {
+                for await change in stream {
+                    if case let .stopAfterCurrentChanged(enabled) = change {
+                        cont.resume(returning: enabled)
+                        break
+                    }
+                }
+            }
+            Task { await player.setStopAfterCurrent(true) }
+        }
+        #expect(flag == true)
+    }
+
+    @Test("handleTrackEnded honours stop-after-current over repeat-one (ADR-006 audit M4)")
+    func stopAfterCurrentBeatsRepeatOne() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+
+        let repo = TrackRepository(database: db)
+        let ids = try await insertTestTracks(repo: repo, count: 2)
+
+        // Seed the queue with current = index 0.
+        try await player.addToQueue(ids)
+        let initial = await player.queue.items
+        await player.queue.replace(with: initial, startAt: 0)
+
+        // Both flags set simultaneously — the spec gotcha is that
+        // stop-after-current must win and the .one re-seek must not happen.
+        await player.setRepeat(.one)
+        await player.setStopAfterCurrent(true)
+
+        // Capture the first emitted state from QueuePlayer.state.
+        async let observedEnded: Bool = {
+            for await s in player.state {
+                if case .ended = s {
+                    return true
+                }
+                // Anything other than .ended (e.g. .loading on advance) means
+                // we re-seeked or advanced — that's the failure case.
+                return false
+            }
+            return false
+        }()
+
+        await player.handleTrackEnded()
+
+        let sawEnded = await observedEnded
+        #expect(sawEnded == true, "Expected .ended; got a different state — repeat-one re-seeked or advance fired")
+
+        // Stop-after-current must be cleared (one-shot).
+        let stopFlag = await player.queue.stopAfterCurrent
+        #expect(stopFlag == false)
+
+        // Current index preserved — no .one re-seek, no .all advance.
+        let idx = await player.queue.currentIndex
+        #expect(idx == 0)
+
+        // Repeat-one mode is preserved (not cleared by stop).
+        let mode = await player.queue.repeatMode
+        #expect(mode == .one)
+    }
+
+    @Test("play(items:shuffle:true) enables shuffle state and keeps all items")
+    func playItemsWithShufflePreShuffles() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+
+        // Build 20 in-memory items — no DB needed.
+        let sourceFormat = AudioSourceFormat(
+            sampleRate: 44100, bitDepth: 16, channelCount: 2,
+            isInterleaved: false, codec: "flac"
+        )
+        let items: [QueueItem] = (1 ... 20).map { i in
+            QueueItem(
+                trackID: Int64(i),
+                bookmark: nil,
+                fileURL: "/tmp/preshuf\(i).flac",
+                duration: 200,
+                sourceFormat: sourceFormat
+            )
+        }
+
+        // play(items:shuffle:true) pre-shuffles before loading audio.
+        // Fake paths cause the engine.play() step to throw — that's expected.
+        try? await player.play(items: items, shuffle: true)
+
+        // Pre-shuffle + setShuffle must both have run before the engine error.
+        let state = await player.queue.shuffleState
+        if case .on = state {} else {
+            Issue.record("Expected shuffleState == .on after play(items:shuffle:true), got \(state)")
+        }
+
+        // All 20 items must be in the queue (no items dropped).
+        let queueItems = await player.queue.items
+        #expect(queueItems.count == 20)
+
+        // When startingAt defaults to 0, items[0] is pinned first. The remaining
+        // 19 items are shuffled behind it — verify they are not all in original order.
+        let originalFirstID = items[0].trackID
+        #expect(queueItems.first?.trackID == originalFirstID, "Default startingAt:0 should pin items[0] first")
+        let restIDs = queueItems.dropFirst().map(\.trackID)
+        let originalRestIDs = items.dropFirst().map(\.trackID)
+        // Very unlikely (1/19! chance) all remaining items are still in order.
+        #expect(restIDs != originalRestIDs, "Remaining items behind the pinned track should be shuffled")
+    }
+
+    @Test("play(items:startingAt:shuffle:true) pins chosen track at position 0")
+    func playItemsShuffleHonoursStartingAt() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+
+        let sourceFormat = AudioSourceFormat(
+            sampleRate: 44100, bitDepth: 16, channelCount: 2,
+            isInterleaved: false, codec: "flac"
+        )
+        let items: [QueueItem] = (1 ... 20).map { i in
+            QueueItem(
+                trackID: Int64(i),
+                bookmark: nil,
+                fileURL: "/tmp/pinned\(i).flac",
+                duration: 200,
+                sourceFormat: sourceFormat
+            )
+        }
+        // Double-click on item at index 7 (trackID == 8).
+        let chosenIndex = 7
+        let chosenID = items[chosenIndex].trackID
+
+        // Engine will throw on fake paths — that's fine; the queue is populated
+        // before loadCurrentItem() fails.
+        try? await player.play(items: items, startingAt: chosenIndex, shuffle: true)
+
+        let queueItems = await player.queue.items
+        #expect(queueItems.count == 20, "All items must be present after shuffle")
+        #expect(queueItems.first?.trackID == chosenID, "Chosen track must be at position 0 when shuffle is enabled")
+
+        // All other items still present (no drops).
+        let queueIDs = Set(queueItems.map(\.trackID))
+        let originalIDs = Set(items.map(\.trackID))
+        #expect(queueIDs == originalIDs)
+    }
+
+    @Test("handleTrackEnded skips missing-file track, disables it in DB, and ends cleanly")
+    func handleTrackEndedSkipsMissingFileAndEnds() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+        let repo = TrackRepository(database: db)
+
+        // Two tracks: A (index 0, current/finished), B (index 1, file missing).
+        // Both use fake paths that the audio engine will refuse to load.
+        let idA = try await repo.insert(self.makeTrack(n: 1))
+        let idB = try await repo.insert(self.makeTrack(n: 2))
+
+        try await player.addToQueue([idA, idB])
+        let items = await player.queue.items
+        await player.queue.replace(with: items, startAt: 0) // A is current
+
+        await player.handleTrackEnded()
+
+        // B must be disabled in the database.
+        let allTracks = try await repo.fetchAllIncludingDisabled()
+        let trackB = allTracks.first(where: { $0.id == idB })
+        #expect(trackB?.disabled == true, "Track B must be disabled after file-not-found")
+
+        // B must be removed from the queue.
+        let queueItems = await player.queue.items
+        #expect(!queueItems.contains(where: { $0.trackID == idB }), "Track B must be removed from queue")
+    }
+
+    @Test("handleTrackEnded skips multiple consecutive missing-file tracks and ends cleanly")
+    func handleTrackEndedSkipsMultipleMissingFilesAndEnds() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+        let repo = TrackRepository(database: db)
+
+        // Three tracks: A (current/finished), B (missing), C (missing).
+        let idA = try await repo.insert(self.makeTrack(n: 1))
+        let idB = try await repo.insert(self.makeTrack(n: 2))
+        let idC = try await repo.insert(self.makeTrack(n: 3))
+
+        try await player.addToQueue([idA, idB, idC])
+        let items = await player.queue.items
+        await player.queue.replace(with: items, startAt: 0)
+
+        await player.handleTrackEnded()
+
+        let allTracks = try await repo.fetchAllIncludingDisabled()
+        let disabledIDs = allTracks.filter(\.disabled).compactMap(\.id)
+        #expect(disabledIDs.contains(idB), "Track B must be disabled")
+        #expect(disabledIDs.contains(idC), "Track C must be disabled")
+
+        let queueItems = await player.queue.items
+        #expect(!queueItems.contains(where: { $0.trackID == idB }), "Track B must be removed from queue")
+        #expect(!queueItems.contains(where: { $0.trackID == idC }), "Track C must be removed from queue")
+    }
+
+    // MARK: - Helpers
+
+    // MARK: Remote commands (#482)
+
+    @Test("a remote transport command that fails reports a playback failure instead of dropping it (#482)")
+    func remoteCommandFailureIsReported() async throws {
+        let engine = AudioEngine()
+        let db = try await Database(location: .inMemory)
+        let player = QueuePlayer(engine: engine, database: db)
+        let repo = TrackRepository(database: db)
+        // The row points at a file that is not there, so the load fails the way
+        // a media key's play on a moved file does.
+        let ids = try await insertTestTracks(repo: repo, count: 1)
+        try await player.addToQueue(ids)
+        let items = await player.queue.items
+        await player.queue.replace(with: items, startAt: 0)
+
+        let reported = await Self.awaitFailure(from: player) {
+            await player.runRemote(.play)
+        }
+        #expect(reported, "the lock screen and the media keys have no caller to catch this")
+    }
+
+    @Test("every remote handler routes through runRemote rather than dropping its error (#482)")
+    func remoteHandlersDoNotSwallow() throws {
+        let url = URL(filePath: #filePath)
+            .deletingLastPathComponent() // PlaybackTests/
+            .deletingLastPathComponent() // Tests/
+            .deletingLastPathComponent() // Modules/Playback/
+            .appendingPathComponent("Sources/Playback/QueuePlayer.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let start = try #require(source.range(of: "private func bindRemoteCommands"))
+        let end = try #require(source.range(of: "// MARK: Convenience"))
+        let block = String(source[start.lowerBound ..< end.lowerBound])
+
+        #expect(!block.contains("try?"), "a dropped error leaves the key looking dead with nothing logged")
+        for call in ["runRemote(.play)", "runRemote(.togglePlayPause)", "runRemote(.next)",
+                     "runRemote(.previous)", "runRemote(.seek("] {
+            #expect(block.contains(call), "missing \(call)")
+        }
+    }
+
+    @Test("a remote command is logged under its own name")
+    func remoteCommandLabels() {
+        #expect(QueuePlayer.RemoteCommand.play.label == "play")
+        #expect(QueuePlayer.RemoteCommand.next.label == "nextTrack")
+        #expect(QueuePlayer.RemoteCommand.previous.label == "previousTrack")
+        #expect(QueuePlayer.RemoteCommand.seek(3, label: "skipBack").label == "skipBack")
+    }
+
+    /// Runs `action` and reports whether a `.failed` state reaches the player's
+    /// state stream, which is where the now-playing strip's error toast hangs.
+    private static func awaitFailure(
+        from player: QueuePlayer,
+        action: @escaping @Sendable () async -> Void
+    ) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await state in player.state {
+                    if case .failed = state {
+                        return true
+                    }
+                }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(5))
+                return false
+            }
+            await action()
+            let reported = await group.next() ?? false
+            group.cancelAll()
+            return reported
+        }
+    }
+
+    private func makeTrack(n: Int) -> Track {
+        let now = Int64(Date().timeIntervalSince1970)
+        return Track(
+            fileURL: "/tmp/track\(n).flac",
+            fileFormat: "flac",
+            duration: 200,
+            title: "Track \(n)",
+            addedAt: now,
+            updatedAt: now
+        )
+    }
+
+    private func insertTestTracks(repo: TrackRepository, count: Int) async throws -> [Int64] {
+        var ids: [Int64] = []
+        for i in 1 ... count {
+            let id = try await repo.insert(self.makeTrack(n: i))
+            ids.append(id)
+        }
+        return ids
+    }
+}

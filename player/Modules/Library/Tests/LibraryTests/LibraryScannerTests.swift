@@ -1,0 +1,398 @@
+import Foundation
+import Metadata
+import Persistence
+import Testing
+@testable import Library
+
+// MARK: - Helpers
+
+private func makeDB() async throws -> Database {
+    try await Database(location: .inMemory)
+}
+
+private var sampleLibraryURL: URL {
+    get throws {
+        guard let url = Bundle.module.url(
+            forResource: "sample-library",
+            withExtension: nil,
+            subdirectory: "Fixtures"
+        ) else {
+            throw LibraryError.invalidPath("Fixtures/sample-library not found in bundle")
+        }
+        return url
+    }
+}
+
+// MARK: - LibraryScanner tests
+
+@Suite("LibraryScanner")
+struct LibraryScannerTests {
+    // MARK: - Root management
+
+    @Test("addRoot stores root in database")
+    func addRootPersists() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+
+        try await scanner.addRoot(dir)
+
+        let roots = try await scanner.roots()
+        #expect(roots.count == 1)
+        #expect(roots[0].path == dir.path)
+        #expect(!roots[0].bookmark.isEmpty)
+    }
+
+    @Test("removeRoot deletes root from database")
+    func removeRootDeletes() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+
+        try await scanner.addRoot(dir)
+        let roots = try await scanner.roots()
+        let id = try #require(roots.first?.id)
+
+        try await scanner.removeRoot(id: id)
+
+        let remaining = try await scanner.roots()
+        #expect(remaining.isEmpty)
+    }
+
+    @Test("roots returns empty array when no roots added")
+    func rootsIsInitiallyEmpty() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let roots = try await scanner.roots()
+        #expect(roots.isEmpty)
+    }
+
+    @Test("addRoot for same path twice does not create duplicate")
+    func addRootIdempotent() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+
+        try await scanner.addRoot(dir)
+        try await scanner.addRoot(dir) // second call — upsert should be idempotent
+
+        let roots = try await scanner.roots()
+        #expect(roots.count == 1)
+    }
+
+    // MARK: - Scanning
+
+    @Test("scan with no roots finishes immediately")
+    func scanWithNoRootsFinishes() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+
+        var events: [ScanProgress] = []
+        for await event in await scanner.scan() {
+            events.append(event)
+        }
+
+        // Should produce nothing or just finish cleanly — no crash
+        #expect(!events.contains {
+            if case .error = $0 {
+                return true
+            }
+            return false
+        })
+    }
+
+    @Test("scan emits started and finished events")
+    func scanEmitsLifecycleEvents() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+        try await scanner.addRoot(dir)
+
+        var events: [ScanProgress] = []
+        for await event in await scanner.scan(mode: .full) {
+            events.append(event)
+        }
+
+        let hasStarted = events.contains {
+            if case .started = $0 {
+                return true
+            }
+            return false
+        }
+        let hasFinished = events.contains {
+            if case .finished = $0 {
+                return true
+            }
+            return false
+        }
+        #expect(hasStarted)
+        #expect(hasFinished)
+    }
+
+    @Test("a pending full_rescan request upgrades a quick scan to full and is cleared when it finishes (#425)")
+    func pendingRequestUpgradesQuickScan() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let maintenance = PendingMaintenanceRepository(database: db)
+        try await scanner.addRoot(sampleLibraryURL)
+
+        // First full scan populates; M045's own request is consumed by it.
+        for await _ in await scanner.scan(mode: .full) {}
+        #expect(try await maintenance.hasRequest(task: PendingMaintenance.Task.fullRescan) == false)
+
+        // A plain quick scan of an unchanged library skips everything.
+        var quick: ScanProgress.Summary?
+        for await event in await scanner.scan(mode: .quick) {
+            if case let .finished(summary) = event {
+                quick = summary
+            }
+        }
+        let skippedWhenQuick = try #require(quick).skipped
+        #expect(skippedWhenQuick > 0)
+
+        // With a request outstanding, the same quick scan re-reads every file.
+        try await maintenance.request(task: PendingMaintenance.Task.fullRescan, requestedBy: "test")
+        var upgraded: ScanProgress.Summary?
+        for await event in await scanner.scan(mode: .quick) {
+            if case let .finished(summary) = event {
+                upgraded = summary
+            }
+        }
+        let result = try #require(upgraded)
+        #expect(result.skipped == 0)
+        #expect(result.updated == skippedWhenQuick)
+        #expect(try await maintenance.hasRequest(task: PendingMaintenance.Task.fullRescan) == false)
+    }
+
+    @Test("full scan inserts audio files into database")
+    func scanInsertsAudioFiles() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+        try await scanner.addRoot(dir)
+
+        for await _ in await scanner.scan(mode: .full) {}
+
+        let trackRepo = TrackRepository(database: db)
+        let count = try await trackRepo.count()
+        // Sample library has 13 real audio tracks + 2 edge-case audio files (no-tags + unicode)
+        // = 15 audio files; hidden + artwork.psd + cover.jpg + .lrc are skipped
+        #expect(count >= 10, "Expected at least 10 tracks, got \(count)")
+    }
+
+    @Test("quick scan skips unchanged files on second pass")
+    func quickScanSkipsUnchanged() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+        try await scanner.addRoot(dir)
+
+        // Full scan first
+        for await _ in await scanner.scan(mode: .full) {}
+
+        // Second pass (quick)
+        var skipped = 0
+        for await event in await scanner.scan(mode: .quick) {
+            if case .processed(_, outcome: .skippedUnchanged) = event {
+                skipped += 1
+            }
+        }
+        #expect(skipped > 0, "Expected unchanged files to be skipped on quick scan")
+    }
+
+    @Test("scan summary reports correct totals")
+    func scanSummaryTotals() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+        try await scanner.addRoot(dir)
+
+        var summary: ScanProgress.Summary?
+        for await event in await scanner.scan(mode: .full) {
+            if case let .finished(s) = event {
+                summary = s
+            }
+        }
+
+        let s = try #require(summary)
+        #expect(s.inserted > 0)
+        #expect(s.errors == 0 || s.errors < s.inserted, "Errors should not dominate")
+    }
+
+    @Test("concurrent scan attempt yields scanAlreadyInProgress error")
+    func concurrentScanFails() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+        try await scanner.addRoot(dir)
+
+        // Start first scan
+        let stream1 = await scanner.scan(mode: .full)
+        var iter1 = stream1.makeAsyncIterator()
+        _ = await iter1.next() // pull first event to ensure scan started
+
+        // Start a second scan — should immediately emit an error
+        var secondScanError = false
+        for await event in await scanner.scan(mode: .full) {
+            if case .error = event {
+                secondScanError = true
+            }
+        }
+        #expect(secondScanError)
+
+        // Drain the first scan
+        while await iter1.next() != nil {}
+    }
+
+    @Test("cancelling the scan consumer stops the scan body (#266)")
+    func cancellingConsumerStopsScan() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+        try await scanner.addRoot(dir)
+
+        // Consume the scan in a child task and cancel it the moment the scan
+        // signals `.started` — before the coordinator has imported anything
+        // (`.started` is emitted ahead of walking + importing). With the fix,
+        // `continuation.onTermination` cancels the underlying scan task, so the
+        // coordinator's cooperative `Task.isCancelled` checks trip almost
+        // immediately and very few (often zero) files are imported. Without it,
+        // the unstructured Task keeps running to completion in the background
+        // and imports every file regardless of the cancellation.
+        let consumer = Task {
+            for await event in await scanner.scan(mode: .full) {
+                if case .started = event {
+                    break
+                }
+            }
+        }
+        consumer.cancel()
+        await consumer.value
+
+        // Give any *leaked* (uncancelled) background scan generous time to run
+        // to completion. The full sample-library scan finishes well within this
+        // window, so if cancellation did not propagate every file would be in
+        // the DB by now.
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        let trackRepo = TrackRepository(database: db)
+        let count = try await trackRepo.count()
+        #expect(
+            count < 10,
+            "Cancelling the consumer should stop the scan; imported \(count) tracks (full library is ~15)"
+        )
+    }
+
+    // MARK: - scanSingleFile
+
+    @Test("scanSingleFile inserts a single audio file into the database")
+    func scanSingleFileInserts() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+
+        // Pick the first audio file from the fixture directory
+        let audioFile = FileManager.default
+            .enumerator(at: dir, includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }
+            .first { url in
+                let ext = url.pathExtension.lowercased()
+                return ["flac", "mp3", "aac", "m4a", "wav", "ogg", "opus"].contains(ext)
+            }
+        let url = try #require(audioFile, "No audio file found in fixture directory")
+
+        let summary = try await scanner.scanSingleFile(url: url)
+        #expect(summary.inserted + summary.updated == 1)
+        #expect(summary.errors == 0)
+    }
+
+    @Test("scanSingleFile on a non-existent file records an error")
+    func scanSingleFileNonExistent() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let url = URL(fileURLWithPath: "/tmp/does_not_exist_bocan_test.flac")
+
+        let summary = try await scanner.scanSingleFile(url: url)
+        #expect(summary.errors >= 1)
+    }
+
+    // MARK: - audioFiles(under:)
+
+    @Test("audioFiles(under:) returns audio files from fixture directory")
+    func audioFilesFindsAudioInDirectory() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+
+        let found = await scanner.audioFiles(under: dir)
+        #expect(!found.isEmpty, "Expected audio files in the fixture directory")
+        #expect(found.allSatisfy { TagReader.isSupported($0) })
+    }
+
+    @Test("audioFiles(under:) returns empty for a directory with no audio")
+    func audioFilesEmptyForNonAudioDirectory() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bocan_empty_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let found = await scanner.audioFiles(under: dir)
+        #expect(found.isEmpty)
+    }
+
+    @Test("audioFiles(under:) recursively finds files in subdirectories")
+    func audioFilesRecursive() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bocan_recursive_\(UUID().uuidString)")
+        let sub = root.appendingPathComponent("Artist/Album")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Create two stub audio files (zero-byte — just testing enumeration, not tag reading)
+        let f1 = sub.appendingPathComponent("track1.mp3")
+        let f2 = sub.appendingPathComponent("track2.flac")
+        FileManager.default.createFile(atPath: f1.path, contents: nil)
+        FileManager.default.createFile(atPath: f2.path, contents: nil)
+
+        // FileManager.enumerator returns canonical (symlink-resolved) paths, e.g.
+        // /private/var/... on macOS where /var is a symlink.  Normalise both sides.
+        let found = await scanner.audioFiles(under: root)
+        let foundPaths = Set(found.map { ($0.path as NSString).standardizingPath })
+        #expect(found.count == 2)
+        #expect(foundPaths.contains((f1.path as NSString).standardizingPath))
+        #expect(foundPaths.contains((f2.path as NSString).standardizingPath))
+    }
+}
+
+// MARK: - LibraryLocation tests
+
+@Suite("LibraryLocation")
+struct LibraryLocationTests {
+    @Test("applicationSupportDirectory returns a valid path under ~/Library")
+    func applicationSupportDirectoryExists() {
+        let dir = LibraryLocation.applicationSupportDirectory
+        #expect(dir.path.contains("WMusic"))
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    @Test("coverArtCacheDirectory is inside applicationSupportDirectory")
+    func coverArtCacheDirectoryIsNested() {
+        let cache = LibraryLocation.coverArtCacheDirectory
+        #expect(cache.path.contains("CoverArt"))
+        #expect(FileManager.default.fileExists(atPath: cache.path))
+    }
+
+    @Test("bookmark roundtrip resolves to the same path")
+    func bookmarkRoundtrip() throws {
+        let dir = LibraryLocation.applicationSupportDirectory
+        let bookmark = try LibraryLocation.bookmark(for: dir)
+        let (resolved, isStale) = try LibraryLocation.resolve(bookmark)
+        #expect(resolved.path == dir.path)
+        #expect(!isStale)
+    }
+}

@@ -1,0 +1,32 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Scope: the `UI` module. For the build system, the module DAG, and commit conventions, see the root `CLAUDE.md`. The menu bar and window/scene wiring live in `App/`, not here (see `App/CLAUDE.md`).
+
+## What this module owns
+
+Every SwiftUI view and view model. It is the only module that imports AppKit (`Scripts/audit-appkit-imports.py` enforces it; the one allowlisted exception is `NowPlayingCentre` in `Playback`), and it sits just below `App` in the DAG.
+
+- `LibraryViewModel` (in `ViewModels/`) is the spine: navigation, selection, sidebar/server state, scanning, toasts, and most user actions hang off it. `NowPlayingViewModel` drives the transport strip. View models are `@MainActor` `@Observable`/`ObservableObject`.
+- `AppRoot/` is the main window (`BocanRootView`, `Sidebar`). `Browse/` is the library content (tracks/albums/artists tables, the Subsonic browse views, queue). `Settings/` is the System-Settings-style scene. `Console/` holds `LogConsoleView`, `LogConsoleRow`, and `LogConsoleViewModel` -- the in-app log window that backfills from `LogStore` and tails live entries. `MiniPlayer/`, `Lyrics/`, `Visualizers/`, `DSP/`, `Routing/`, `Transport/` are the other surfaces. `Theme/` holds colours, typography, and reusable a11y modifiers.
+- This module may `import Subsonic` (the charter's dependency table lists the edge) and does, for its value types, the browse data source and the Settings screens. For the long-lived objects the main window needs (sidebar listing, connection and capability observing, metadata caching) it declares narrow protocols that the App layer implements; prefer widening one of those to handing a view model the whole `SubsonicService`. `Podcasts` and `SyncServer` are different: never import them here, only their App-implemented seams.
+
+## Testing this module (read before writing tests)
+
+- `make test-ui` runs the SPM test target: snapshot tests plus the view-model/source-convention tests. **Snapshot tests and anything needing a real view tree only run here**, because the Xcode `BocanTests` bundle is host-less.
+- The Xcode `BocanTests` bundle *also* globs `Modules/UI/Tests/UITests/ViewModelTests`. **Adding a new file there requires `make generate`** before `make test`/`make test-coverage` will pick it up.
+- Much of the UI cannot be unit-tested host-less (menus, view internals, drawing). The established pattern is a **source-convention test**: read the source file via `#filePath` and assert a structural fact (a modifier is applied, an item exists, copy is present). When you change such a view, update or add one of these.
+- Keep resolved English strings byte-identical when localizing, so default-size snapshots do not drift.
+
+## Things easy to get wrong
+
+- **Every interactive control you add here needs `.help()`.** Hover text says what the control does or what changes if it is switched, not what its label already says, and it is localized copy like any other string here. A self-sufficient label goes in `Scripts/audit-help-text-allowlist.txt` with a reason instead. `make lint` fails on a control without either. The rule is in `docs/design-spec/_standards.md` ("Hover text").
+- **SwiftLint enforces a 500-line `file_length`** (a warning that `make lint --strict` turns into an error). When a file nears it, extract a cohesive section into an extension file; do not add a `swiftlint:disable`. Watch out for `switch_case_on_newline`, `prefer_self_in_static_references`, and `trailing_closure` too.
+- **No user-facing string ships unlocalized.** Every user-visible string (SwiftUI views, view models, AppKit cells, accessibility labels, help tips, panel prompts, toasts, errors) goes through the `L10n` helper (`Text(localized:)` / `L10n.string(_:)`, which pass `bundle: .module`) with a matching key in `Resources/Localizable.xcstrings`. A bare `Text("…")` in this SPM module resolves against `Bundle.main`, not the module catalog, so it compiles, renders in English, and silently never localizes. Enforcement is layered and all of it gates CI: the `no_bare_user_facing_literal` SwiftLint rule covers every literal call site module-wide, and `L10nTests` covers what lint cannot see (view-model copy via source-convention tests, plural variations, full en-XA pseudolocale coverage). When you add or change catalog keys, run `make pseudolocale`, or the en-XA coverage test fails. Strings displayed here but owned by lower modules (EQ preset names, `SleepTimerPreset`, scrobble `SubmissionStatus`) keep their English raw values; add a UI-side display mapping instead of localizing the owning module. SwiftPM only copies the catalog; **only the Xcode build compiles it** into `.strings`/`.stringsdict`, which is why tests validate catalog *content*, not runtime resolution. The conversion recipe is documented in `docs/design-spec/localization.md`. Note: an Xcode build (`make test`) may rewrite the catalog via auto-extraction; that churn is unrelated to most changes and can be reverted.
+- **High-frequency view models must not invalidate the menu bar.** That is why `App/BocanCommands` takes them as plain `let`. Within this module, prefer property-level observation and avoid widening what a hot view observes.
+- A `nonisolated(unsafe) var` `Task<…>?` handle on an `@Observable` class needs `@ObservationIgnored` in front of it. Without it the macro rewrites the property as computed, the annotation then has no effect, and the compiler warns `'nonisolated(unsafe)' has no effect on property 'X', consider using 'nonisolated'` on every build; the fix-it does not compile (`nonisolated` is rejected on mutable stored properties) and dropping the annotation breaks the nonisolated `deinit`. On `ObservableObject` classes the plain annotation is correct as is (#458).
+
+## Testing
+
+Run `make test-ui` from the repo root before committing any change to this module. If you first ran a narrower check (a single `swift test --filter` under `Modules/UI`, or `make test-coverage` for the Xcode-bundle view-model tests), run `make test-ui` last so the full module suite (including snapshots) is the final gate before the commit.

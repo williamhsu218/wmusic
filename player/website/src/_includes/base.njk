@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="{{ site.lang }}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% if title %}{{ title }} | {{ site.title }}{% else %}{{ site.title }} | {{ site.tagline }}{% endif %}</title>
+    <meta name="description" content="{{ description or site.description }}" />
+    <meta name="theme-color" content="#1a1024" />
+    <meta name="keywords" content="Bocan, Music, MacOS, open-source, Swift, audiofile">
+    <meta http-equiv="X-Clacks-Overhead" content="GNU Terry Pratchett" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="{{ title or site.title }}" />
+    <meta property="og:description" content="{{ description or site.description }}" />
+    <meta property="og:url" content="{{ site.url }}{{ page.url }}" />
+    <meta property="og:site_name" content="{{ site.title }}" />
+    <meta property="og:image" content="{{ site.url }}/assets/img/og.png" />
+    <meta property="og:image:secure_url" content="{{ site.url }}/assets/img/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta property="og:image:alt" content="{{ site.title }} — {{ site.tagline }}" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="{{ title or site.title }}" />
+    <meta name="twitter:description" content="{{ description or site.description }}" />
+    <meta name="twitter:image" content="{{ site.url }}/assets/img/og.png" />
+    <meta name="twitter:image:alt" content="{{ site.title }} — {{ site.tagline }}" />
+
+    <link rel="icon" type="image/svg+xml" href="/assets/img/favicon.svg" />
+    <link rel="alternate icon" href="/assets/img/favicon.png" />
+    <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png" />
+
+    <link rel="stylesheet" href="/assets/css/main.css" />
+    <link rel="me" href="https://infosec.exchange/@bocan">
+    <link rel="me" href="https://chris.funderburg.me/">
+    <meta name="author" content="Chris Funderburg">
+
+  </head>
+  <body class="page-{{ pageClass or 'default' }}">
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" role="banner">
+      <a class="brand" href="/" aria-label="{{ site.title }} home">
+        <span class="brand__mark" aria-hidden="true">
+          <img src="/assets/img/favicon.svg" width="32" height="32" alt="" />
+        </span>
+        <span class="brand__name">{{ site.title }}</span>
+      </a>
+
+      <nav class="site-nav" aria-label="Primary">
+        <a href="/" {% if page.url == '/' %}aria-current="page"{% endif %}>Home</a>
+        <a href="/download/" {% if page.url == '/download/' %}aria-current="page"{% endif %}>Download</a>
+        <a href="/changelog/" {% if page.url == '/changelog/' %}aria-current="page"{% endif %}>Changelog</a>
+        <a href="/docs/" {% if page.url == '/docs/' %}aria-current="page"{% endif %}>Docs</a>
+        <a href="/formats/" {% if page.url == '/formats/' %}aria-current="page"{% endif %}>Formats</a>
+        <a href="/phone-sync/" {% if page.url == '/phone-sync/' %}aria-current="page"{% endif %}>Phone Sync</a>
+        <a href="/privacy/" {% if page.url == '/privacy/' %}aria-current="page"{% endif %}>Privacy</a>
+        <a href="/credits/" {% if page.url == '/credits/' %}aria-current="page"{% endif %}>Credits</a>
+        <a class="site-nav__github" href="{{ site.repo }}" rel="external noopener" aria-label="Source on GitHub">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="main" tabindex="-1">
+      {{ content | safe }}
+    </main>
+
+    <footer class="site-footer" role="contentinfo">
+      <p>
+        © {{ '' | year }} {{ site.author }}. Source on
+        <a href="{{ site.repo }}" rel="external noopener">GitHub</a>.
+        Built with too much coffee and not enough sleep.
+      </p>
+      <p class="site-footer__small">
+        {{ site.title }} is free software. No telemetry, no cloud, no nonsense.
+      </p>
+    </footer>
+  </body>
+</html>

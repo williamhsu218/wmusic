@@ -1,0 +1,399 @@
+import Foundation
+import Testing
+@testable import Persistence
+
+@Suite("EpisodeStateRepository", .serialized)
+struct EpisodeStateRepositoryTests {
+    private func makeDB() async throws -> Database {
+        try await Database(location: .inMemory)
+    }
+
+    private func insertPodcast(in db: Database) async throws -> Int64 {
+        let repo = PodcastRepository(database: db)
+        return try await repo.insert(Podcast(
+            feedURL: "https://example.test/feed.rss",
+            title: "Test Show",
+            addedAt: 1_700_000_000
+        ))
+    }
+
+    // MARK: - Round trip across the hand-written upserts (#421)
+
+    @Test("each upsert path touches only its own columns; the others survive")
+    func upsertPathsPreserveEachOther() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.setDownloadState(
+            podcastID: podcastID,
+            guid: "ep",
+            state: .downloaded,
+            path: "/dl/ep.mp3",
+            bytes: 12345,
+            hash: "sha-ep"
+        )
+        try await repo.savePosition(podcastID: podcastID, guid: "ep", position: 42.5, now: 1_700_000_100)
+        var row = try #require(try await repo.fetch(podcastID: podcastID, guid: "ep"))
+        #expect(row.playPosition == 42.5)
+        #expect(row.playState == .inProgress)
+        #expect(row.lastPlayedAt == 1_700_000_100)
+        #expect(row.downloadState == .downloaded, "savePosition must not reset download columns")
+        #expect(row.downloadPath == "/dl/ep.mp3")
+        #expect(row.downloadBytes == 12345)
+        #expect(row.contentHash == "sha-ep")
+
+        try await repo.markPlayed(podcastID: podcastID, guid: "ep", now: 1_700_000_200)
+        row = try #require(try await repo.fetch(podcastID: podcastID, guid: "ep"))
+        #expect(row.playState == .played)
+        #expect(row.playPosition == 0)
+        #expect(row.completedAt == 1_700_000_200)
+        #expect(row.downloadPath == "/dl/ep.mp3", "markPlayed must not reset download columns")
+        #expect(row.contentHash == "sha-ep")
+
+        try await repo.markUnplayed(podcastID: podcastID, guid: "ep")
+        row = try #require(try await repo.fetch(podcastID: podcastID, guid: "ep"))
+        #expect(row.playState == .unplayed)
+        #expect(row.completedAt == nil)
+        #expect(row.downloadState == .downloaded, "markUnplayed must not reset download columns")
+
+        try await repo.savePosition(podcastID: podcastID, guid: "ep", position: 7, now: 1_700_000_300)
+        try await repo.setDownloadState(podcastID: podcastID, guid: "ep", state: .none, path: nil, bytes: nil, hash: nil)
+        row = try #require(try await repo.fetch(podcastID: podcastID, guid: "ep"))
+        #expect(row.downloadState == .none)
+        #expect(row.downloadPath == nil)
+        #expect(row.playPosition == 7, "setDownloadState must not reset play columns")
+        #expect(row.playState == .inProgress)
+        #expect(row.lastPlayedAt == 1_700_000_300)
+    }
+
+    // MARK: - savePosition
+
+    @Test("savePosition creates state row on first call")
+    func savePositionCreatesRow() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        let before = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(before == nil)
+
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 30, now: 1_700_001_000)
+
+        let after = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(after?.playPosition == 30)
+        #expect(after?.playState == .inProgress)
+        #expect(after?.lastPlayedAt == 1_700_001_000)
+    }
+
+    @Test("savePosition updates position on subsequent calls")
+    func savePositionUpdatesPosition() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 60, now: 1_700_001_000)
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 120, now: 1_700_002_000)
+
+        let state = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(state?.playPosition == 120)
+        #expect(state?.lastPlayedAt == 1_700_002_000)
+    }
+
+    @Test("savePosition does not overwrite played state")
+    func savePositionDoesNotOverwritePlayed() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        // Mark the episode as fully played.
+        try await repo.markPlayed(podcastID: podcastID, guid: "ep-1", now: 1_700_001_000)
+
+        // Simulate user scrubbing back; savePosition must not flip state back to inProgress.
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 300, now: 1_700_002_000)
+
+        let state = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(state?.playState == .played, "played state must not be overwritten by savePosition")
+        #expect(state?.playPosition == 300, "position update is still applied")
+    }
+
+    // MARK: - markPlayed
+
+    @Test("markPlayed creates a played row with zero position")
+    func markPlayedCreatesRow() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.markPlayed(podcastID: podcastID, guid: "ep-1", now: 1_700_001_000)
+
+        let state = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(state?.playState == .played)
+        #expect(state?.playPosition == 0)
+        #expect(state?.completedAt == 1_700_001_000)
+        #expect(state?.lastPlayedAt == 1_700_001_000)
+    }
+
+    @Test("markPlayed overwrites inProgress row")
+    func markPlayedOverwritesInProgress() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 3500, now: 1_700_001_000)
+        try await repo.markPlayed(podcastID: podcastID, guid: "ep-1", now: 1_700_002_000)
+
+        let state = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(state?.playState == .played)
+        #expect(state?.playPosition == 0)
+        #expect(state?.completedAt == 1_700_002_000)
+    }
+
+    // MARK: - markUnplayed
+
+    @Test("markUnplayed resets all progress fields")
+    func markUnplayedResetsFields() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.markPlayed(podcastID: podcastID, guid: "ep-1", now: 1_700_001_000)
+        try await repo.markUnplayed(podcastID: podcastID, guid: "ep-1")
+
+        let state = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(state?.playState == .unplayed)
+        #expect(state?.playPosition == 0)
+        #expect(state?.completedAt == nil)
+    }
+
+    @Test("markUnplayed creates unplayed row when no prior state")
+    func markUnplayedCreatesRow() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.markUnplayed(podcastID: podcastID, guid: "ep-1")
+
+        let state = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(state?.playState == .unplayed)
+        #expect(state?.playPosition == 0)
+    }
+
+    // MARK: - setDownloadState
+
+    @Test("setDownloadState creates row and round-trips")
+    func setDownloadStateRoundTrips() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.setDownloadState(
+            podcastID: podcastID,
+            guid: "ep-1",
+            state: .downloaded,
+            path: "/Library/Podcasts/ep-1.mp3",
+            bytes: 45_000_000
+        )
+
+        let state = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(state?.downloadState == .downloaded)
+        #expect(state?.downloadPath == "/Library/Podcasts/ep-1.mp3")
+        #expect(state?.downloadBytes == 45_000_000)
+    }
+
+    @Test("setDownloadState does not touch play fields")
+    func setDownloadStatePreservesPlayFields() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 500, now: 1_700_001_000)
+        try await repo.setDownloadState(
+            podcastID: podcastID,
+            guid: "ep-1",
+            state: .downloaded,
+            path: "/tmp/ep-1.mp3",
+            bytes: 10000
+        )
+
+        let state = try await repo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(state?.playPosition == 500, "download upsert must not reset play position")
+        #expect(state?.playState == .inProgress, "download upsert must not reset play state")
+        #expect(state?.downloadState == .downloaded)
+    }
+
+    // MARK: - fetchAll
+
+    @Test("fetchAll returns all state rows for a podcast")
+    func fetchAllReturnsAll() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 100, now: 1_700_001_000)
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-2", position: 200, now: 1_700_001_000)
+
+        let all = try await repo.fetchAll(podcastID: podcastID)
+        #expect(all.count == 2)
+        let guids = Set(all.map(\.guid))
+        #expect(guids == ["ep-1", "ep-2"])
+    }
+
+    // MARK: - fetchByDownloadState
+
+    @Test("fetchByDownloadState returns matching rows across podcasts")
+    func fetchByDownloadStateAcrossPodcasts() async throws {
+        let db = try await makeDB()
+        let repo = EpisodeStateRepository(database: db)
+        let podcastRepo = PodcastRepository(database: db)
+        let showA = try await podcastRepo.insert(Podcast(
+            feedURL: "https://example.test/a.rss", title: "A", addedAt: 1_700_000_000
+        ))
+        let showB = try await podcastRepo.insert(Podcast(
+            feedURL: "https://example.test/b.rss", title: "B", addedAt: 1_700_000_000
+        ))
+
+        try await repo.setDownloadState(podcastID: showA, guid: "a1", state: .downloaded, path: "/tmp/a1", bytes: 10)
+        try await repo.setDownloadState(podcastID: showA, guid: "a2", state: .downloading, path: nil, bytes: nil)
+        try await repo.setDownloadState(podcastID: showB, guid: "b1", state: .downloaded, path: "/tmp/b1", bytes: 20)
+        try await repo.setDownloadState(podcastID: showB, guid: "b2", state: .queued, path: nil, bytes: nil)
+
+        let downloaded = try await repo.fetchByDownloadState([.downloaded])
+        #expect(Set(downloaded.map(\.guid)) == ["a1", "b1"])
+
+        let interrupted = try await repo.fetchByDownloadState([.downloading, .queued])
+        #expect(Set(interrupted.map(\.guid)) == ["a2", "b2"])
+
+        let empty = try await repo.fetchByDownloadState([])
+        #expect(empty.isEmpty)
+    }
+
+    // MARK: - observe
+
+    @Test("observe emits initial value then again on change")
+    func observeEmitsOnChange() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let repo = EpisodeStateRepository(database: db)
+        let stream = await repo.observe(podcastID: podcastID)
+        var iterator = stream.makeAsyncIterator()
+
+        let initial = try await iterator.next()
+        #expect(initial?.isEmpty == true)
+
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 60, now: 1_700_001_000)
+
+        let updated = try await iterator.next()
+        #expect(updated?.count == 1)
+        #expect(updated?.first?.playPosition == 60)
+    }
+
+    // MARK: - Cascade
+
+    @Test("state rows cascade-delete when the parent podcast is deleted")
+    func stateCascadesOnPodcastDelete() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        let podcastRepo = PodcastRepository(database: db)
+        let stateRepo = EpisodeStateRepository(database: db)
+
+        try await stateRepo.savePosition(podcastID: podcastID, guid: "ep-1", position: 100, now: 1_700_001_000)
+
+        let beforeDelete = try await stateRepo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(beforeDelete != nil)
+
+        try await podcastRepo.delete(id: podcastID)
+
+        let afterDelete = try await stateRepo.fetch(podcastID: podcastID, guid: "ep-1")
+        #expect(afterDelete == nil, "state must cascade-delete with the parent podcast")
+    }
+
+    // MARK: - unplayedCounts
+
+    private func insertEpisode(in db: Database, podcastID: Int64, guid: String) async throws {
+        let repo = EpisodeRepository(database: db)
+        try await repo.upsertAll([
+            PodcastEpisode(
+                podcastID: podcastID,
+                guid: guid,
+                title: "Episode \(guid)",
+                audioURL: "https://example.test/\(guid).mp3",
+                addedAt: 1_700_000_000
+            ),
+        ])
+    }
+
+    @Test("unplayedCounts counts an episode with no state row as unread")
+    func unplayedCountsNoStateRow() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        try await insertEpisode(in: db, podcastID: podcastID, guid: "ep-1")
+        try await insertEpisode(in: db, podcastID: podcastID, guid: "ep-2")
+        let repo = EpisodeStateRepository(database: db)
+
+        let counts = try await repo.unplayedCounts()
+        #expect(counts[podcastID] == 2)
+    }
+
+    @Test("unplayedCounts counts unplayed and inProgress, excludes played")
+    func unplayedCountsByState() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        for guid in ["ep-1", "ep-2", "ep-3"] {
+            try await self.insertEpisode(in: db, podcastID: podcastID, guid: guid)
+        }
+        let repo = EpisodeStateRepository(database: db)
+        try await repo.savePosition(podcastID: podcastID, guid: "ep-1", position: 30, now: 1_700_001_000)
+        try await repo.markUnplayed(podcastID: podcastID, guid: "ep-2")
+        try await repo.markPlayed(podcastID: podcastID, guid: "ep-3", now: 1_700_001_000)
+
+        let counts = try await repo.unplayedCounts()
+        #expect(counts[podcastID] == 2, "inProgress + unplayed count; played excluded")
+    }
+
+    @Test("a fully-played show is absent from unplayedCounts, not a zero entry")
+    func unplayedCountsFullyPlayedAbsent() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        try await insertEpisode(in: db, podcastID: podcastID, guid: "ep-1")
+        let repo = EpisodeStateRepository(database: db)
+        try await repo.markPlayed(podcastID: podcastID, guid: "ep-1", now: 1_700_001_000)
+
+        let counts = try await repo.unplayedCounts()
+        #expect(counts[podcastID] == nil, "zero-unread show must be absent, not a 0 entry")
+    }
+
+    @Test("markAllPlayed then unplayedCounts reports the show cleared")
+    func unplayedCountsAfterMarkAll() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        for guid in ["ep-1", "ep-2"] {
+            try await self.insertEpisode(in: db, podcastID: podcastID, guid: guid)
+        }
+        let repo = EpisodeStateRepository(database: db)
+        let before = try await repo.unplayedCounts()
+        #expect(before[podcastID] == 2)
+
+        try await repo.markAllPlayed(podcastID: podcastID, now: 1_700_001_000)
+        let after = try await repo.unplayedCounts()
+        #expect(after[podcastID] == nil)
+    }
+
+    @Test("observeUnplayedCounts emits initially and re-emits after a mark-played write")
+    func observeUnplayedCountsReemits() async throws {
+        let db = try await makeDB()
+        let podcastID = try await insertPodcast(in: db)
+        try await insertEpisode(in: db, podcastID: podcastID, guid: "ep-1")
+        let repo = EpisodeStateRepository(database: db)
+        let stream = await repo.observeUnplayedCounts()
+        var iterator = stream.makeAsyncIterator()
+
+        let initial = try await iterator.next()
+        #expect(initial?[podcastID] == 1)
+
+        try await repo.markPlayed(podcastID: podcastID, guid: "ep-1", now: 1_700_001_000)
+
+        let updated = try await iterator.next()
+        #expect(updated?[podcastID] == nil, "marking the only episode played clears the entry")
+    }
+}

@@ -1,0 +1,52 @@
+import SwiftUI
+import UI
+
+// MARK: - Tools menu
+
+extension BocanCommands {
+    /// The Tools menu: library-wide maintenance actions. Extracted from
+    /// `BocanCommands.swift` to keep that file under the 500-line lint ceiling.
+    var toolsCommands: some Commands {
+        CommandMenu("Tools") {
+            Button("Fetch Missing Cover Art\u{2026}") {
+                self.vm.showBatchCoverArt()
+            }
+            .help("Search MusicBrainz for cover art for albums with no artwork")
+
+            Button("Find Duplicates\u{2026}") {
+                self.vm.showDuplicateReview()
+            }
+            .help("Find and review tracks that appear more than once in your library")
+
+            Divider()
+
+            Button("Compute Missing ReplayGain") {
+                Task { await self.vm.computeMissingReplayGain() }
+            }
+            .help("Analyse loudness for tracks that don't yet have ReplayGain data")
+
+            Button("Recompute ReplayGain") {
+                Task { await self.vm.recomputeAllReplayGain() }
+            }
+            .help("Re-analyse loudness for every track in the library")
+
+            Button("Analyse Provenance\u{2026}") {
+                self.vm.startProvenanceAnalysis()
+            }
+            .help("Scan lossless files for signs they were transcoded from a lossy source")
+
+            Button("Import Last.fm History\u{2026}") {
+                Task { await self.vm.importListeningHistoryByPicker() }
+            }
+            .help("Backfill listening history from a Last.fm export file")
+
+            Divider()
+
+            Button("Library Summary\u{2026}") {
+                self.openWindow(id: "library-summary")
+            }
+            .keyboardShortcut(KeyBindings.librarySummary)
+            .help("Whole-library totals: songs, albums, artists, and playback time")
+        }
+    }
+}

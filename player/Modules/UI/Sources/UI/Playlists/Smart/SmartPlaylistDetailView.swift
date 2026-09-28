@@ -1,0 +1,281 @@
+import Library
+import Persistence
+import SwiftUI
+
+// MARK: - SmartPlaylistDetailView
+
+/// Detail view for a smart playlist — shows header, live track list, and an
+/// "Edit Rules" button that opens `RuleBuilderView` as a sheet.
+public struct SmartPlaylistDetailView: View {
+    @StateObject private var vm: SmartPlaylistDetailViewModel
+    @ObservedObject public var library: LibraryViewModel
+    public let playlistID: Int64
+
+    @State private var isEditingRules = false
+
+    public init(playlistID: Int64, library: LibraryViewModel, service: SmartPlaylistService) {
+        self.playlistID = playlistID
+        self.library = library
+        self._vm = StateObject(wrappedValue: SmartPlaylistDetailViewModel(service: service))
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            self.header
+            Divider()
+
+            if self.vm.isLoading {
+                LoadingState()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if self.vm.tracks.isEmpty {
+                EmptyState(
+                    symbol: "sparkles",
+                    title: L10n.string("No Matching Tracks"),
+                    message: L10n.string("Adjust the rules to find tracks in your library.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                TracksView(
+                    vm: self.library.tracks,
+                    library: self.library,
+                    sortable: true
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier(A11y.SmartPlaylistDetail.view)
+        .task(id: self.playlistID) {
+            // Load smart playlist tracks into the shared TracksViewModel so
+            // TracksView can render them with full context-menu support.
+            await self.vm.load(playlistID: self.playlistID)
+            self.applySmartTracks()
+            if self.library.consumeSmartPlaylistRuleBuilderRequest(for: self.playlistID) {
+                self.isEditingRules = true
+            }
+        }
+        .onChange(of: self.vm.tracks.map(\.id)) { _, _ in
+            self.applySmartTracks()
+        }
+        .onChange(of: self.library.smartPlaylistRuleBuilderRequestID) { _, _ in
+            if self.library.consumeSmartPlaylistRuleBuilderRequest(for: self.playlistID) {
+                self.isEditingRules = true
+            }
+        }
+        .sheet(isPresented: self.$isEditingRules) {
+            if let sp = self.vm.smartPlaylist {
+                RuleBuilderView(
+                    smartPlaylist: sp,
+                    service: self.library.smartPlaylistService,
+                    playlistService: self.library.playlistService
+                ) { _ in
+                    Task { await self.vm.load(playlistID: self.playlistID) }
+                }
+            }
+        }
+        .alert(L10n.string("Error"), isPresented: Binding(
+            get: { self.vm.lastError != nil },
+            set: {
+                if !$0 {
+                    self.vm.lastError = nil
+                }
+            }
+        )) {
+            Button(L10n.string("OK")) { self.vm.lastError = nil }
+                .help(L10n.string("Dismiss this error"))
+        } message: {
+            Text(self.vm.lastError ?? "")
+        }
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 16) {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.accentColor.opacity(0.85))
+                .overlay(
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 28, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.9))
+                )
+                .frame(width: 72, height: 72)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(self.vm.title)
+                    .font(Typography.largeTitle)
+                    .foregroundStyle(Color.textPrimary)
+                    .lineLimit(1)
+                Text(self.subtitle)
+                    .font(Typography.subheadline)
+                    .foregroundStyle(Color.textSecondary)
+                if !self.vm.isLive, let snapshotText = self.snapshotSubtitle {
+                    Text(snapshotText)
+                        .font(Typography.caption)
+                        .foregroundStyle(Color.textTertiary)
+                }
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                Button {
+                    Task { await self.library.play(tracks: self.vm.tracks) }
+                } label: {
+                    Label(L10n.string("Play"), systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(self.vm.tracks.isEmpty)
+                .help(L10n.string("Play the current smart playlist in order"))
+                .accessibilityHint(L10n.string("Starts playback from the first matching track"))
+
+                Button {
+                    Task { await self.playShuffled() }
+                } label: {
+                    Label(L10n.string("Shuffle"), systemImage: "shuffle")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(self.vm.tracks.isEmpty)
+                .help(L10n.string("Shuffle and play the matching tracks"))
+                .accessibilityHint(L10n.string("Starts playback in shuffled order"))
+
+                if !self.vm.isLive {
+                    Button {
+                        Task { await self.vm.refresh() }
+                    } label: {
+                        Label(L10n.string("Refresh now"), systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .help(L10n.string("Re-run the rules and update the saved snapshot"))
+                    .keyboardShortcut("r", modifiers: [.command])
+                    .accessibilityIdentifier(A11y.SmartPlaylistDetail.refreshButton)
+                }
+
+                if self.vm.smartPlaylist?.limitSort.sortBy == .random {
+                    Button {
+                        Task { await self.reshuffle() }
+                    } label: {
+                        Label(L10n.string("Reshuffle"), systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .help(L10n.string("Pick a new random order"))
+                }
+
+                Button {
+                    self.isEditingRules = true
+                } label: {
+                    Label(L10n.string("Edit Rules"), systemImage: "slider.horizontal.3")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .help(L10n.string("Open the rule builder to edit this smart playlist"))
+                .accessibilityHint(L10n.string("Opens criteria, limit, and sort controls"))
+                .accessibilityIdentifier(A11y.SmartPlaylistDetail.editButton)
+            }
+        }
+        .padding(20)
+        .background(Color.bgPrimary)
+        .accessibilityIdentifier(A11y.SmartPlaylistDetail.header)
+    }
+
+    private var subtitle: String {
+        let count = self.vm.trackCount
+        let countText = L10n.string("\(count) songs")
+        let mins = Int(self.vm.totalDuration / 60)
+        let durationText = mins < 60
+            ? L10n.string("\(mins) min")
+            : L10n.string("\(mins / 60) hr \(mins % 60) min")
+        return L10n.string("\(countText) · \(durationText)")
+    }
+
+    private var snapshotSubtitle: String? {
+        guard let unix = self.vm.lastSnapshottedAt else {
+            return L10n.string("Snapshot not created yet")
+        }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        let text = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
+        return L10n.string("Snapshotted at \(text)")
+    }
+
+    // MARK: - Sort seeding
+
+    /// Pushes the loaded tracks into the shared table in the exact order the
+    /// smart playlist's SQL produced them (`preserveOrder: true`), and seeds the
+    /// table's sort comparator from the playlist's own sort descriptors so the
+    /// column-header arrows match. Column-header clicks can still re-sort after.
+    private func applySmartTracks() {
+        self.library.tracks.setSort(columns: self.displaySortColumns)
+        self.library.tracks.setTracks(self.vm.tracks, preserveOrder: true)
+    }
+
+    /// The playlist's sort descriptors mapped to table columns, dropping keys
+    /// with no table column (`bpm`, `lastPlayedAt`, `random`). The displayed
+    /// order still comes from SQL via `preserveOrder`; this only aligns arrows.
+    private var displaySortColumns: [(column: TrackSortColumn, ascending: Bool)] {
+        guard let descriptors = self.vm.smartPlaylist?.limitSort.sortDescriptors else { return [] }
+        return descriptors.compactMap { descriptor in
+            Self.trackColumn(for: descriptor.key).map { ($0, descriptor.ascending) }
+        }
+    }
+
+    /// Maps a smart-playlist `SortKey` to the table's `TrackSortColumn`.
+    /// Returns `nil` for keys the track table has no column for.
+    private static func trackColumn(for key: SortKey) -> TrackSortColumn? {
+        switch key {
+        case .title:
+            .title
+
+        case .artist:
+            .artist
+
+        case .album:
+            .album
+
+        case .year:
+            .year
+
+        case .trackNumber:
+            .trackNumber
+
+        case .addedAt:
+            .addedAt
+
+        case .playCount:
+            .playCount
+
+        case .rating:
+            .rating
+
+        case .duration:
+            .duration
+
+        case .lastPlayedAt, .bpm, .random:
+            nil
+        }
+    }
+
+    // MARK: - Actions
+
+    private func playShuffled() async {
+        guard !self.vm.tracks.isEmpty else { return }
+        await self.library.play(tracks: self.vm.tracks, shuffle: true)
+    }
+
+    private func reshuffle() async {
+        do {
+            _ = try await self.library.smartPlaylistService.shuffleSeed(id: self.playlistID)
+            if self.vm.isLive {
+                await self.vm.load(playlistID: self.playlistID)
+            } else {
+                await self.vm.refresh()
+            }
+        } catch {
+            self.vm.lastError = L10n.string("Could not reshuffle playlist.")
+        }
+    }
+}

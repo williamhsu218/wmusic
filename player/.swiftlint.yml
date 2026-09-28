@@ -1,0 +1,161 @@
+disabled_rules:
+  - trailing_comma # SwiftFormat handles this
+  - todo # Phase markers (phase-5, phase-6, etc.) are intentional
+
+opt_in_rules:
+  - force_cast
+  - force_try
+  - force_unwrapping
+  - implicit_return
+  - implicit_optional_initialization
+  - explicit_init
+  - first_where
+  - last_where
+  - contains_over_filter_is_empty
+  - empty_count
+  - array_init
+  - closure_end_indentation
+  - closure_spacing
+  - collection_alignment
+  - discouraged_none_name
+  - empty_collection_literal
+  - empty_string
+  - enum_case_associated_values_count
+  - expiring_todo
+  - fallthrough
+  - fatal_error_message
+  - file_name_no_space
+  - function_default_parameter_at_end
+  - ibinspectable_in_extension
+  - identical_operands
+  - joined_default_parameter
+  - let_var_whitespace
+  - literal_expression_end_indentation
+  - lower_acl_than_parent
+  - missing_docs
+  # modifier_order disabled — SwiftFormat owns modifier ordering; the two tools conflict on nonisolated placement
+  - multiline_arguments
+  - multiline_function_chains
+  - multiline_literal_brackets
+  - multiline_parameters
+  - operator_usage_whitespace
+  - overridden_super_call
+  - override_in_extension
+  - pattern_matching_keywords
+  - prefer_self_in_static_references
+  - prefer_self_type_over_type_of_self
+  - prohibited_super_call
+  - reduce_into
+  - redundant_nil_coalescing
+  - return_value_from_void_function
+  - self_binding
+  - shorthand_optional_binding
+  - single_test_class
+  - sorted_first_last
+  - static_operator
+  - switch_case_on_newline
+  - toggle_bool
+  - trailing_closure
+  - unavailable_function
+  - unneeded_parentheses_in_closure_argument
+  - untyped_error_in_catch
+  - vertical_parameter_alignment_on_call
+  - vertical_whitespace_between_cases
+  - vertical_whitespace_closing_braces
+  - vertical_whitespace_opening_braces
+  - weak_delegate
+  - xct_specific_matcher
+  - yoda_condition
+
+analyzer_rules:
+  - unused_import
+  - unused_declaration
+
+custom_rules:
+  # Localization regression guard (#314). User-facing copy in the UI module
+  # must resolve through the L10n helper (Text(localized:) / L10n.string).
+  # A bare literal in this SPM module resolves against Bundle.main and
+  # silently never localizes. Enforced module-wide since the #314 migration
+  # completed. Workflow: docs/design-spec/localization.md.
+  no_bare_user_facing_literal:
+    name: "Bare user-facing string literal"
+    regex: '\b(?:Text|Button|Toggle|Label|Picker|Menu|TextField|SecureField|Section|Stepper|LabeledContent|ProgressView|ContentUnavailableView)\(\s*"[^"]|\.(?:navigationTitle|help|accessibilityLabel|accessibilityHint|accessibilityValue|alert|confirmationDialog)\(\s*"[^"]'
+    excluded_match_kinds:
+      - comment
+      - doccomment
+    message: "Converted file: route user-facing copy through L10n (Text(localized:) or L10n.string) so it resolves against the module catalog (#314). See docs/design-spec/localization.md."
+    severity: error
+    included:
+      - "Modules/UI/Sources/UI/.*\\.swift"
+
+line_length:
+  warning: 140
+  error: 180
+
+type_name:
+  min_length: 2
+  max_length: 60
+
+identifier_name:
+  min_length: 2
+  max_length: 60
+  excluded:
+    - id
+    - db
+    - ok
+    - x
+    - y
+    - z
+    - n # frame count in audio/DSP code
+    - s # state in async streams
+    - t # time value in audio code
+    - i # channel / loop index
+    - c # channel pointer
+    - f # frequency / frame variable
+    - b # buffer variable
+    - j # inner loop index (DFT)
+    - k # frequency bin index (DFT)
+    - l # left channel / lhs pattern
+    - r # right channel / rhs pattern
+    - dx
+    - dy
+
+function_body_length:
+  warning: 50
+  error: 100
+
+file_length:
+  warning: 500
+  error: 700
+
+type_body_length:
+  warning: 400
+  error: 600
+
+cyclomatic_complexity:
+  warning: 10
+  error: 20
+  ignores_case_statements: true
+
+missing_docs:
+  excludes_extensions: false
+  excludes_inherited_types: true
+  excludes_trivial_init: true
+
+included:
+  - App
+  - Modules/AudioEngine/Sources
+  - Modules/AudioEngine/Tests
+  - Modules/Persistence/Sources
+  - Modules/Persistence/Tests
+  - Modules/UI/Sources
+  - Modules/UI/Tests
+
+excluded:
+  - .build
+  - DerivedData
+  - Tests/Fixtures
+  - Modules/.build
+  - Modules/AudioEngine/.build
+  - Modules/Persistence/.build
+  - Modules/UI/.build

@@ -1,0 +1,139 @@
+import SwiftUI
+
+// MARK: - SpeedPickerView
+
+/// A popover-backed speed control shown in the NowPlayingStrip.
+///
+/// Tapping the "1.0×" label opens a popover with a slider (0.5×–2.0×) and
+/// quick-pick buttons.  Hidden at 1.0× by default; visible on hover or when
+/// a non-unity rate is set.
+public struct SpeedPickerView: View {
+    public var vm: NowPlayingViewModel
+    @AppStorage("appearance.accentColor") private var accentColorKey = "system"
+    @State private var isPopoverShown = false
+    @State private var isHovered = false
+    @FocusState private var isFocused: Bool
+    /// Held locally during a drag; setRate is called only once on release so the
+    /// spectral time-pitch node isn't hammered on every mouse-move event.
+    @State private var dragRate: Double?
+
+    public init(vm: NowPlayingViewModel) {
+        self.vm = vm
+    }
+
+    public var body: some View {
+        Button {
+            self.isPopoverShown.toggle()
+        } label: {
+            Text(self.rateLabel)
+                .scaledSystemFont(size: 11, weight: .medium, design: .monospaced)
+                .foregroundStyle(self.labelColor)
+                .frame(width: 36)
+        }
+        .buttonStyle(.plain)
+        .focused(self.$isFocused)
+        .onHover { self.isHovered = $0 }
+        .overlay {
+            if self.isFocused {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(Color.accentColor, lineWidth: 2)
+                    .padding(-3)
+            }
+        }
+        .help(L10n.string("Playback speed"))
+        .accessibilityLabel(L10n.string("Speed: \(self.rateLabel)"))
+        .accessibilityIdentifier(A11y.NowPlaying.speedPicker)
+        .popover(isPresented: self.$isPopoverShown, arrowEdge: .top) {
+            self.popoverContent
+        }
+    }
+
+    // MARK: - Popover
+
+    private var popoverContent: some View {
+        VStack(spacing: 12) {
+            Text(localized: "Playback Speed")
+                .font(.headline)
+
+            Text(self.rateLabel)
+                .scaledSystemFont(size: 28, weight: .bold, design: .monospaced)
+                .foregroundStyle(AccentPalette.color(for: self.accentColorKey))
+
+            Slider(
+                value: Binding(
+                    get: { self.dragRate ?? Double(self.vm.playbackRate) },
+                    set: { self.dragRate = $0 }
+                ),
+                in: 0.5 ... 2.0,
+                step: 0.05
+            ) { editing in
+                if !editing, let rate = self.dragRate {
+                    self.dragRate = nil
+                    Task { await self.vm.setRate(Float(rate)) }
+                }
+            }
+            .frame(width: 200)
+            .accessibilityLabel(L10n.string("Speed slider"))
+            .accessibilityValue(self.rateLabel)
+            .help(L10n.string("Plays faster to the right, slower to the left. The pitch stays where it is."))
+            // The drag binding only commits the rate on release (onEditingChanged),
+            // which VoiceOver increments never fire; set the rate directly so the
+            // slider is actually adjustable with assistive tech.
+            .accessibilityAdjustableAction { direction in
+                guard direction == .increment || direction == .decrement else { return }
+                let step: Float = 0.05
+                let new = direction == .increment
+                    ? min(self.vm.playbackRate + step, 2.0)
+                    : max(self.vm.playbackRate - step, 0.5)
+                Task { await self.vm.setRate(new) }
+            }
+
+            HStack(spacing: 8) {
+                ForEach(Self.quickRates, id: \.self) { rate in
+                    Button(PlaybackRateLabel.string(for: rate)) {
+                        Task { await self.vm.setRate(rate) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(abs(self.vm.playbackRate - rate) < 0.01 ? Color.accentColor : nil)
+                    .help(L10n.string("Jumps straight to this speed."))
+                }
+            }
+
+            Button(L10n.string("Reset to 1×")) {
+                Task { await self.vm.setRate(1.0) }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.textSecondary)
+            .font(.footnote)
+            .help(L10n.string("Returns to normal speed."))
+        }
+        .padding(16)
+        .frame(width: 240)
+    }
+
+    // MARK: - Helpers
+
+    private static let quickRates: [Float] = NowPlayingViewModel.quickRates
+
+    private var rateLabel: String {
+        PlaybackRateLabel.string(for: self.vm.playbackRate)
+    }
+
+    private var isActive: Bool {
+        abs(self.vm.playbackRate - 1.0) > 0.01
+    }
+
+    /// Foreground colour for the rate label.
+    ///
+    /// - Active (non-unity rate): accent colour — draws the eye.
+    /// - Hovered at unity: `textPrimary` — indicates interactivity.
+    /// - Idle at unity: `textTertiary` — de-emphasised but WCAG AA compliant,
+    ///   matching the convention used by shuffle/repeat/sleep inactive states.
+    private var labelColor: Color {
+        if self.isActive {
+            return AccentPalette.color(for: self.accentColorKey)
+        }
+        return self.isHovered ? Color.textPrimary : Color.textTertiary
+    }
+}

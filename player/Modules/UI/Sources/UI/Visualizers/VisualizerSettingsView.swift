@@ -1,0 +1,98 @@
+import SwiftUI
+
+// MARK: - VisualizerSettingsView
+
+/// Settings tab for the visualizer: mode, FPS cap, sensitivity, palette, battery toggle.
+public struct VisualizerSettingsView: View {
+    @AppStorage("visualizer.mode") private var mode: VisualizerMode = .spectrumBars
+    @AppStorage("visualizer.palette") private var palette: VisualizerPalette = .accent
+    @AppStorage("visualizer.fpsCap") private var fpsCap: FPSCap = .sixty
+    @AppStorage("visualizer.sensitivityRaw") private var sensitivityRaw = 1.0
+    @AppStorage("visualizer.simplifyOnBattery") private var simplifyOnBattery = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public init() {}
+
+    /// Why `mode` cannot be selected right now, or `nil` when it is available.
+    /// Only Metal-only modes (Nebula) are ever unavailable; the Metal-absent
+    /// reason wins over Reduce Motion when both apply.
+    private func unavailabilityReason(for mode: VisualizerMode) -> String? {
+        guard mode.requiresMetal else { return nil }
+        if MetalSupport.device == nil {
+            return L10n.string("Requires Metal graphics support, which this Mac does not provide.")
+        }
+        if self.reduceMotion {
+            return L10n.string("Unavailable while Reduce Motion is on.")
+        }
+        return nil
+    }
+
+    public var body: some View {
+        Form {
+            Section(L10n.string("Display")) {
+                Picker(L10n.string("Mode"), selection: self.$mode) {
+                    ForEach(VisualizerMode.allCases, id: \.self) { vizMode in
+                        let reason = self.unavailabilityReason(for: vizMode)
+                        Label(vizMode.displayName, systemImage: vizMode.symbolName)
+                            .tag(vizMode)
+                            .disabled(reason != nil)
+                            .help(reason ?? "")
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .accessibilityIdentifier(A11y.SettingsIDs.vizMode)
+
+                // Six palettes no longer fit a segmented control, so use a menu.
+                Picker(L10n.string("Colour Palette"), selection: self.$palette) {
+                    ForEach(VisualizerPalette.allCases, id: \.self) { pal in
+                        Text(pal.displayName).tag(pal)
+                    }
+                }
+                .pickerStyle(.menu)
+                .accessibilityIdentifier(A11y.SettingsIDs.vizPalette)
+                .help(L10n.string("The colours the visualizer draws with. It changes nothing about the sound."))
+            }
+
+            Section(L10n.string("Performance")) {
+                Picker(L10n.string("Frame Rate"), selection: self.$fpsCap) {
+                    ForEach(FPSCap.allCases, id: \.self) { cap in
+                        Text(cap.displayName).tag(cap)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier(A11y.SettingsIDs.vizFrameRate)
+                .help(L10n.string("How often the visualizer redraws. A lower rate is smoother on the battery."))
+
+                Toggle(L10n.string("Use simpler visualizer on battery"), isOn: self.$simplifyOnBattery)
+                    .accessibilityIdentifier(A11y.SettingsIDs.vizSimplifyOnBattery)
+                    .help(L10n.string("Caps to 30 fps and switches to Spectrum Bars when running on battery power"))
+                    .accessibilityHint(L10n.string("Caps frame rate to 30 fps and switches to Spectrum Bars on battery"))
+            }
+
+            Section(L10n.string("Sensitivity")) {
+                HStack {
+                    Text(localized: "Input sensitivity")
+                    Spacer()
+                    Slider(value: self.$sensitivityRaw, in: 0.1 ... 3.0, step: 0.1)
+                        .frame(width: 160)
+                        .help(L10n
+                            .string(
+                                "How hard the visualizer reacts. Raise it for quiet tracks, lower it if the display is always at full."
+                            ))
+                        .accessibilityLabel(L10n.string("Audio sensitivity"))
+                        .accessibilityIdentifier(A11y.SettingsIDs.vizSensitivity)
+                        .accessibilityValue(String(format: "%.1f×", self.sensitivityRaw))
+                    Text(String(format: "%.1g×", self.sensitivityRaw))
+                        .monospacedDigit()
+                        .frame(width: 36)
+                }
+                Button(L10n.string("Reset to 1×")) { self.sensitivityRaw = 1.0 }
+                    .accessibilityIdentifier(A11y.SettingsIDs.vizSensitivityReset)
+                    .controlSize(.small)
+                    .help(L10n.string("Reset sensitivity to default (1×)"))
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle(L10n.string("Visualizer"))
+    }
+}

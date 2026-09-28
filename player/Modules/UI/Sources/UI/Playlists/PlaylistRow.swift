@@ -1,0 +1,194 @@
+import Library
+import SwiftUI
+
+// MARK: - PlaylistRow
+
+/// A leaf (manual or smart) playlist row in the sidebar.
+public struct PlaylistRow: View {
+    public let node: PlaylistNode
+    public let depth: Int
+    @ObservedObject public var vm: PlaylistSidebarViewModel
+    @State private var draftName = ""
+    @State private var isDropTargeted = false
+    @FocusState private var isRenameFieldFocused: Bool
+
+    public init(node: PlaylistNode, depth: Int, vm: PlaylistSidebarViewModel) {
+        self.node = node
+        self.depth = depth
+        self.vm = vm
+    }
+
+    public var body: some View {
+        HStack(spacing: 6) {
+            self.rowIcon
+
+            self.nameView
+
+            Spacer(minLength: 4)
+
+            if self.node.trackCount > 0, !self.isInlineRenaming {
+                Text(verbatim: String(self.node.trackCount))
+                    .font(Typography.footnote)
+                    .foregroundStyle(Color.textTertiary)
+            }
+        }
+        .padding(.leading, CGFloat(self.depth) * 14)
+        // Vertical padding gives the drop highlight room to breathe so it no
+        // longer crowds the title, and enlarges the drop hit area.
+        .padding(.vertical, 4)
+        .focusable()
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(self.isDropTargeted ? Color.accentColor.opacity(0.25) : Color.clear)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(self.isDropTargeted ? Color.accentColor : Color.clear, lineWidth: 2)
+                )
+                .padding(.horizontal, -6)
+                .animation(.easeInOut(duration: 0.15), value: self.isDropTargeted)
+        )
+        .draggable(PlaylistDragPayload(
+            playlistID: self.node.id,
+            sourceFolderID: self.node.parentID
+        ))
+        .contextMenu { self.contextMenuContent }
+        .overlay(
+            TrackDropTarget(
+                isActive: self.node.kind == .manual,
+                onTargetedChange: { self.isDropTargeted = $0 },
+                onReceive: { ids in
+                    Task { await self.vm.addTracks(ids, to: self.node.id) }
+                }
+            )
+        )
+        .help(self.node.name)
+        .accessibilityLabel(L10n.string("Playlist: \(self.node.name)"))
+        .accessibilityIdentifier(A11y.PlaylistSidebar.row(self.node.id))
+        .onAppear { self.syncDraftName() }
+        .onChange(of: self.vm.renamingPlaylistID) { _, newValue in
+            if newValue == self.node.id {
+                self.draftName = self.node.name
+                self.isRenameFieldFocused = true
+            } else if self.isRenameFieldFocused {
+                self.isRenameFieldFocused = false
+            }
+        }
+        .onKeyPress(.return) {
+            guard !self.isInlineRenaming else { return .ignored }
+            self.vm.beginInlineRename(self.node)
+            self.draftName = self.node.name
+            self.isRenameFieldFocused = true
+            return .handled
+        }
+    }
+
+    private var isInlineRenaming: Bool {
+        self.vm.renamingPlaylistID == self.node.id
+    }
+
+    @ViewBuilder
+    private var nameView: some View {
+        if self.isInlineRenaming {
+            TextField(L10n.string("Playlist Name"), text: self.$draftName)
+                .font(Typography.body)
+                .textFieldStyle(.roundedBorder)
+                .focused(self.$isRenameFieldFocused)
+                .accessibilityLabel(L10n.string("Playlist name"))
+                .accessibilityIdentifier(A11y.PlaylistSidebar.newNameField)
+                .onAppear {
+                    self.draftName = self.node.name
+                    self.isRenameFieldFocused = true
+                }
+                .onSubmit {
+                    Task { await self.vm.commitInlineRename(self.node, proposedName: self.draftName) }
+                }
+                .onKeyPress(.escape) {
+                    self.draftName = self.node.name
+                    self.vm.cancelInlineRename()
+                    return .handled
+                }
+        } else {
+            Text(self.node.name)
+                .font(Typography.body)
+                .lineLimit(1)
+        }
+    }
+
+    private func syncDraftName() {
+        guard !self.isInlineRenaming else { return }
+        self.draftName = self.node.name
+    }
+
+    private var accentColour: Color? {
+        guard let hex = node.accentHex else { return nil }
+        return Color(hex: hex)
+    }
+
+    /// Small thumbnail shown in the sidebar row: user cover art when set,
+    /// otherwise the appropriate SF Symbol tinted with the accent colour.
+    @ViewBuilder
+    private var rowIcon: some View {
+        if let path = node.coverArtPath {
+            Artwork(artPath: path, seed: Int(self.node.id), size: 20)
+                .frame(width: 20, height: 20)
+        } else {
+            Image(systemName: self.node.kind == .smart ? "sparkles" : "music.note.list")
+                .foregroundStyle(self.isDropTargeted ? Color.accentColor : (self.accentColour ?? Color.textSecondary))
+                .frame(width: 16)
+                .animation(.easeInOut(duration: 0.15), value: self.isDropTargeted)
+        }
+    }
+
+    @ViewBuilder
+    private var contextMenuContent: some View {
+        Button(L10n.string("Rename")) { self.vm.renameTarget = self.node }
+        Button(L10n.string("Duplicate")) { Task { _ = await self.vm.duplicate(self.node) } }
+        if self.node.kind == .manual {
+            Button(L10n.string("Export…")) {
+                self.vm.onRequestExport?(self.node.id, self.node.name)
+            }
+            Menu(L10n.string("Sort Contents")) {
+                Button(L10n.string("By Title")) {
+                    Task { await self.vm.sortContents(self.node, by: .title) }
+                }
+                Button(L10n.string("By Artist")) {
+                    Task { await self.vm.sortContents(self.node, by: .artist) }
+                }
+                Button(L10n.string("By Date Added")) {
+                    Task { await self.vm.sortContents(self.node, by: .dateAdded) }
+                }
+            }
+        }
+        self.moveToFolderMenu
+        Divider()
+        Button(L10n.string("Set Cover Art…")) {
+            Task { await self.vm.setCoverArt(for: self.node) }
+        }
+        .help(L10n.string("Choose an image file to use as the cover art for this playlist"))
+        Button(L10n.string("Set Accent Colour…")) {
+            self.vm.accentColorTarget = self.node
+        }
+        .help(L10n.string("Set a custom accent colour for this playlist"))
+        Divider()
+        Button(L10n.string("Delete"), role: .destructive) { self.vm.deleteTarget = self.node }
+    }
+
+    @ViewBuilder
+    private var moveToFolderMenu: some View {
+        let folders = self.vm.allFolders()
+        if !folders.isEmpty {
+            Divider()
+            Menu(L10n.string("Move to Folder")) {
+                Button(L10n.string("Top Level")) {
+                    Task { await self.vm.move(self.node, toParent: nil) }
+                }
+                Divider()
+                ForEach(folders, id: \.id) { folder in
+                    Button(folder.name) {
+                        Task { await self.vm.move(self.node, toParent: folder.id) }
+                    }
+                }
+            }
+        }
+    }
+}

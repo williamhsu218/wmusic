@@ -1,0 +1,361 @@
+import Foundation
+import Metadata
+import Observability
+import Persistence
+
+// MARK: - MetadataEditService
+
+/// Actor-isolated orchestrator for all tag-editing operations.
+///
+/// Wires together `EditTransaction`, `BackupRing`, and the persistence layer.
+/// UI view models call into this service; it never touches SwiftUI state.
+public actor MetadataEditService {
+    // MARK: - Dependencies
+
+    private let database: Persistence.Database
+    private let trackRepo: TrackRepository
+    private let artistRepo: ArtistRepository
+    private let albumRepo: AlbumRepository
+    private let rootRepo: LibraryRootRepository
+    private let markerRepo: TrackMarkerRepository
+    private let backupRing: BackupRing
+    private let coverArtCache: CoverArtCache
+    private let log = AppLogger.make(.library)
+
+    /// Dedicated queue for all TagLib disk reads triggered from the editor.
+    ///
+    /// `.background` QoS activates kernel-level I/O throttling (`IOPOL_THROTTLE`),
+    /// which tells the VFS to deprioritize I/O from this queue relative to the
+    /// real-time audio decode path — preventing VFS contention that causes the
+    /// CoreAudio IOWorkLoop to skip cycles (audible pop) on first "Get Info" use.
+    private static let tagReadQueue = DispatchQueue(
+        label: "com.willhsu.wmusic.local.metadata.tagreader",
+        qos: .background
+    )
+
+    // MARK: - Init
+
+    public init(database: Persistence.Database) throws {
+        self.database = database
+        self.trackRepo = TrackRepository(database: database)
+        self.artistRepo = ArtistRepository(database: database)
+        self.albumRepo = AlbumRepository(database: database)
+        self.rootRepo = LibraryRootRepository(database: database)
+        self.markerRepo = TrackMarkerRepository(database: database)
+        self.coverArtCache = CoverArtCache.make(database: database)
+        let ringDir = Self.backupRingDirectory()
+        self.backupRing = try BackupRing(directory: ringDir)
+    }
+
+    // MARK: - Public API
+
+    /// The track's CUE markers (ADR-087), position-sorted; empty when the
+    /// track has none or the read fails. Read-only surface for the editor.
+    public func markers(trackID: Int64) async -> [TrackMarker] {
+        do {
+            return try await self.markerRepo.markers(forTrack: trackID)
+        } catch {
+            self.log.warning("edit.markers.readFailed", [
+                "trackID": trackID,
+                "error": String(reflecting: error),
+            ])
+            return []
+        }
+    }
+
+    /// Applies `patch` to the single track `trackID`.
+    ///
+    /// - Returns: the edit ID for later undo.
+    @discardableResult
+    public func edit(trackID: Int64, patch: TrackTagPatch) async throws -> String {
+        try await self.edit(trackIDs: [trackID], patch: patch)
+    }
+
+    /// Applies `patch` to all tracks in `trackIDs` (multi-edit).
+    ///
+    /// - Returns: the edit ID for later undo.
+    @discardableResult
+    public func edit(
+        trackIDs: [Int64],
+        patch: TrackTagPatch,
+        onProgress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> String {
+        guard !patch.isEmpty else { return "" }
+
+        let coverArtRepo = CoverArtRepository(database: self.database)
+        let tx = EditTransaction(
+            database: self.database,
+            trackRepo: self.trackRepo,
+            artistRepo: self.artistRepo,
+            albumRepo: self.albumRepo,
+            coverArtRepo: coverArtRepo,
+            coverArtCache: self.coverArtCache,
+            backupRing: self.backupRing,
+            rootRepo: self.rootRepo
+        )
+
+        self.log.debug("edit.start", ["count": trackIDs.count])
+        let start = Date()
+
+        let embedCoverArt = UserDefaults.standard.bool(forKey: "metadata.embedCoverArt")
+        try await tx.execute(patch: patch, trackIDs: trackIDs, embedCoverArt: embedCoverArt, onProgress: onProgress)
+
+        let ms = Int(Date().timeIntervalSince(start) * 1000)
+        self.log.debug("edit.end", ["count": trackIDs.count, "ms": ms])
+
+        // Return the most-recent backup editID for the first track
+        if let firstID = trackIDs.first {
+            do {
+                let track = try await self.trackRepo.fetch(id: firstID)
+                if let entry = try await self.backupRing.lastEntry(forFileURL: track.fileURL) {
+                    return entry.editID
+                }
+            } catch {
+                // An empty editID means the caller cannot offer Undo for an
+                // edit that did happen (#492).
+                self.log.warning("edit.editID.lookupFailed", [
+                    "track": firstID,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+        return ""
+    }
+
+    /// Undoes the edit identified by `editID`.
+    ///
+    /// Restores the original tags to the file and re-saves the DB row. An edit
+    /// that never opened the file (cover art with embedding off) has no tags to
+    /// restore: its art rows go back instead (#472).
+    public func undo(editID: String) async throws {
+        guard let entry = try await self.backupRing.load(editID: editID) else {
+            self.log.warning("undo.not_found", ["editID": editID])
+            return
+        }
+
+        if let restore = entry.databaseOnly {
+            await self.undoDatabaseOnly(entry: entry, restore: restore)
+            await self.backupRing.delete(editID: editID)
+            self.log.debug("undo.complete", ["editID": editID])
+            return
+        }
+
+        guard let url = URL(string: entry.fileURL) else {
+            throw EditError.fileWriteFailed(
+                URL(fileURLWithPath: entry.fileURL), "Invalid file URL"
+            )
+        }
+
+        guard let snapshot = entry.originalTags else {
+            // Neither shape of backup is present, so there is nothing to put
+            // back and undo would otherwise blank the file's tags.
+            self.log.warning("undo.no_backup_payload", ["editID": editID])
+            return
+        }
+
+        // Restore original tags to the file
+        let originalTags = snapshot.toTrackTags()
+        try await Task.detached(priority: .userInitiated) {
+            try TagWriter().write(originalTags, to: url)
+        }.value
+
+        // Update DB: clear userEdited flag since we're reverting to pre-edit state
+        do {
+            if let track = try await self.trackRepo.fetchOne(fileURL: entry.fileURL) {
+                var reverted = track
+                reverted.userEdited = false
+                reverted.updatedAt = Int64(Date().timeIntervalSince1970)
+                try await self.trackRepo.update(reverted)
+            }
+        } catch {
+            // The file is back but the row still says the user edited it, so
+            // the next scan will not refresh its tags (#492).
+            self.log.warning("undo.rowUpdateFailed", [
+                "file": entry.fileURL,
+                "error": String(reflecting: error),
+            ])
+        }
+
+        await self.backupRing.delete(editID: editID)
+        self.log.debug("undo.complete", ["editID": editID])
+    }
+
+    /// Undo for an edit that never touched the audio file: the track's cover
+    /// art hash and the album's art link go back to what they were, and the
+    /// file is left alone (#472).
+    private func undoDatabaseOnly(entry: BackupRing.Entry, restore: BackupRing.DatabaseOnlyRestore) async {
+        do {
+            if let track = try await self.trackRepo.fetchOne(fileURL: entry.fileURL) {
+                var reverted = track
+                reverted.coverArtHash = restore.trackCoverArtHash
+                reverted.userEdited = false
+                reverted.updatedAt = Int64(Date().timeIntervalSince1970)
+                try await self.trackRepo.update(reverted)
+            }
+        } catch {
+            // The art the user just undid stays on the row, so the track keeps
+            // showing the image they asked to take back.
+            self.log.warning("undo.databaseOnly.rowUpdateFailed", [
+                "file": entry.fileURL,
+                "error": String(reflecting: error),
+            ])
+        }
+
+        guard let albumID = restore.albumID else { return }
+        do {
+            var album = try await self.albumRepo.fetch(id: albumID)
+            album.coverArtHash = restore.albumCoverArtHash
+            album.coverArtPath = restore.albumCoverArtPath
+            try await self.albumRepo.update(album)
+        } catch {
+            // The grid and the track list draw the album's art, so leaving it
+            // linked undoes the edit only where the user cannot see it.
+            self.log.warning("undo.databaseOnly.albumUpdateFailed", [
+                "album": albumID,
+                "error": String(reflecting: error),
+            ])
+        }
+    }
+
+    /// Fetches the `Track` database records for `ids` (skips any not found).
+    public func readTracks(ids: [Int64]) async throws -> [Track] {
+        var tracks: [Track] = []
+        for id in ids {
+            do {
+                try await tracks.append(self.trackRepo.fetch(id: id))
+            } catch {
+                // The tag editor simply opens without this track, which reads
+                // as the selection having been smaller (#492).
+                self.log.warning("edit.readTracks.lookupFailed", [
+                    "track": id,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+        return tracks
+    }
+
+    /// Returns the lyrics text stored in the `lyrics` DB table for each track
+    /// that has a row (LRClib fetches and lyrics-panel edits live there and are
+    /// deliberately not written into the audio file unless the user opts in).
+    ///
+    /// The tag editor merges this over the file-tag lyrics so "Get Info" shows
+    /// what the rest of the app shows, not just what the file bytes carry.
+    public func storedLyricsText(ids: [Int64]) async -> [Int64: String] {
+        let lyricsRepo = LyricsRepository(database: self.database)
+        var byID: [Int64: String] = [:]
+        for id in ids {
+            do {
+                if let row = try await lyricsRepo.fetch(trackID: id) {
+                    byID[id] = row.lyricsText
+                }
+            } catch {
+                // "Get Info" then shows the file's own lyrics only, which
+                // looks like the stored ones were lost (#492).
+                self.log.warning("edit.storedLyrics.lookupFailed", [
+                    "track": id,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+        return byID
+    }
+
+    /// Reads the current `TrackTags` from disk for `trackID`.
+    public func readTags(trackID: Int64) async throws -> TrackTags {
+        let track = try await self.trackRepo.fetch(id: trackID)
+        guard let url = URL(string: track.fileURL) else {
+            throw EditError.trackNotFound(trackID)
+        }
+        // Use the per-file security-scoped bookmark when available so that
+        // the sandboxed process can open the file outside its container.
+        if let bookmarkData = track.fileBookmark {
+            return try await SecurityScope.withAccess(bookmarkData, onStaleBookmark: { [self] freshURL in
+                // Renew and persist the stale per-file bookmark while we still hold access.
+                do {
+                    let fresh = try freshURL.bookmarkData(
+                        options: .withSecurityScope,
+                        includingResourceValuesForKeys: nil,
+                        relativeTo: nil
+                    )
+                    var updated = track
+                    updated.fileBookmark = fresh
+                    try await self.trackRepo.update(updated)
+                    self.log.debug("security_scope.refreshed", ["trackID": trackID])
+                } catch {
+                    self.log.warning(
+                        "security_scope.refresh_failed",
+                        ["trackID": trackID, "error": String(reflecting: error)]
+                    )
+                }
+            }) { scopedURL in
+                try await withCheckedThrowingContinuation { continuation in
+                    Self.tagReadQueue.async {
+                        do { try continuation.resume(returning: TagReader().read(from: scopedURL)) }
+                        catch { continuation.resume(throwing: error) }
+                    }
+                }
+            }
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            Self.tagReadQueue.async {
+                do { try continuation.resume(returning: TagReader().read(from: url)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+
+    // MARK: - Conflict resolution
+
+    /// Clears the `needs_conflict_review` flag for `trackID` (user chose "Keep My Edits").
+    /// The track remains `user_edited = 1`; the disk change is acknowledged but discarded.
+    /// Also stamps `fileMtime`/`fileSize` with the current on-disk values so the next
+    /// scan sees a matching mtime and does not re-raise the conflict immediately.
+    public func clearConflictFlag(trackID: Int64) async throws {
+        var track = try await self.trackRepo.fetch(id: trackID)
+        guard track.needsConflictReview else { return }
+        track.needsConflictReview = false
+        // Sync the stored mtime/size so the scanner won't re-flag this file.
+        if let url = URL(string: track.fileURL) {
+            do {
+                let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+                if let modDate = attrs[.modificationDate] as? Date {
+                    track.fileMtime = Int64(modDate.timeIntervalSince1970)
+                }
+                if let sz = attrs[.size] as? Int {
+                    track.fileSize = Int64(sz)
+                }
+            } catch {
+                // Without the stamp the scanner re-flags this file, so the
+                // banner the user just dismissed comes back (#492).
+                self.log.warning("conflict.clear.mtimeStampFailed", [
+                    "track": trackID,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+        try await self.trackRepo.update(track)
+        self.log.debug("conflict.cleared", ["trackID": trackID])
+    }
+
+    /// Clears both `user_edited` and `needs_conflict_review` for `trackID` (user chose
+    /// "Take Disk Version"). On the next library scan the track tags will be re-imported
+    /// from disk, overwriting any stored user edits.
+    public func acceptDiskVersion(trackID: Int64) async throws {
+        var track = try await self.trackRepo.fetch(id: trackID)
+        track.needsConflictReview = false
+        track.userEdited = false
+        try await self.trackRepo.update(track)
+        self.log.debug("conflict.accepted_disk", ["trackID": trackID])
+    }
+
+    // MARK: - Helpers
+
+    private static func backupRingDirectory() -> URL {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!
+            .appendingPathComponent("WMusic", isDirectory: true)
+            .appendingPathComponent("EditBackups", isDirectory: true)
+    }
+}

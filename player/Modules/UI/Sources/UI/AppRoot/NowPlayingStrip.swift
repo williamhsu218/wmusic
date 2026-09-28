@@ -1,0 +1,439 @@
+import AppKit
+import SwiftUI
+
+// MARK: - NowPlayingStrip
+
+/// The 72pt-tall transport bar anchored at the bottom of every main view.
+///
+/// Shows current track artwork, title/artist/album, play/pause and scrubber,
+/// and a volume slider.
+public struct NowPlayingStrip: View {
+    public var vm: NowPlayingViewModel
+    @EnvironmentObject private var library: LibraryViewModel
+
+    /// While dragging the scrubber, the fraction is held locally so the Slider
+    /// doesn't fight live `vm.position` updates; seeking happens on release.
+    @AppStorage("appearance.accentColor") private var accentColorKey = "system"
+    @State private var scrubDragFraction: Double?
+    /// Menu-to-strip signal (BocanCommands sets it); cleared at launch by BocanApp.
+    @AppStorage("scrobble.showRecentSheet") private var showRecentScrobbles = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Optional — only the main window injects a `ScrobbleSettingsViewModel`.
+    /// When non-nil and `vm.pendingScrobbleCount > 0`, a pending-scrobbles
+    /// indicator is shown in the panel-buttons area.
+    var scrobbleSettingsVM: ScrobbleSettingsViewModel?
+
+    public init(vm: NowPlayingViewModel, scrobbleSettingsVM: ScrobbleSettingsViewModel? = nil) {
+        self.vm = vm
+        self.scrobbleSettingsVM = scrobbleSettingsVM
+    }
+
+    public var body: some View {
+        HStack(spacing: 12) {
+            self.artwork
+                .id(self.vm.nowPlayingTrackID)
+                .transition(self.reduceMotion ? .opacity : .asymmetric(
+                    insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .leading).combined(with: .opacity)
+                ))
+            self.trackInfo
+                .id(self.vm.nowPlayingTrackID)
+                .transition(self.reduceMotion ? .opacity : .asymmetric(
+                    insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .leading).combined(with: .opacity)
+                ))
+            Spacer(minLength: 16)
+            self.transport
+            Spacer(minLength: 16)
+            self.volumeAndScrubber
+            Spacer(minLength: 16)
+            Divider()
+                .frame(height: 32)
+                .padding(.horizontal, 4)
+            self.panelButtons
+        }
+        .animation(.easeInOut(duration: 0.25), value: self.vm.nowPlayingTrackID)
+        .frame(height: Theme.nowPlayingStripHeight)
+        .padding(.horizontal, 16)
+        .adaptiveMaterial()
+        .overlay(alignment: .top) {
+            Divider()
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(A11y.NowPlaying.strip)
+        .sheet(isPresented: self.$showRecentScrobbles) {
+            if let ssvm = self.scrobbleSettingsVM {
+                RecentScrobblesView(viewModel: ssvm)
+            }
+        }
+    }
+
+    // MARK: - Sub-views
+
+    private var artwork: some View {
+        Button {
+            if self.vm.isPodcast, let id = self.vm.podcastID {
+                Task { await self.library.selectDestination(.podcastShow(id)) }
+            } else {
+                Task { await self.library.goToCurrentAlbum() }
+            }
+        } label: {
+            Group {
+                if let img = vm.artwork {
+                    Image(nsImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 48, height: 48)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.artworkCornerRadius, style: .continuous))
+                        .accessibilityHidden(true)
+                } else {
+                    GradientPlaceholder(seed: 0)
+                        .frame(width: 48, height: 48)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.artworkCornerRadius, style: .continuous))
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(self.vm.isPodcast ? self.vm.podcastID == nil : self.vm.nowPlayingAlbumID == nil)
+        .help(self.vm.isPodcast
+            ? (self.vm.podcastID != nil ? L10n.string("Go to podcast show") : L10n.string("No album"))
+            : (self.vm.nowPlayingAlbumID != nil ? L10n.string("Go to album: \(self.vm.album)") : L10n.string("No album")))
+        .keyboardShortcut(KeyBindings.goToCurrentAlbum)
+        .accessibilityLabel(
+            self.vm.isPodcast
+                ? (self.vm.podcastID != nil ? L10n.string("Go to podcast show") : L10n.string("No artwork"))
+                : (self.vm.nowPlayingAlbumID != nil
+                    ? L10n.string("Go to album \(self.vm.album) by \(self.vm.artist)")
+                    : L10n.string("No artwork"))
+        )
+        .accessibilityIdentifier(A11y.NowPlaying.artworkButton)
+    }
+
+    /// The title line, shared by the jump-button and plain-text renderings so
+    /// both stay pixel-identical: full-strength while something plays, dimmed
+    /// only for the idle "Not playing" placeholder.
+    private var titleText: some View {
+        Text(self.vm.title.isEmpty ? L10n.string("Not playing") : self.vm.title)
+            .font(Typography.body)
+            .foregroundStyle(self.vm.title.isEmpty ? Color.textSecondary : Color.textPrimary)
+            .lineLimit(1)
+    }
+
+    private var trackInfo: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            // Title — click to jump to current track in the track list. Radio
+            // and podcast items have no tracks row to jump to; render plain
+            // text there instead of a permanently disabled button, whose
+            // plain-style dimming greyed the title down to subtitle strength.
+            if self.vm.nowPlayingTrackID != nil {
+                Button {
+                    Task { await self.library.scrollToNowPlayingTrack() }
+                } label: {
+                    self.titleText
+                        .accessibilityHidden(true)
+                }
+                .buttonStyle(.plain)
+                .help(L10n.string("Jump to \"\(self.vm.title)\" in track list"))
+                .keyboardShortcut(KeyBindings.jumpToCurrentTrack)
+                .accessibilityLabel(L10n.string("Jump to \(self.vm.title) in track list"))
+                .accessibilityAddTraits(.updatesFrequently)
+                .accessibilityIdentifier(A11y.NowPlaying.titleButton)
+            } else {
+                self.titleText
+                    .accessibilityLabel(self.vm.title.isEmpty ? L10n.string("Not playing") : self.vm.title)
+                    .accessibilityAddTraits(.updatesFrequently)
+                    .accessibilityIdentifier(A11y.NowPlaying.titleButton)
+            }
+
+            // Artist/show — click to navigate to the artist or podcast show.
+            if !self.vm.artist.isEmpty {
+                Button {
+                    if self.vm.isPodcast, let id = self.vm.podcastID {
+                        Task { await self.library.selectDestination(.podcastShow(id)) }
+                    } else {
+                        Task { await self.library.goToCurrentArtist() }
+                    }
+                } label: {
+                    Text(self.vm.isPodcast ? self.vm.artist : (self.trackSubtitle ?? self.vm.artist))
+                        .font(Typography.subheadline)
+                        .foregroundStyle(Color.textSecondary)
+                        .lineLimit(1)
+                        .accessibilityHidden(true)
+                }
+                .buttonStyle(.plain)
+                .disabled(self.vm.isPodcast ? self.vm.podcastID == nil : self.vm.nowPlayingArtistID == nil)
+                .help(self.vm.isPodcast
+                    ? (self.vm.podcastID != nil ? L10n.string("Go to podcast show") : self.vm.artist)
+                    : (self.vm.nowPlayingArtistID != nil ? L10n.string("Go to artist: \(self.vm.artist)") : self.vm.artist))
+                .keyboardShortcut(KeyBindings.goToCurrentArtist)
+                .accessibilityLabel(self.vm.isPodcast
+                    ? L10n.string("Go to podcast show")
+                    : L10n.string("Go to artist \(self.vm.artist)"))
+                .accessibilityIdentifier(A11y.NowPlaying.subtitleButton)
+            }
+
+            if let chapter = self.currentChapter {
+                Text(verbatim: chapter.title)
+                    .font(.caption)
+                    .foregroundStyle(Color.textTertiary)
+                    .lineLimit(1)
+            } else if let marker = self.currentMarkerText {
+                // CUE marker line (ADR-087): cue content renders verbatim,
+                // same as podcast chapter titles.
+                Text(verbatim: marker)
+                    .font(.caption)
+                    .foregroundStyle(Color.textTertiary)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.updatesFrequently)
+                    .accessibilityIdentifier(A11y.NowPlaying.markerLine)
+            }
+
+            // Codec, bitrate, sample rate, bit depth and channels (ADR-092).
+            if let facts = self.vm.sourceFacts {
+                SourceBadgesRow(facts: facts)
+                    .padding(.top, 2)
+            }
+        }
+        // Centred in the bar, and 160...380 rather than 120...300 (#536).
+        //
+        // Measured: everything else on the strip costs 668 pt before this
+        // block and the scrubber divide what is left, and the transport alone
+        // is 317 of it. The floor is what pays at a narrow window: at 900 pt
+        // the block is pinned to it, and 160 shows appreciably more title than
+        // 120 did. The ceiling only bites above about 1300 pt, where a long
+        // title now gets the room instead of stopping at 300. In between, at
+        // the 1100 pt default window, the block already takes close to its
+        // ideal width and neither bound moves it; a longer title still
+        // truncates there, and only a narrower transport or a minimum window
+        // width would change that.
+        .frame(minWidth: 160, maxWidth: 380, alignment: .leading)
+        .onChange(of: self.vm.nowPlayingTrackID) { _, trackID in
+            guard trackID != nil, !self.vm.title.isEmpty else { return }
+            let msg = self.vm.artist.isEmpty
+                ? self.vm.title
+                : L10n.string("\(self.vm.title) by \(self.vm.artist)")
+            NSAccessibility.post(
+                element: NSApplication.shared,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: msg,
+                    .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+                ]
+            )
+        }
+    }
+
+    private var trackSubtitle: String? {
+        let parts = [self.vm.artist, self.vm.album]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " - ")
+    }
+
+    private var currentChapter: UIChapter? {
+        guard self.vm.isPodcast else { return nil }
+        return self.library.podcasts.nowPlayingChapters.current(at: self.vm.position)
+    }
+
+    /// "Title - Performer" for the CUE marker playback is inside (ADR-087).
+    private var currentMarkerText: String? {
+        guard let marker = self.vm.currentMarker else { return nil }
+        let parts = [marker.title, marker.performer]
+            .compactMap(\.self)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " - ")
+    }
+
+    @ViewBuilder
+    private var transport: some View {
+        if self.vm.isPodcast {
+            PodcastTransportControls(
+                vm: self.vm,
+                loadTranscript: {
+                    guard let podcastID = self.vm.podcastID, let guid = self.vm.podcastGUID else { return nil }
+                    return await self.library.podcasts.loadTranscript(podcastID: podcastID, guid: guid)
+                },
+                chapters: self.library.podcasts.nowPlayingChapters,
+                episode: self.library.podcasts.nowPlayingEpisode,
+                showPersons: self.library.podcasts.nowPlayingShowPersons,
+                podrollContext: PodrollContext(
+                    items: self.library.podcasts.nowPlayingPodroll,
+                    resolve: { await self.library.podcasts.resolvePodroll($0) },
+                    onSelect: { self.library.openPodcastRecommendation($0) }
+                )
+            )
+            // Key on podcastID *and* GUID: applyPodcastItem sets the GUID first and
+            // resolves podcastID a beat later, so keying on the GUID alone can fire
+            // while podcastID is still nil, bail, and never re-run -- leaving the
+            // Show Notes button greyed even though chapters/notes are loadable.
+            .task(id: "\(self.vm.podcastID ?? -1)|\(self.vm.podcastGUID ?? "")") {
+                guard let podcastID = self.vm.podcastID, let guid = self.vm.podcastGUID else {
+                    self.library.podcasts.clearNowPlayingChapters()
+                    return
+                }
+                await self.library.podcasts.loadChapters(podcastID: podcastID, guid: guid)
+                await self.library.podcasts.loadNowPlayingShowNotes(podcastID: podcastID, guid: guid)
+            }
+        } else {
+            MusicTransportControls(vm: self.vm, library: self.library)
+        }
+    }
+
+    /// Speed, sleep timer, pending scrobbles, DSP and Immersive Mode; see
+    /// `NowPlayingPanelButtons`.
+    private var panelButtons: some View {
+        NowPlayingPanelButtons(vm: self.vm, scrobbleSettingsVM: self.scrobbleSettingsVM)
+    }
+
+    private var volumeAndScrubber: some View {
+        VStack(spacing: 4) {
+            self.scrubber
+            self.volumeRow
+        }
+        // 300 rather than 340. At a narrow window the scrubber is squeezed
+        // well below either figure, and asking for 340 made it worse: the
+        // 0:00 and 5:00 labels closed on the thumb until they touched it at
+        // 900 pt. Asking for less leaves the slider a legible track.
+        .frame(maxWidth: 300)
+    }
+
+    private var scrubber: some View {
+        HStack(spacing: 6) {
+            Text(Formatters.duration(self.displayPosition))
+                .font(Typography.caption)
+                .foregroundStyle(Color.textSecondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .frame(width: self.timeLabelWidth, alignment: .trailing)
+
+            Slider(
+                value: Binding(
+                    get: {
+                        if let drag = self.scrubDragFraction {
+                            return drag
+                        }
+                        return self.vm.duration > 0 ? self.vm.position / self.vm.duration : 0
+                    },
+                    set: { fraction in
+                        // Hold the drag locally; seek once on release, not per move.
+                        self.scrubDragFraction = fraction
+                    }
+                ),
+                in: 0 ... 1
+            ) { editing in
+                if !editing, let fraction = self.scrubDragFraction {
+                    let target = fraction * self.vm.duration
+                    self.scrubDragFraction = nil
+                    Task { await self.vm.scrub(to: target) }
+                }
+            }
+            .controlSize(.mini)
+            .disabled(self.vm.duration == 0)
+            .id(self.accentColorKey)
+            .help(L10n.string("Scrub to position"))
+            .accessibilityLabel(L10n.string("Playback position"))
+            .accessibilityValue(
+                L10n.string("\(Formatters.duration(self.displayPosition)) of \(Formatters.duration(self.vm.duration))")
+            )
+            .accessibilityAdjustableAction { direction in
+                guard direction == .increment || direction == .decrement else { return }
+                let step = max(self.vm.duration * 0.05, 5)
+                let pos = direction == .increment ? min(self.vm.position + step, self.vm.duration) : max(self.vm.position - step, 0)
+                Task { await self.vm.scrub(to: pos) }
+            }
+            .accessibilityIdentifier(A11y.NowPlaying.scrubber)
+            // CUE marker ticks (ADR-087): |------|-----|-|---- along the
+            // slider's bottom edge. Hidden below two markers (inert sets
+            // never load, but the guard keeps the rule in one place).
+            .overlay(alignment: .bottom) {
+                if self.vm.markers.count >= 2, self.vm.duration > 0 {
+                    GeometryReader { geo in
+                        ForEach(self.vm.markers) { marker in
+                            Rectangle()
+                                .fill(Color.textTertiary)
+                                .frame(width: 1, height: 4)
+                                .offset(
+                                    x: geo.size.width * min(1, Double(marker.positionMs) / 1000.0 / self.vm.duration),
+                                    y: geo.size.height - 3
+                                )
+                        }
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
+
+            Text(Formatters.duration(self.vm.duration))
+                .font(Typography.caption)
+                .foregroundStyle(Color.textSecondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .frame(width: self.timeLabelWidth, alignment: .leading)
+        }
+    }
+
+    private var volumeRow: some View {
+        HStack(spacing: 4) {
+            Button {
+                Task { await self.vm.toggleMute() }
+            } label: {
+                Image(systemName: self.vm.isMuted ? "speaker.slash.fill" : "speaker.fill")
+                    .font(Typography.caption)
+                    .foregroundStyle(self.vm.isMuted ? Color.primary : Color.textTertiary)
+            }
+            .buttonStyle(.plain)
+            .help(self.vm.isMuted ? L10n.string("Unmute") : L10n.string("Mute"))
+            .accessibilityLabel(self.vm.isMuted ? L10n.string("Unmute") : L10n.string("Mute"))
+            .accessibilityIdentifier(A11y.NowPlaying.muteButton)
+            .keyboardShortcut(KeyBindings.mute)
+
+            Slider(value: Binding(
+                get: { Double(self.vm.volume) },
+                set: { newVolume in Task { await self.vm.setVolume(Float(newVolume)) } }
+            ), in: 0 ... 1) { editing in
+                if !editing {
+                    Haptics.positionCommit()
+                }
+            }
+            .controlSize(.mini)
+            .frame(maxWidth: 100)
+            .id(self.accentColorKey)
+            .help(L10n.string("Volume: \(Int(self.vm.volume * 100))%"))
+            .accessibilityLabel(L10n.string("Volume"))
+            .accessibilityValue(L10n.string("\(Int(self.vm.volume * 100)) percent"))
+            .accessibilityAdjustableAction { direction in
+                guard direction == .increment || direction == .decrement else { return }
+                let vol = direction == .increment ? min(self.vm.volume + 0.1, 1) : max(self.vm.volume - 0.1, 0)
+                Task { await self.vm.setVolume(vol) }
+            }
+            .accessibilityIdentifier(A11y.NowPlaying.volumeSlider)
+
+            Image(systemName: "speaker.wave.3.fill")
+                .font(Typography.caption)
+                .foregroundStyle(Color.textTertiary)
+                .accessibilityHidden(true)
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// Position shown under the scrubber — live engine position normally,
+    /// but tracks the drag fraction while the user is scrubbing so the
+    /// time readout mirrors where the thumb currently sits.
+    private var displayPosition: TimeInterval {
+        if let drag = self.scrubDragFraction {
+            return drag * self.vm.duration
+        }
+        return self.vm.position
+    }
+
+    /// The width of both labels either side of the scrubber. Sized on the
+    /// longer of the total and the elapsed time, so an hour-long podcast gets
+    /// its wide slot from the first frame, and a live stream (which reports no
+    /// duration) widens once when its clock passes an hour (#563).
+    private var timeLabelWidth: Double {
+        Formatters.timeLabelWidth(longest: max(self.vm.duration, self.displayPosition))
+    }
+}

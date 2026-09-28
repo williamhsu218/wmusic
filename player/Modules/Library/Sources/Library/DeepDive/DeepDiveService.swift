@@ -1,0 +1,451 @@
+import Acoustics
+import Foundation
+import Observability
+import Persistence
+
+/// Assembles Deep Dive reports (#413) from the shared MusicBrainz client,
+/// Wikipedia, and the local library, with disk caching and stale-if-offline.
+///
+/// Every MusicBrainz request goes through the app-wide 1 req/s limiter, so a
+/// report costs a few seconds the first time and is instant afterwards.
+public actor DeepDiveService {
+    /// Minimum MusicBrainz search score to accept a name match as the artist.
+    public static let guessScoreThreshold = 90
+
+    private let artists: ArtistRepository
+    private let albums: AlbumRepository
+    private let tracks: TrackRepository
+    private let musicBrainz: MusicBrainzClient
+    private let wikipedia: WikipediaClient
+    private let cache: DeepDiveCache
+    private let now: @Sendable () -> Date
+    private let log = AppLogger.make(.library)
+
+    public init(
+        database: Database,
+        musicBrainz: MusicBrainzClient = MusicBrainzClient(),
+        wikipedia: WikipediaClient = WikipediaClient(),
+        cache: DeepDiveCache = DeepDiveCache(),
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.artists = ArtistRepository(database: database)
+        self.albums = AlbumRepository(database: database)
+        self.tracks = TrackRepository(database: database)
+        self.musicBrainz = musicBrainz
+        self.wikipedia = wikipedia
+        self.cache = cache
+        self.now = now
+    }
+
+    // MARK: - Artist
+
+    /// The report for an artist row. Uses the stored MBID, or guesses one by
+    /// name when the tags supplied none (flagged `mbidGuessed`).
+    public func artistReport(artistID: Int64, forceRefresh: Bool = false) async throws -> ArtistReport {
+        let artist = try await self.artists.fetch(id: artistID)
+        let (mbid, guessed) = try await self.resolveArtistMBID(artist)
+        let key = "artist-\(mbid)"
+        let cached: (value: ArtistReport, fresh: Bool)? = await self.cache.load(ArtistReport.self, key: key)
+        if let cached, cached.fresh, !forceRefresh, cached.value.artistID == artistID {
+            return cached.value
+        }
+
+        do {
+            let report = try await self.buildArtistReport(artist: artist, mbid: mbid, guessed: guessed)
+            await self.cache.store(report, key: key)
+            return report
+        } catch let error as DeepDiveError where error == .offline || error == .rateLimited {
+            if let cached {
+                return cached.value
+            }
+            throw error
+        }
+    }
+
+    /// Persists a guessed artist id the user has accepted, marked `search`
+    /// so a tagged id from a later scan replaces it. Stamps the enrichment
+    /// columns from the report and returns the report unflagged.
+    public func confirmArtistMBID(report: ArtistReport) async throws -> ArtistReport {
+        let changed = try await self.artists.setMusicBrainzID(id: report.artistID, mbid: report.mbid, source: .search)
+        guard changed == 1 else { throw DeepDiveError.notFound }
+        _ = try await self.artists.setEnrichment(
+            mbid: report.mbid, disambiguation: report.disambiguation, sortName: report.sortName,
+            fetchedAt: Int64(self.now().timeIntervalSince1970)
+        )
+        self.log.info("deepdive.artist.confirmed", ["artistID": report.artistID, "mbid": report.mbid])
+        var confirmed = report
+        confirmed.mbidGuessed = false
+        await self.cache.store(confirmed, key: "artist-\(report.mbid)")
+        return confirmed
+    }
+
+    private func resolveArtistMBID(_ artist: Artist) async throws -> (String, Bool) {
+        if let mbid = artist.musicbrainzArtistID {
+            return (mbid, false)
+        }
+        let results = try await self.mapErrors { try await self.musicBrainz.searchArtists(name: artist.name, limit: 5) }
+        guard let best = results.first, (best.score ?? 0) >= Self.guessScoreThreshold else {
+            throw DeepDiveError.noIdentifier
+        }
+        self.log.info("deepdive.artist.guessed", ["artist": artist.name, "mbid": best.id, "score": best.score ?? 0])
+        return (best.id, true)
+    }
+
+    private func buildArtistReport(artist: Artist, mbid: String, guessed: Bool) async throws -> ArtistReport {
+        let detail = try await self.mapErrors { try await self.musicBrainz.fetchArtist(mbid: mbid) }
+        let groups = try await self.mapErrors { try await self.musicBrainz.browseReleaseGroups(artistMBID: mbid, limit: 100) }
+        var bio: ArtistReport.Bio?
+        if let wikidataID = detail.wikidataID {
+            // A missing bio must never sink the report.
+            do {
+                if let summary = try await self.wikipedia.summary(wikidataID: wikidataID) {
+                    bio = ArtistReport.Bio(
+                        extract: summary.extract, pageURL: summary.pageURL, thumbnailURL: summary.thumbnailURL,
+                        attribution: "Wikipedia, CC BY-SA 4.0"
+                    )
+                }
+            } catch {
+                // The report is still built, but a missing biography now has
+                // a reason rather than looking like Wikipedia had none (#492).
+                self.log.debug("deepdive.bio.failed", [
+                    "wikidata": wikidataID,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+        // Stamp the enrichment columns opportunistically: this is the same lookup.
+        if !guessed {
+            do {
+                try await self.artists.setEnrichment(
+                    mbid: mbid, disambiguation: detail.disambiguation, sortName: detail.sortName,
+                    fetchedAt: Int64(self.now().timeIntervalSince1970)
+                )
+            } catch {
+                // The report does not depend on the stamp; the next pass retries it.
+                self.log.warning("deepdive.enrich.stamp_failed", ["mbid": mbid, "error": String(reflecting: error)])
+            }
+        }
+
+        let owned = try await self.ownedReleaseKeys(artistID: artist.id ?? 0)
+        let discography = groups.releaseGroups.map { group in
+            ArtistReport.Release(
+                title: group.title ?? "",
+                mbid: group.id,
+                primaryType: group.primaryType,
+                secondaryTypes: group.secondaryTypes ?? [],
+                year: group.year,
+                owned: owned.groupIDs.contains(group.id) || owned.titles.contains((group.title ?? "").lowercased())
+            )
+        }.sorted { ($0.year ?? Int.max, $0.title) < ($1.year ?? Int.max, $1.title) }
+
+        return ArtistReport(
+            artistID: artist.id ?? 0,
+            mbid: mbid,
+            mbidGuessed: guessed,
+            name: detail.name,
+            sortName: detail.sortName,
+            disambiguation: detail.disambiguation.flatMap { $0.isEmpty ? nil : $0 },
+            type: detail.type,
+            country: detail.country,
+            activeFrom: detail.lifeSpan?.begin,
+            activeUntil: detail.lifeSpan?.end,
+            ended: detail.lifeSpan?.ended ?? false,
+            bio: bio,
+            members: detail.members.map {
+                ArtistReport.Member(
+                    name: $0.artist.name,
+                    mbid: $0.artist.id,
+                    begin: $0.begin,
+                    end: $0.end,
+                    ended: $0.ended,
+                    roles: $0.attributes
+                )
+            },
+            links: detail.links.map { ArtistReport.Link(type: $0.key, url: $0.value) }.sorted { $0.type < $1.type },
+            discography: discography,
+            fetchedAt: self.now()
+        )
+    }
+
+    private func ownedReleaseKeys(artistID: Int64) async throws -> (groupIDs: Set<String>, titles: Set<String>) {
+        let mine = try await self.albums.fetchAll().filter { $0.albumArtistID == artistID }
+        return (Set(mine.compactMap(\.musicbrainzReleaseGroupID)), Set(mine.map { $0.title.lowercased() }))
+    }
+
+    // MARK: - Album
+
+    /// The release report for an album. Uses the album's release id, or picks
+    /// the earliest official release of its release group.
+    public func albumReport(albumID: Int64, forceRefresh: Bool = false) async throws -> AlbumReport {
+        let album = try await self.albums.fetch(id: albumID)
+        let key = "album-\(albumID)"
+        let cached: (value: AlbumReport, fresh: Bool)? = await self.cache.load(AlbumReport.self, key: key)
+        if let cached, cached.fresh, !forceRefresh {
+            return cached.value
+        }
+        do {
+            let report = try await self.buildAlbumReport(album)
+            await self.cache.store(report, key: key)
+            return report
+        } catch let error as DeepDiveError where error == .offline || error == .rateLimited {
+            if let cached {
+                return cached.value
+            }
+            throw error
+        }
+    }
+
+    private func buildAlbumReport(_ album: Album) async throws -> AlbumReport {
+        var artist: Artist?
+        if let artistID = album.albumArtistID {
+            do {
+                artist = try await self.artists.fetch(id: artistID)
+            } catch {
+                // Without the row the report loses its artist section and the
+                // nearby-releases pass below returns nothing (#492).
+                self.log.warning("deepdive.album.artistLookupFailed", [
+                    "artist": artistID,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+
+        var releaseChosen = false
+        var guessed = false
+        var releaseID = album.musicbrainzReleaseID
+        var groupID = album.musicbrainzReleaseGroupID
+        if releaseID == nil, groupID == nil {
+            groupID = try await self.guessReleaseGroupMBID(album: album, artist: artist)
+            guessed = groupID != nil
+        }
+        if releaseID == nil, let groupID {
+            let group = try await self.mapErrors { try await self.musicBrainz.fetchReleaseGroup(mbid: groupID) }
+            releaseID = Self.representativeRelease(group.releases ?? [])?.id
+            releaseChosen = releaseID != nil
+        }
+        guard let releaseID else { throw DeepDiveError.noIdentifier }
+        let release = try await self.mapErrors { try await self.musicBrainz.fetchRelease(mbid: releaseID) }
+
+        let nearby = await self.nearbyReleases(of: release, album: album, artist: artist)
+
+        let ownedTracks = try await self.tracks.count(albumID: album.id ?? 0)
+        let media = release.media ?? []
+        return AlbumReport(
+            albumID: album.id ?? 0,
+            title: release.title,
+            artistName: release.albumArtistName ?? artist?.name ?? "",
+            releaseMBID: release.id,
+            releaseGroupMBID: release.releaseGroup?.id ?? album.musicbrainzReleaseGroupID,
+            releaseChosen: releaseChosen,
+            mbidGuessed: guessed,
+            primaryType: release.releaseGroup?.primaryType,
+            secondaryTypes: release.releaseGroup?.secondaryTypes ?? [],
+            date: release.date,
+            country: release.country,
+            status: release.status,
+            barcode: release.barcode,
+            labels: (release.labelInfo ?? []).compactMap { info in
+                info.label.map { AlbumReport.Label(name: $0.name, catalogNumber: info.catalogNumber) }
+            },
+            formats: media.compactMap(\.format),
+            trackCount: media.isEmpty ? nil : media.compactMap(\.trackCount).reduce(0, +),
+            ownedTrackCount: ownedTracks,
+            coverArtArchiveURL: URL(string: "https://coverartarchive.org/release/\(release.id)")!,
+            musicBrainzURL: URL(string: "https://musicbrainz.org/release/\(release.id)")!,
+            nearby: nearby,
+            fetchedAt: self.now()
+        )
+    }
+
+    /// The artist's other release groups within two years of `release`.
+    private func nearbyReleases(of release: MBRelease, album: Album, artist: Artist?) async -> [AlbumReport.Nearby] {
+        guard let artist, let artistMBID = artist.musicbrainzArtistID, let year = release.year ?? album.year else { return [] }
+        let owned: (groupIDs: Set<String>, titles: Set<String>)
+        let groups: MBReleaseGroupBrowse
+        do {
+            owned = try await self.ownedReleaseKeys(artistID: artist.id ?? 0)
+            groups = try await self
+                .mapErrors { try await self.musicBrainz.browseReleaseGroups(artistMBID: artistMBID, limit: 100) }
+        } catch {
+            // An empty "nearby releases" section otherwise reads as "this
+            // artist released nothing else around then" (#492).
+            self.log.debug("deepdive.nearby.failed", [
+                "artist": artistMBID,
+                "error": String(reflecting: error),
+            ])
+            return []
+        }
+        var nearby: [AlbumReport.Nearby] = []
+        for group in groups.releaseGroups {
+            guard group.id != release.releaseGroup?.id, let groupYear = group.year, abs(groupYear - year) <= 2 else { continue }
+            let title = group.title ?? ""
+            let isOwned = owned.groupIDs.contains(group.id) || owned.titles.contains(title.lowercased())
+            nearby.append(AlbumReport.Nearby(title: title, mbid: group.id, primaryType: group.primaryType, year: groupYear, owned: isOwned))
+        }
+        return nearby.sorted { ($0.year ?? 0, $0.title) < ($1.year ?? 0, $1.title) }
+    }
+
+    /// Earliest official release, else earliest of any status.
+    static func representativeRelease(_ releases: [MBRelease]) -> MBRelease? {
+        let sorted = releases.sorted { ($0.date ?? "9999") < ($1.date ?? "9999") }
+        return sorted.first { $0.status == "Official" } ?? sorted.first
+    }
+
+    // MARK: - Track
+
+    /// The recording report for a track. Requires a recording MBID on the row.
+    public func trackReport(trackID: Int64, forceRefresh: Bool = false) async throws -> TrackReport {
+        let track = try await self.tracks.fetch(id: trackID)
+        var guessed = false
+        var resolved = track.musicbrainzRecordingID
+        if resolved == nil || resolved?.isEmpty == true {
+            resolved = try await self.guessRecordingMBID(track: track)
+            guessed = resolved != nil
+        }
+        guard let mbid = resolved, !mbid.isEmpty else { throw DeepDiveError.noIdentifier }
+        let key = "recording-\(mbid)"
+        let cached: (value: TrackReport, fresh: Bool)? = await self.cache.load(TrackReport.self, key: key)
+        if let cached, cached.fresh, !forceRefresh {
+            return cached.value
+        }
+        do {
+            let recording = try await self.mapErrors { try await self.musicBrainz.fetchRecording(mbid: mbid) }
+            // At most two work lookups: enough for a song and its medley partner.
+            var works: [TrackReport.Work] = []
+            for ref in recording.works.prefix(2) {
+                do {
+                    let work = try await self.mapErrors { try await self.musicBrainz.fetchWork(mbid: ref.id) }
+                    works.append(TrackReport.Work(
+                        title: work.title ?? ref.title ?? "", mbid: work.id,
+                        composers: work.composers, lyricists: work.lyricists, writers: work.writers
+                    ))
+                } catch {
+                    // The songwriting credits are simply absent otherwise (#492).
+                    self.log.debug("deepdive.work.failed", [
+                        "work": ref.id,
+                        "error": String(reflecting: error),
+                    ])
+                }
+            }
+            let appearances = (recording.releases ?? []).map { release in
+                TrackReport.Appearance(
+                    releaseTitle: release.title, releaseMBID: release.id, year: release.year,
+                    country: release.country, status: release.status,
+                    primaryType: release.releaseGroup?.primaryType, secondaryTypes: release.releaseGroup?.secondaryTypes ?? []
+                )
+            }.sorted { ($0.year ?? Int.max, $0.releaseTitle) < ($1.year ?? Int.max, $1.releaseTitle) }
+            let report = TrackReport(
+                trackID: trackID,
+                recordingMBID: mbid,
+                mbidGuessed: guessed,
+                title: recording.title,
+                artistCredit: recording.artistName,
+                length: recording.length,
+                isrcs: recording.isrcs ?? [],
+                firstReleaseYear: appearances.compactMap(\.year).min(),
+                tags: (recording.tags ?? []).sorted { $0.count > $1.count }.prefix(5).map(\.name),
+                appearances: appearances,
+                works: works,
+                acoustIDURL: track.acoustidID.flatMap { URL(string: "https://acoustid.org/track/\($0)") },
+                fetchedAt: self.now()
+            )
+            await self.cache.store(report, key: key)
+            return report
+        } catch let error as DeepDiveError where error == .offline || error == .rateLimited {
+            if let cached {
+                return cached.value
+            }
+            throw error
+        }
+    }
+
+    // MARK: - Saving a guessed match to tags
+
+    /// Writes a guessed track match into the file's tags through the metadata
+    /// editor (backups, undo, DB row update included), then returns the
+    /// report unflagged and re-caches it. The next scan reads the id back
+    /// from the file like any tagged id.
+    public func confirmTrackMatch(report: TrackReport, saver: any DeepDiveTagSaving) async throws -> TrackReport {
+        try await saver.saveRecordingID(report.recordingMBID, trackID: report.trackID)
+        self.log.info("deepdive.track.savedToTags", ["trackID": report.trackID, "mbid": report.recordingMBID])
+        var confirmed = report
+        confirmed.mbidGuessed = false
+        await self.cache.store(confirmed, key: "recording-\(report.recordingMBID)")
+        return confirmed
+    }
+
+    /// Writes a guessed album match (its release-group id) into the tags of
+    /// every track of the album in one edit transaction. Returns the
+    /// unflagged report and the number of files written.
+    public func confirmAlbumMatch(
+        report: AlbumReport,
+        saver: any DeepDiveTagSaving
+    ) async throws -> (report: AlbumReport, tracksWritten: Int) {
+        guard let groupID = report.releaseGroupMBID else { throw DeepDiveError.noIdentifier }
+        let ids = try await self.tracks.fetchAll(albumID: report.albumID).compactMap(\.id)
+        guard !ids.isEmpty else { throw DeepDiveError.notFound }
+        try await saver.saveReleaseGroupID(groupID, trackIDs: ids)
+        self.log.info("deepdive.album.savedToTags", ["albumID": report.albumID, "mbid": groupID, "tracks": ids.count])
+        var confirmed = report
+        confirmed.mbidGuessed = false
+        await self.cache.store(confirmed, key: "album-\(report.albumID)")
+        return (confirmed, ids.count)
+    }
+
+    // MARK: - Name-search fallbacks
+
+    /// Guesses the album's release group by a name search when the tags
+    /// supplied no release or release-group id. Only a match at or above
+    /// `guessScoreThreshold` is used; the report is flagged `mbidGuessed` and
+    /// nothing is persisted, because the album MBID columns are rolled up
+    /// from tracks by the scanner and a stored guess would not survive a
+    /// rescan.
+    private func guessReleaseGroupMBID(album: Album, artist: Artist?) async throws -> String? {
+        guard let artist else { return nil }
+        let title = album.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = artist.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !name.isEmpty else { return nil }
+        let results = try await self.mapErrors { try await self.musicBrainz.searchReleaseGroups(artist: name, album: title, limit: 5) }
+        guard let best = results.first, (best.score ?? 0) >= Self.guessScoreThreshold else { return nil }
+        self.log.info("deepdive.album.guessed", ["album": title, "mbid": best.id, "score": best.score ?? 0])
+        return best.id
+    }
+
+    /// Guesses the track's recording by an artist + title search, same rules.
+    private func guessRecordingMBID(track: Track) async throws -> String? {
+        guard let artistID = track.artistID else { return nil }
+        let artist: Artist
+        do {
+            artist = try await self.artists.fetch(id: artistID)
+        } catch {
+            // Without the artist there is nothing to search MusicBrainz with,
+            // so the guess is abandoned; that is worth a line (#492).
+            self.log.warning("deepdive.guess.artistLookupFailed", [
+                "artist": artistID,
+                "error": String(reflecting: error),
+            ])
+            return nil
+        }
+        let title = (track.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = artist.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !name.isEmpty else { return nil }
+        let results = try await self.mapErrors { try await self.musicBrainz.searchRecordings(artist: name, title: title, limit: 5) }
+        guard let best = results.first, (best.score ?? 0) >= Self.guessScoreThreshold else { return nil }
+        self.log.info("deepdive.track.guessed", ["track": title, "mbid": best.id, "score": best.score ?? 0])
+        return best.id
+    }
+
+    // MARK: - Errors
+
+    private func mapErrors<T>(_ body: () async throws -> T) async throws -> T {
+        do {
+            return try await body()
+        } catch AcousticsError.networkError {
+            throw DeepDiveError.offline
+        } catch AcousticsError.rateLimitExceeded {
+            throw DeepDiveError.rateLimited
+        } catch AcousticsError.invalidResponse {
+            throw DeepDiveError.notFound
+        }
+    }
+}

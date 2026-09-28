@@ -1,0 +1,389 @@
+@preconcurrency import AVFoundation
+import Foundation
+import Testing
+@testable import AudioEngine
+
+// MARK: - FormatSniffer tests
+
+@Suite("FormatSniffer")
+struct FormatSnifferTests {
+    private let sniffer = FormatSniffer()
+
+    @Test("WAV magic → .wav")
+    func wavMagic() {
+        let magic = Data([
+            0x52, 0x49, 0x46, 0x46, // "RIFF"
+            0x00, 0x00, 0x00, 0x00,
+            0x57, 0x41, 0x56, 0x45, // "WAVE"
+            0x66, 0x6D, 0x74, 0x20, // "fmt "
+        ])
+        #expect(self.sniffer.sniff(bytes: magic) == .wav)
+    }
+
+    @Test("FLAC magic → .flac")
+    func flacMagic() {
+        var magic = Data(count: 16)
+        magic[0] = 0x66
+        magic[1] = 0x4C
+        magic[2] = 0x61
+        magic[3] = 0x43 // "fLaC"
+        #expect(self.sniffer.sniff(bytes: magic) == .flac)
+    }
+
+    @Test("MP3 ID3 magic → .mp3")
+    func mp3ID3Magic() {
+        var magic = Data(count: 16)
+        magic[0] = 0x49
+        magic[1] = 0x44
+        magic[2] = 0x33 // "ID3"
+        #expect(self.sniffer.sniff(bytes: magic) == .mp3)
+    }
+
+    @Test("MP3 sync word → .mp3")
+    func mp3SyncMagic() {
+        var magic = Data(count: 16)
+        magic[0] = 0xFF
+        magic[1] = 0xFB
+        #expect(self.sniffer.sniff(bytes: magic) == .mp3)
+    }
+
+    @Test("M4A ftyp magic → .m4a")
+    func m4aMagic() {
+        var magic = Data(count: 16)
+        // "ftyp" at offset 4
+        magic[4] = 0x66
+        magic[5] = 0x74
+        magic[6] = 0x79
+        magic[7] = 0x70
+        #expect(self.sniffer.sniff(bytes: magic) == .m4a)
+    }
+
+    @Test("OGG magic → .ogg")
+    func oggMagic() {
+        var magic = Data(count: 16)
+        magic[0] = 0x4F
+        magic[1] = 0x67
+        magic[2] = 0x67
+        magic[3] = 0x53 // "OggS"
+        #expect(self.sniffer.sniff(bytes: magic) == .ogg)
+    }
+
+    @Test("DSD/DSF magic → .dsf")
+    func dsfMagic() {
+        var magic = Data(count: 16)
+        magic[0] = 0x44
+        magic[1] = 0x53
+        magic[2] = 0x44
+        magic[3] = 0x20 // "DSD "
+        #expect(self.sniffer.sniff(bytes: magic) == .dsf)
+    }
+
+    @Test("DFF magic → .dff")
+    func dffMagic() {
+        var magic = Data(count: 16)
+        magic[0] = 0x46
+        magic[1] = 0x52
+        magic[2] = 0x4D
+        magic[3] = 0x38 // "FRM8"
+        #expect(self.sniffer.sniff(bytes: magic) == .dff)
+    }
+
+    @Test("APE magic → .ape")
+    func apeMagic() {
+        var magic = Data(count: 16)
+        magic[0] = 0x4D
+        magic[1] = 0x41
+        magic[2] = 0x43
+        magic[3] = 0x20 // "MAC "
+        #expect(self.sniffer.sniff(bytes: magic) == .ape)
+    }
+
+    @Test("WavPack magic → .wavpack")
+    func wavpackMagic() {
+        var magic = Data(count: 16)
+        magic[0] = 0x77
+        magic[1] = 0x76
+        magic[2] = 0x70
+        magic[3] = 0x6B // "wvpk"
+        #expect(self.sniffer.sniff(bytes: magic) == .wavpack)
+    }
+
+    @Test("AIFF magic (FORM + AIFF) → .aiff")
+    func aiffMagic() {
+        var magic = Data("FORM".utf8)
+        magic.append(Data([0x00, 0x00, 0x00, 0x00])) // chunk size
+        magic.append(Data("AIFF".utf8))
+        magic.append(Data(count: 4))
+        #expect(self.sniffer.sniff(bytes: magic) == .aiff)
+    }
+
+    @Test("AIFF-C magic (FORM + AIFC) → .aiff")
+    func aifcMagic() {
+        var magic = Data("FORM".utf8)
+        magic.append(Data([0x00, 0x00, 0x00, 0x00]))
+        magic.append(Data("AIFC".utf8))
+        magic.append(Data(count: 4))
+        #expect(self.sniffer.sniff(bytes: magic) == .aiff)
+    }
+
+    @Test("FORM with a non-audio form type → .unknown")
+    func formButNotAiff() {
+        var magic = Data("FORM".utf8)
+        magic.append(Data([0x00, 0x00, 0x00, 0x00]))
+        magic.append(Data("8SVX".utf8)) // Amiga sampled voice — not ours
+        magic.append(Data(count: 4))
+        if case .unknown = self.sniffer.sniff(bytes: magic) {} else {
+            Issue.record("a non-AIFF FORM file must stay unknown")
+        }
+    }
+
+    @Test("Musepack SV8 magic (MPCK) → .musepack")
+    func musepackSV8Magic() {
+        var magic = Data("MPCK".utf8)
+        magic.append(Data(count: 12))
+        #expect(self.sniffer.sniff(bytes: magic) == .musepack)
+    }
+
+    @Test("Musepack SV7 magic (MP+) → .musepack")
+    func musepackSV7Magic() {
+        var magic = Data("MP+".utf8)
+        magic.append(Data(count: 13))
+        #expect(self.sniffer.sniff(bytes: magic) == .musepack)
+    }
+
+    @Test("TTA magic (TTA1) → .tta")
+    func ttaMagic() {
+        var magic = Data("TTA1".utf8)
+        magic.append(Data(count: 12))
+        #expect(self.sniffer.sniff(bytes: magic) == .tta)
+    }
+
+    @Test("E-AC-3 shares the AC-3 sync word (0x0B77) → .ac3")
+    func eac3Magic() {
+        var magic = Data(count: 16)
+        magic[0] = 0x0B
+        magic[1] = 0x77
+        #expect(self.sniffer.sniff(bytes: magic) == .ac3)
+    }
+
+    @Test("Random bytes → .unknown")
+    func unknownMagic() {
+        let magic = Data([
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        ])
+        if case .unknown = self.sniffer.sniff(bytes: magic) { /* pass */ } else {
+            Issue.record("Expected .unknown for random bytes")
+        }
+    }
+
+    @Test("Empty data → .unknown")
+    func emptyMagic() {
+        if case .unknown = self.sniffer.sniff(bytes: Data()) { /* pass */ } else {
+            Issue.record("Expected .unknown for empty data")
+        }
+    }
+
+    @Test("Opus-in-OGG (OpusHead at offset 28) → .opus")
+    func opusInOggMagic() {
+        var magic = Data(count: 64)
+        // "OggS" at offset 0
+        magic[0] = 0x4F
+        magic[1] = 0x67
+        magic[2] = 0x67
+        magic[3] = 0x53
+        // "OpusHead" at offset 28
+        let opusHead: [UInt8] = [0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64]
+        for (i, byte) in opusHead.enumerated() {
+            magic[28 + i] = byte
+        }
+        #expect(self.sniffer.sniff(bytes: magic) == .opus)
+    }
+
+    @Test("OGG without OpusHead → .ogg (Vorbis fallback)")
+    func oggVorbisMagic() {
+        var magic = Data(count: 64)
+        magic[0] = 0x4F
+        magic[1] = 0x67
+        magic[2] = 0x67
+        magic[3] = 0x53
+        // Different bytes at offset 28 (e.g. "vorbis")
+        magic[28] = 0x01
+        magic[29] = 0x76
+        magic[30] = 0x6F
+        magic[31] = 0x72
+        magic[32] = 0x62
+        magic[33] = 0x69
+        magic[34] = 0x73
+        #expect(self.sniffer.sniff(bytes: magic) == .ogg)
+    }
+}
+
+// MARK: - DecoderFactory tests
+
+@Suite("DecoderFactory")
+struct DecoderFactoryTests {
+    private func fixtureURL(_ name: String) throws -> URL {
+        let url = Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
+        return try #require(url, "Missing fixture: \(name)")
+    }
+
+    @Test("WAV → AVFoundationDecoder")
+    func wavDecodesWithAVFoundation() throws {
+        let url = try fixtureURL("sine-1s-44100-16-stereo.wav")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is AVFoundationDecoder)
+    }
+
+    @Test("FLAC → AVFoundationDecoder")
+    func flacDecodesWithAVFoundation() throws {
+        let url = try fixtureURL("sine-1s-44100-24-stereo.flac")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is AVFoundationDecoder)
+    }
+
+    @Test("AIFF → AVFoundationDecoder")
+    func aiffDecodesWithAVFoundation() throws {
+        // Regression for #387: with no FORM/AIFF magic in the sniffer, AIFF
+        // sniffed as .unknown and reached FFmpeg via the last-resort
+        // fallback, making AVFoundationDecoder's documented AIFF support
+        // unreachable code.
+        let url = try fixtureURL("sine-1s-44100-16-stereo.aiff")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is AVFoundationDecoder)
+    }
+
+    @Test("MP3 → AVFoundationDecoder")
+    func mp3DecodesWithAVFoundation() throws {
+        let url = try fixtureURL("sample.mp3")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is AVFoundationDecoder)
+    }
+
+    @Test("AAC M4A → AVFoundationDecoder")
+    func aacDecodesWithAVFoundation() throws {
+        let url = try fixtureURL("sample-aac.m4a")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is AVFoundationDecoder)
+    }
+
+    @Test("ALAC M4A → AVFoundationDecoder")
+    func alacDecodesWithAVFoundation() throws {
+        let url = try fixtureURL("sample-alac.m4a")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is AVFoundationDecoder)
+    }
+
+    @Test("a file no decoder recognises still reports the unsupported format after FFmpeg is tried (#497)")
+    func unknownFormatReportsUnsupported() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("decoder-factory-\(UUID().uuidString).bin")
+        try Data("this is not audio, it is a sentence".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        do {
+            _ = try DecoderFactory.make(for: url)
+            Issue.record("Expected unsupportedFormat to be thrown")
+        } catch let AudioEngineError.unsupportedFormat(_, thrownURL) {
+            // FFmpeg's own refusal is logged, not substituted for this: the
+            // magic bytes are what the user needs to see.
+            #expect(thrownURL == url)
+        }
+    }
+
+    @Test("OGG → FFmpegDecoder")
+    func oggDecodesWithFFmpeg() throws {
+        let url = try fixtureURL("sine-1s-48000-stereo.ogg")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is FFmpegDecoder)
+    }
+
+    @Test("Opus → FFmpegDecoder")
+    func opusDecodesWithFFmpeg() throws {
+        let url = try fixtureURL("sine-1s-48000-stereo.opus")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is FFmpegDecoder)
+    }
+
+    @Test("WavPack → FFmpegDecoder")
+    func wavpackDecodesWithFFmpeg() throws {
+        let url = try fixtureURL("sine-1s-44100-stereo.wv")
+        let decoder = try DecoderFactory.make(for: url)
+        #expect(decoder is FFmpegDecoder)
+    }
+
+    // MARK: - Raw Dolby and TrueHD (ADR-091 slice 3)
+
+    @Test("raw E-AC-3 sniffs as AC-3 and routes to FFmpegDecoder with six channels")
+    func rawEAC3DecodesWithFFmpeg() throws {
+        let url = try fixtureURL("surround-lsrs-48000.eac3")
+        let decoder = try DecoderFactory.make(for: url)
+        let ffmpeg = try #require(decoder as? FFmpegDecoder)
+        #expect(ffmpeg.streamDetails.channelCount == 6)
+        #expect(ffmpeg.streamDetails.codec == "eac3")
+    }
+
+    @Test("raw TrueHD sniffs as unknown and reaches FFmpegDecoder through the last resort")
+    func rawTrueHDDecodesWithFFmpeg() throws {
+        let url = try fixtureURL("surround-lsrs-48000.thd")
+        let decoder = try DecoderFactory.make(for: url)
+        let ffmpeg = try #require(decoder as? FFmpegDecoder)
+        #expect(ffmpeg.streamDetails.channelCount == 6)
+        #expect(ffmpeg.streamDetails.codec == "truehd")
+    }
+
+    // MARK: - .m4a fallback (ADR-091 slice 3)
+
+    /// An MP4 whose payload AudioToolbox has no decoder for. The ADR's first
+    /// candidates were Opus in MP4 and FLAC in MP4, but on macOS 26 AVAudioFile
+    /// opens both (Opus with a reported length of zero and a failing first
+    /// read, FLAC fully), so neither refuses at open time. MP3, DTS and TrueHD
+    /// in MP4 are refused at open; MP3 is the smallest and is what some
+    /// muxers really produce. The init-time fallback, copied from #387, only
+    /// covers an open-time refusal.
+    @Test("an MP4 that AVFoundation refuses to open falls back to FFmpegDecoder")
+    func refusedM4AFallsBackToFFmpeg() throws {
+        let url = try fixtureURL("mp3-in-mp4.m4a")
+        let decoder = try DecoderFactory.make(for: url)
+        let ffmpeg = try #require(decoder as? FFmpegDecoder)
+        #expect(ffmpeg.streamDetails.codec == "mp3")
+        #expect(ffmpeg.streamDetails.channelCount == 2)
+    }
+
+    /// Opus in MP4 opens in AVFoundation and fails on the first read; the
+    /// decoder's open-time probe refuses it, so the factory hands it to
+    /// FFmpeg, which decodes it (#523).
+    @Test("an MP4 that AVFoundation opens but cannot read falls back to FFmpegDecoder")
+    func unreadableM4AFallsBackToFFmpeg() async throws {
+        let url = try fixtureURL("opus-in-mp4.m4a")
+        let decoder = try DecoderFactory.make(for: url)
+        let ffmpeg = try #require(decoder as? FFmpegDecoder)
+        #expect(ffmpeg.streamDetails.codec == "opus")
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: ffmpeg.sourceFormat, frameCapacity: 4096))
+        let frames = try await ffmpeg.read(into: buffer)
+        #expect(frames > 0)
+        await ffmpeg.close()
+    }
+
+    /// FFmpeg has a DSF demuxer and no muxer, so the fixture comes from
+    /// `Scripts/gen-dsf-fixture.py`: a quarter second of DSD64 from a
+    /// first-order sigma-delta modulator (#518). AVFoundation cannot open
+    /// DSF at all, so the routing is the part worth proving; the codec name
+    /// says FFmpeg really opened it as DSD rather than as unknown bytes.
+    @Test("DSF → FFmpegDecoder")
+    func dsfDecodesWithFFmpeg() throws {
+        let url = try fixtureURL("sine-250ms-dsd64-stereo.dsf")
+        let decoder = try DecoderFactory.make(for: url)
+        let ffmpeg = try #require(decoder as? FFmpegDecoder)
+        #expect(ffmpeg.streamDetails.codec == "dsd_lsbf_planar")
+        #expect(ffmpeg.streamDetails.channelCount == 2)
+    }
+
+    @Test("Missing file → fileNotFound")
+    func missingFile() throws {
+        let url = URL(fileURLWithPath: "/nonexistent/audio.wav")
+        #expect(throws: AudioEngineError.self) {
+            _ = try DecoderFactory.make(for: url)
+        }
+    }
+}

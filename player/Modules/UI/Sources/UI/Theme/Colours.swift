@@ -1,0 +1,226 @@
+import SwiftUI
+
+// MARK: - Semantic colours
+
+//
+// Each colour is defined as a `Color` extension property backed by an
+// NSColor adaptive value (light / dark variant). This is equivalent to
+// `Color("name", bundle: .module)` from an asset catalogue but lives in
+// source, making diffs cleaner and eliminating xcassets JSON churn.
+//
+// The light palette stays neutral; the dark palette follows WMusic Nocturne's
+// ink-blue surfaces and cool text hierarchy.
+
+extension Color {
+    // MARK: - Background hierarchy
+
+    /// Window / page background.
+    ///
+    /// Light: #FAF8F5 — warm cream white (R > G > B adds subtle warmth;
+    /// replaces the cold pure #FFFFFF).  Contrast against all text tiers ✓.
+    /// Dark: #0E1625 — the Nocturne ink-blue canvas.
+    static let bgPrimary = Color(adaptiveLight: 0.980, 0.973, 0.961, dark: 0.055, 0.086, 0.145)
+
+    /// Sidebar / secondary panels.
+    ///
+    /// Light: #F5F2EC — warm linen (replaces cold #F5F5F7).
+    /// textSecondary ≈ 4.6 : 1, textTertiary ≈ 4.8 : 1 on this bg. ✓
+    /// Dark: #172136 — the Nocturne sidebar and secondary surface.
+    static let bgSecondary = Color(adaptiveLight: 0.961, 0.949, 0.925, dark: 0.090, 0.129, 0.212)
+
+    /// Cards / elevated surfaces.
+    ///
+    /// Light: #E9E6DF — warm stone (replaces cold #E8E8ED).
+    /// Dark: #22304A — lifted cards and controls.
+    static let bgTertiary = Color(adaptiveLight: 0.914, 0.902, 0.875, dark: 0.133, 0.188, 0.290)
+
+    // MARK: - Text hierarchy
+
+    /// Primary body text.  Light: #1D1D1F  Dark: #EDF2FF
+    static let textPrimary = Color(adaptiveLight: 0.114, 0.114, 0.122, dark: 0.929, 0.949, 1.000)
+
+    /// Secondary / metadata text.  Light: #6E6E73  Dark: #B8C5DE
+    static let textSecondary = Color(adaptiveLight: 0.431, 0.431, 0.451, dark: 0.722, 0.773, 0.871)
+
+    /// Tertiary / timestamps.
+    ///
+    /// Values chosen so that WCAG 2.1 AA normal-text contrast (≥ 4.5 : 1) is met
+    /// against both `bgPrimary` and `bgSecondary` in both colour schemes.
+    ///
+    /// Light: #6B6B6F — approx 5.0 : 1 on `bgPrimary` (#FAF8F5) and 4.8 : 1 on
+    /// `bgSecondary` (#F5F2EC).  Previous value #AEAEB2 achieved only ~2.2 : 1 (fail).
+    ///
+    /// Dark: #91A5C3 — approx 7.2 : 1 on `bgPrimary` and 6.4 : 1 on
+    /// `bgSecondary`; timestamps remain legible against the blue surfaces.
+    static let textTertiary = Color(adaptiveLight: 0.420, 0.420, 0.435, dark: 0.569, 0.647, 0.765)
+
+    // MARK: - Interactive
+
+    /// Nocturne's purple-blue control tint. Both appearance variants clear
+    /// 4.5 : 1 against their primary and secondary surfaces.
+    static let nocturneAccent = Color(adaptiveLight: 0.380, 0.333, 0.800, dark: 0.561, 0.498, 0.949)
+
+    /// The picker checkmark adapts to the accent's luminance.
+    static let nocturneAccentLabel = Color(adaptiveLight: 1, 1, 1, dark: 0, 0, 0)
+
+    /// Separator / hairline border.  Low-opacity overlay.
+    ///
+    /// Automatically strengthens to 0.40 opacity when macOS "Increase Contrast"
+    /// is active (detected via the `accessibilityHighContrast*` NSAppearance names).
+    static let separatorAdaptive = Color(
+        nsColor: NSColor(name: nil) { appearance in
+            let highContrastNames: [NSAppearance.Name] = [
+                .accessibilityHighContrastAqua,
+                .accessibilityHighContrastVibrantLight,
+                .accessibilityHighContrastDarkAqua,
+                .accessibilityHighContrastVibrantDark,
+            ]
+            let darkNames: [NSAppearance.Name] = [
+                .darkAqua,
+                .vibrantDark,
+                .accessibilityHighContrastDarkAqua,
+                .accessibilityHighContrastVibrantDark,
+            ]
+            let isHighContrast = highContrastNames.contains(appearance.name)
+            let isDark = darkNames.contains(appearance.name)
+            let alpha: CGFloat = isHighContrast ? 0.40 : 0.10
+            return isDark
+                ? NSColor(red: 1, green: 1, blue: 1, alpha: alpha)
+                : NSColor(red: 0, green: 0, blue: 0, alpha: alpha)
+        }
+    )
+
+    /// Star / rating fill.
+    ///
+    /// Light: #FF4700 — deepened further to maintain ≥ 3 : 1 on the warm cream
+    /// `bgPrimary` (#FAF8F5, L ≈ 0.941).  Previous #FF5C00 achieved ~2.93 : 1
+    /// on the warmed bg (fail).  New value ≈ 3.2 : 1 on warm bg. ✓
+    ///
+    /// Dark: #FF9F0A — unchanged; already achieves ~8.3 : 1 on dark `bgPrimary`.
+    static let ratingFill = Color(adaptiveLight: 1.000, 0.280, 0.000, dark: 1.000, 0.624, 0.039)
+
+    /// Heart / loved tint.  Light: #FF2D55  Dark: #FF375F
+    static let lovedTint = Color(adaptiveLight: 1.000, 0.176, 0.333, dark: 1.000, 0.216, 0.373)
+
+    /// Warning / attention tint (scrobble-pending indicator, etc.).
+    ///
+    /// Light: #CC5900 — deepened amber so the sRGB luminance is low enough to
+    /// achieve ≥ 3 : 1 against warm-cream `bgPrimary` (#FAF8F5, L ≈ 0.941).
+    /// Approx 3.6 : 1. ✓
+    ///
+    /// Dark: #FFB200 — bright golden amber; ≈ 9.9 : 1 on dark `bgPrimary`. ✓
+    static let warningTint = Color(adaptiveLight: 0.800, 0.350, 0.000, dark: 1.000, 0.700, 0.000)
+
+    /// Star / favourite tint.  Shares the `ratingFill` palette so that Subsonic
+    /// stars and local rating stars render identically.
+    static let starTint = ratingFill
+
+    // MARK: - Source badges (ADR-092)
+
+    // One hue per fact, so the play bar's row reads as five things rather than
+    // one stripe, and each is told apart from the accent, rating, loved and
+    // warning hues already on that surface. Each tint is drawn at full
+    // strength as a 1 pt border and at 14% as the fill behind `textPrimary`.
+    // Measured against `bgPrimary` and `bgSecondary` in both modes: every
+    // border clears the 3 : 1 non-text threshold (worst case 4.19 : 1, the
+    // green on light `bgSecondary`) and text on every fill clears 4.5 : 1
+    // (worst case 9.68 : 1). `ContrastTests` asserts all twenty numbers.
+
+    /// Codec badge. Light: #2A6BC7  Dark: #73ADFF
+    static let badgeCodec = Color(adaptiveLight: 0.160, 0.420, 0.780, dark: 0.450, 0.680, 1.000)
+
+    /// Bitrate badge. Light: #1A854D  Dark: #5CCC8C
+    static let badgeBitrate = Color(adaptiveLight: 0.100, 0.520, 0.300, dark: 0.360, 0.800, 0.550)
+
+    /// Sample-rate badge. Light: #0F808C  Dark: #4DC7D1
+    static let badgeSampleRate = Color(adaptiveLight: 0.060, 0.500, 0.550, dark: 0.300, 0.780, 0.820)
+
+    /// Bit-depth badge. Light: #7A47B8  Dark: #B894FA
+    static let badgeBitDepth = Color(adaptiveLight: 0.480, 0.280, 0.720, dark: 0.720, 0.580, 0.980)
+
+    /// Channels badge. Light: #B32E80  Dark: #F280C7
+    static let badgeChannels = Color(adaptiveLight: 0.700, 0.180, 0.500, dark: 0.950, 0.500, 0.780)
+
+    // MARK: - Will-o'-the-Wisp identity (issue #333)
+
+    /// Signature spectral blue-green accent ("bòcan" = ghost; the marsh-light of
+    /// Gaelic folklore).  Selectable from the accent picker; the heritage blue
+    /// stays as the "System" swatch.
+    ///
+    /// Light: #1E9E8A — 3.14 : 1 on `bgPrimary` (passes WCAG 1.4.11 non-text /
+    /// large-text 3 : 1; do NOT use for body text, which needs 4.5 : 1).
+    /// Dark: #3FD6BC — 9.36 : 1 on dark `bgPrimary`. ✓
+    ///
+    /// Colour-blindness checked (Machado 2009, severity 1.0): stays separable
+    /// from both its surface and `willowispAlert` across protan/deutan/tritan
+    /// (worst-case ΔE 23, protanopia).
+    static let willowispAccent = Color(adaptiveLight: 0.118, 0.620, 0.541, dark: 0.247, 0.839, 0.737)
+
+    /// Will-o'-the-Wisp highlight / glow.  A bright mint intended for dark
+    /// surfaces only (13.08 : 1 on dark `bgPrimary`); it is deliberately low
+    /// contrast on light surfaces, so it is not audited against the light
+    /// appearance.  Consumed by the spectral-glow behaviour in #334.
+    static let willowispHighlight = Color(red: 0.612, green: 0.949, blue: 0.863)
+
+    /// Will-o'-the-Wisp alert / coral.
+    ///
+    /// Light: #E84C2E — deepened from the direction's #FF6B57 (which was only
+    /// 2.65 : 1 on warm-cream `bgPrimary`) to 3.60 : 1, clearing the 3 : 1
+    /// graphical threshold.
+    /// Dark: #FF6B57 — the spec value; 6.07 : 1 on dark `bgPrimary`. ✓
+    static let willowispAlert = Color(adaptiveLight: 0.910, 0.298, 0.180, dark: 1.000, 0.420, 0.341)
+}
+
+// MARK: - Private convenience initialiser
+
+private extension Color {
+    /// Creates an adaptive `Color` from normalised RGB components.
+    init(
+        adaptiveLight lr: Double,
+        _ lg: Double,
+        _ lb: Double,
+        dark dr: Double,
+        _ dg: Double,
+        _ db: Double
+    ) {
+        self = Color(
+            nsColor: NSColor(name: nil) { appearance in
+                let isDark = [
+                    NSAppearance.Name.darkAqua,
+                    .vibrantDark,
+                    .accessibilityHighContrastDarkAqua,
+                    .accessibilityHighContrastVibrantDark,
+                ].contains(appearance.name)
+                return isDark
+                    ? NSColor(red: dr, green: dg, blue: db, alpha: 1)
+                    : NSColor(red: lr, green: lg, blue: lb, alpha: 1)
+            }
+        )
+    }
+
+    /// Creates an adaptive `Color` with a custom alpha for each mode.
+    init(
+        adaptiveLight lr: Double,
+        _ lg: Double,
+        _ lb: Double,
+        alpha la: Double,
+        dark dr: Double,
+        _ dg: Double,
+        _ db: Double,
+        alpha da: Double = 0.10
+    ) {
+        self = Color(
+            nsColor: NSColor(name: nil) { appearance in
+                let isDark = [
+                    NSAppearance.Name.darkAqua,
+                    .vibrantDark,
+                    .accessibilityHighContrastDarkAqua,
+                    .accessibilityHighContrastVibrantDark,
+                ].contains(appearance.name)
+                return isDark
+                    ? NSColor(red: dr, green: dg, blue: db, alpha: da)
+                    : NSColor(red: lr, green: lg, blue: lb, alpha: la)
+            }
+        )
+    }
+}

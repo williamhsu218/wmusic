@@ -1,0 +1,146 @@
+import Foundation
+import Library
+import Testing
+@testable import Persistence
+@testable import UI
+
+// MARK: - MockCoverArtFetcher
+
+/// Stub conformer used to verify DI without hitting the network.
+private final class MockCoverArtFetcher: CoverArtFetcher, @unchecked Sendable {
+    var stubbedCandidates: [CoverArtCandidate] = []
+    var stubbedImageData = Data([0xFF, 0xD8, 0xFF]) // minimal JPEG header
+    private(set) var searchCallCount = 0
+    private(set) var lastSearchArtist: String?
+    private(set) var lastSearchAlbum: String?
+
+    func search(artist: String, album: String) async throws -> [CoverArtCandidate] {
+        self.searchCallCount += 1
+        self.lastSearchArtist = artist
+        self.lastSearchAlbum = album
+        return self.stubbedCandidates
+    }
+
+    func image(for candidate: CoverArtCandidate, size: CoverArtSize) async throws -> Data {
+        self.stubbedImageData
+    }
+}
+
+// MARK: - TagEditorViewModelCoverArtTests
+
+@Suite("TagEditorViewModel cover art DI")
+@MainActor
+struct TagEditorViewModelCoverArtTests {
+    private func makeDatabase() async throws -> Database {
+        try await Database(location: .inMemory)
+    }
+
+    private func makeCandidate(id: String = "c1") -> CoverArtCandidate {
+        let url = URL(string: "https://example.com/art.jpg") ?? URL(filePath: "/")
+        return CoverArtCandidate(
+            id: id,
+            title: "Abbey Road",
+            artist: "The Beatles",
+            thumbnailURL: url,
+            fullURL: url,
+            source: .musicbrainz
+        )
+    }
+
+    @Test("coverArtFetchVM is created with the injected fetcher")
+    func coverArtFetchVMUsesInjectedFetcher() async throws {
+        let db = try await makeDatabase()
+        let svc = try MetadataEditService(database: db)
+        let mock = MockCoverArtFetcher()
+        mock.stubbedCandidates = [self.makeCandidate()]
+        let vm = TagEditorViewModel(service: svc, trackIDs: [], fetcher: mock)
+
+        vm.coverArtFetchVM.searchArtist = "The Beatles"
+        vm.coverArtFetchVM.searchAlbum = "Abbey Road"
+        vm.coverArtFetchVM.search()
+
+        // Poll until the Task inside search() has populated candidates, rather
+        // than sleeping a fixed time. A fixed sleep was flaky: when many suites
+        // run in parallel the main actor can be busy past the timeout. Polling
+        // returns as soon as the work lands and tolerates load up to the deadline.
+        let deadline = Date().addingTimeInterval(5)
+        while vm.coverArtFetchVM.candidates.isEmpty, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(mock.searchCallCount == 1)
+        #expect(mock.lastSearchArtist == "The Beatles")
+        #expect(mock.lastSearchAlbum == "Abbey Road")
+        #expect(vm.coverArtFetchVM.candidates.count == 1)
+        #expect(vm.coverArtFetchVM.candidates.first?.id == "c1")
+    }
+
+    @Test("default init has a coverArtFetchVM with no pending search")
+    func defaultInitHasCoverArtFetchVM() async throws {
+        let db = try await makeDatabase()
+        let svc = try MetadataEditService(database: db)
+        let vm = TagEditorViewModel(service: svc, trackIDs: [])
+        // Verify the vm holds a coverArtFetchVM without triggering network.
+        #expect(vm.coverArtFetchVM.candidates.isEmpty)
+        #expect(!vm.coverArtFetchVM.isSearching)
+    }
+
+    // MARK: - Search prefill (Fetch… button)
+
+    @Test("prepareCoverArtSearch seeds the fields from loaded tags")
+    func prefillSeedsFromTags() async throws {
+        let db = try await makeDatabase()
+        let svc = try MetadataEditService(database: db)
+        let vm = TagEditorViewModel(service: svc, trackIDs: [])
+        vm.artist = .shared("The Beatles")
+        vm.albumArtist = .shared("The Beatles")
+        vm.album = .shared("Abbey Road")
+
+        vm.prepareCoverArtSearch()
+
+        #expect(vm.coverArtFetchVM.searchArtist == "The Beatles")
+        #expect(vm.coverArtFetchVM.searchAlbum == "Abbey Road")
+    }
+
+    @Test("prepareCoverArtSearch prefers album artist and skips mixed fields")
+    func prefillPrefersAlbumArtist() async throws {
+        let db = try await makeDatabase()
+        let svc = try MetadataEditService(database: db)
+        let vm = TagEditorViewModel(service: svc, trackIDs: [])
+        vm.artist = .shared("Feat. Guest")
+        vm.albumArtist = .shared("Main Act")
+        vm.album = .various // multi-selection with different albums
+
+        vm.prepareCoverArtSearch()
+
+        #expect(vm.coverArtFetchVM.searchArtist == "Main Act")
+        #expect(vm.coverArtFetchVM.searchAlbum.isEmpty)
+    }
+
+    @Test("prepareCoverArtSearch never overwrites what the user typed")
+    func prefillDoesNotOverwrite() async throws {
+        let db = try await makeDatabase()
+        let svc = try MetadataEditService(database: db)
+        let vm = TagEditorViewModel(service: svc, trackIDs: [])
+        vm.artist = .shared("The Beatles")
+        vm.coverArtFetchVM.searchArtist = "Typed By Hand"
+
+        vm.prepareCoverArtSearch()
+
+        #expect(vm.coverArtFetchVM.searchArtist == "Typed By Hand")
+    }
+
+    @Test("the artwork picker accepts HEIC alongside the classic web formats (#389)")
+    @MainActor
+    func pickerAcceptsHEIC() {
+        // HEIC is what Photos exports by default on Apple platforms; its
+        // absence broke "use this photo as cover art" at the picker. AVIF
+        // rides along where the platform registers public.avif.
+        let identifiers = ArtworkEditor.artworkTypes.map(\.identifier)
+        #expect(identifiers.contains("public.heic"))
+        #expect(identifiers.contains("public.jpeg"))
+        #expect(identifiers.contains("public.png"))
+        #expect(identifiers.contains("org.webmproject.webp"))
+        #expect(identifiers.contains("com.compuserve.gif"))
+    }
+}

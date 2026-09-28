@@ -1,0 +1,269 @@
+import Library
+import Persistence
+import SwiftUI
+
+// MARK: - Sidebar
+
+/// The navigation sidebar listing Library, Recents, and Playlists sections.
+///
+/// Each row sends a `SidebarDestination` to `LibraryViewModel.selectDestination(_:)`.
+public struct Sidebar: View {
+    @ObservedObject public var vm: LibraryViewModel
+    @Environment(\.openSettings) private var openSettings
+    @Environment(\.settingsRouter) private var settingsRouter
+
+    public init(vm: LibraryViewModel) {
+        self.vm = vm
+    }
+
+    public var body: some View {
+        List(selection: Binding(
+            get: { self.vm.selectedDestination },
+            set: { newValue in
+                if let dest = newValue {
+                    Task { await self.vm.selectDestination(dest) }
+                }
+            }
+        )) {
+            Section {
+                if self.vm.sectionExpansion.localLibrary {
+                    self.sidebarRow(.songs, symbol: "music.note", label: L10n.string("Songs"))
+                    self.sidebarRow(.albums, symbol: "square.grid.2x2", label: L10n.string("Albums"))
+                    self.sidebarRow(.artists, symbol: "music.mic", label: L10n.string("Artists"))
+                    self.sidebarRow(.genres, symbol: "tag", label: L10n.string("Genres"))
+                    self.sidebarRow(.composers, symbol: "music.note.list", label: L10n.string("Composers"))
+                    self.sidebarRow(
+                        .podcasts,
+                        symbol: "antenna.radiowaves.left.and.right",
+                        label: L10n.string("Podcasts")
+                    )
+                    self.sidebarRow(
+                        .radio,
+                        symbol: "dot.radiowaves.left.and.right",
+                        label: L10n.string("Radio")
+                    )
+                }
+            } header: {
+                SidebarSectionHeader(
+                    title: L10n.string("Local Library"),
+                    isExpanded: Binding(
+                        get: { self.vm.sectionExpansion.localLibrary },
+                        set: { self.vm.sectionExpansion.localLibrary = $0 }
+                    ),
+                    // Persistent "Add Folder" entry point, so adding music is reachable
+                    // from any destination (not only the empty state / File menu) (#308).
+                    action: .init(
+                        title: L10n.string("Add Folder"),
+                        identifier: A11y.Sidebar.addFolderButton
+                    ) { Task { await self.vm.addFolderByPicker() } }
+                )
+            }
+
+            SubsonicSidebarSection(
+                sectionExpanded: Binding(
+                    get: { self.vm.sectionExpansion.sources },
+                    set: { self.vm.sectionExpansion.sources = $0 }
+                ),
+                expandedServers: Binding(
+                    get: { self.vm.sectionExpansion.expandedServers },
+                    set: { self.vm.sectionExpansion.expandedServers = $0 }
+                ),
+                servers: self.vm.subsonicServers,
+                hiddenServers: self.vm.hiddenSubsonicServers,
+                connectionStates: self.vm.subsonicConnectionStates,
+                onAddSource: self.openAddSource,
+                onManageSources: self.openManageSources,
+                onRefreshServer: self.refreshServer,
+                onTestServerConnection: self.testServerConnection,
+                onEditServer: self.editServer,
+                onDisableServerInSidebar: self.disableServerInSidebar,
+                onEnableServerInSidebar: self.enableServerInSidebar,
+                onRemoveServer: self.removeServer
+            )
+
+            Section {
+                if self.vm.sectionExpansion.recents {
+                    self.sidebarRow(.recentlyAdded, symbol: "clock", label: L10n.string("Recently Added"))
+                    self.sidebarRow(.recentlyPlayed, symbol: "clock.arrow.circlepath", label: L10n.string("Recently Played"))
+                    self.sidebarRow(.mostPlayed, symbol: "chart.bar", label: L10n.string("Most Played"))
+                    self.sidebarRow(.history, symbol: "clock.badge.checkmark", label: L10n.string("History"))
+                }
+            } header: {
+                SidebarSectionHeader(
+                    title: L10n.string("Recents"),
+                    isExpanded: Binding(
+                        get: { self.vm.sectionExpansion.recents },
+                        set: { self.vm.sectionExpansion.recents = $0 }
+                    )
+                )
+            }
+
+            Section {
+                if self.vm.sectionExpansion.queue {
+                    self.sidebarRow(.upNext, symbol: "list.bullet.indent", label: L10n.string("Up Next"))
+                        .overlay(TrackDropTarget { ids in
+                            Task { await self.vm.addToQueue(trackIDs: ids) }
+                        })
+                        // ADR-006 audit L4: announce that this row is also a drop
+                        // target for tracks dragged from the library.
+                        .accessibilityHint(
+                            L10n.string("Shows the playback queue. Drop tracks here to add them to the end of the queue.")
+                        )
+                }
+            } header: {
+                SidebarSectionHeader(
+                    title: L10n.string("Queue"),
+                    isExpanded: Binding(
+                        get: { self.vm.sectionExpansion.queue },
+                        set: { self.vm.sectionExpansion.queue = $0 }
+                    )
+                )
+            }
+
+            PlaylistSidebarSection(vm: self.vm.playlistSidebar, smartPlaylistService: self.vm.smartPlaylistService)
+        }
+        .listStyle(.sidebar)
+        .frame(minWidth: Theme.sidebarMinWidth)
+        .accessibilityIdentifier(A11y.Sidebar.list)
+        // Playlist-sidebar presentation modifiers MUST live here on the
+        // enclosing `List` rather than on `PlaylistSidebarSection` itself —
+        // SwiftUI replicates modifiers placed on a `Section` once per row,
+        // which caused the new-name sheet to flicker N times.
+        .playlistSidebarPresentations(
+            vm: self.vm.playlistSidebar,
+            smartPlaylistService: self.vm.smartPlaylistService
+        )
+        .confirmationDialog(
+            self.vm.subsonicServerPendingRemoval.map { L10n.string("Remove \u{201C}\($0.name)\u{201D}?") } ?? L10n.string("Remove Server?"),
+            isPresented: Binding(
+                get: { self.vm.subsonicServerPendingRemoval != nil },
+                set: {
+                    if !$0 {
+                        self.vm.subsonicServerPendingRemoval = nil
+                    }
+                }
+            ),
+            titleVisibility: .visible,
+            presenting: self.vm.subsonicServerPendingRemoval
+        ) { _ in
+            Button(L10n.string("Remove Server"), role: .destructive) {
+                Task { await self.vm.confirmRemoveSubsonicServer() }
+            }
+            Button(L10n.string("Cancel"), role: .cancel) {}
+        } message: { _ in
+            Text(localized: "This removes the server and its saved credentials from this Mac. Your music on the server isn't affected.")
+        }
+    }
+
+    // MARK: - Row builder
+
+    private func openAddSource() {
+        self.settingsRouter?.open(.sources)
+        self.openSettings()
+    }
+
+    private func openManageSources() {
+        self.openAddSource()
+    }
+
+    private func refreshServer(_: UUID) {
+        Task { await self.vm.reloadSubsonicServers() }
+    }
+
+    private func testServerConnection(_ id: UUID) {
+        Task { await self.vm.retrySubsonicConnection(serverID: id) }
+    }
+
+    private func editServer(_ id: UUID) {
+        self.settingsRouter?.open(.sources, serverID: id)
+        self.openSettings()
+    }
+
+    private func disableServerInSidebar(_ id: UUID) {
+        Task { await self.vm.setSubsonicServerSidebarVisible(id: id, visible: false) }
+    }
+
+    private func enableServerInSidebar(_ id: UUID) {
+        Task { await self.vm.setSubsonicServerSidebarVisible(id: id, visible: true) }
+    }
+
+    private func removeServer(_ server: SubsonicSidebarServer) {
+        // Stage the server for a confirm-delete dialog rather than navigating
+        // to Settings — the destructive role now performs a real removal (#306).
+        self.vm.subsonicServerPendingRemoval = server
+    }
+
+    private func sidebarRow(_ dest: SidebarDestination, symbol: String, label: String) -> some View {
+        Label(label, systemImage: symbol)
+            .font(Typography.body)
+            .tag(dest)
+            .accessibilityLabel(label)
+            // Without an explicit identifier the tag-selected List rows do
+            // not surface as addressable accessibility elements at all
+            // (they were absent from the AX tree, so VoiceOver and the E2E
+            // menu crawl alike could not reach them). ADR-081.
+            .accessibilityIdentifier(Self.rowIdentifier(for: dest))
+    }
+
+    /// Stable A11y identifier for a fixed sidebar destination row.
+    private static func rowIdentifier(for dest: SidebarDestination) -> String {
+        switch dest {
+        case .songs:
+            A11y.Sidebar.songs
+
+        case .albums:
+            A11y.Sidebar.albums
+
+        case .artists:
+            A11y.Sidebar.artists
+
+        case .genres:
+            A11y.Sidebar.genres
+
+        case .composers:
+            A11y.Sidebar.composers
+
+        case .recentlyAdded:
+            A11y.Sidebar.recentlyAdded
+
+        case .recentlyPlayed:
+            A11y.Sidebar.recentlyPlayed
+
+        case .mostPlayed:
+            A11y.Sidebar.mostPlayed
+
+        case .history:
+            A11y.Sidebar.history
+
+        case .upNext:
+            A11y.Sidebar.upNext
+
+        case .radio:
+            A11y.Sidebar.radio
+
+        case .podcasts:
+            A11y.Sidebar.podcasts
+
+        default:
+            A11y.Sidebar.sidebar
+        }
+    }
+
+    private func folderRow(_ root: LibraryRoot) -> some View {
+        Label {
+            Text(URL(fileURLWithPath: root.path).lastPathComponent)
+                .font(Typography.body)
+                .lineLimit(1)
+        } icon: {
+            Image(systemName: "folder")
+        }
+        .help(root.path)
+        .contextMenu {
+            Button(L10n.string("Remove from Library"), role: .destructive) {
+                if let id = root.id {
+                    Task { await self.vm.removeRoot(id: id) }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,341 @@
+import XCTest
+
+// MARK: - RadioStreamJourneyTests
+
+/// Phase 34: radio journeys against `E2EStreamServer`, a loopback fake ICY
+/// station — the first tier of E2E coverage that exercises a real internet
+/// radio connection (add, play, live title updates, stream details) without
+/// ever touching the internet.
+@MainActor
+final class RadioStreamJourneyTests: XCTestCase {
+    private var session: E2ESession!
+    private var server: E2EStreamServer!
+
+    override func setUp() async throws {
+        continueAfterFailure = false
+        self.session = E2ESession.make(named: self.name.sanitizedTestName)
+        self.server = try E2EStreamServer(
+            stationName: "E2E Dial FM",
+            genre: "Test Genre",
+            initialTitle: "Opening Theme"
+        )
+    }
+
+    override func tearDown() async throws {
+        self.server?.stop()
+    }
+
+    // MARK: - Add by URL
+
+    /// Pastes the fake station's stream URL into Add Station, plays it, and
+    /// asserts the transport strip shows the scripted live ICY title with
+    /// the station name on the artist line — proof the whole pipeline
+    /// (E2EStreamServer's wire format -> FFmpeg's ICY reader -> AudioEngine
+    /// -> NowPlayingViewModel) works end to end.
+    func testAddByURLPlaysAndShowsScriptedTitle() {
+        let app = self.launch()
+        let inv = MenuInvoker(app: app)
+        self.openRadio(app, inv)
+
+        self.addStation(app, inv, name: "E2E Dial FM", streamURL: self.server.streamURL.absoluteString)
+
+        let row = app.staticTexts["E2E Dial FM"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the newly added station never appeared in the list")
+        row.doubleClick()
+
+        XCTAssertTrue(app.waitUntilPlaying(timeout: 15), "the fake stream never started playing")
+
+        // The title element carries `.accessibilityAddTraits(.updatesFrequently)`
+        // (NowPlayingStrip.swift), which bridges its live text to `.value`
+        // rather than `.label` regardless of which modifier set it (found
+        // via an AX tree dump). The artist element is a plain navigation
+        // button labelled "Go to artist <name>", not the bare name, so
+        // match by substring instead of equality.
+        inv.waitFor("strip shows the scripted ICY title", timeout: 20) {
+            inv.value("nowPlayingStrip.title.button") == "Opening Theme"
+        }
+        let artistLabel = inv.label("nowPlayingStrip.subtitle.button") ?? ""
+        XCTAssertTrue(artistLabel.contains("E2E Dial FM"), "artist label was \"\(artistLabel)\"")
+    }
+
+    // MARK: - Stream details
+
+    /// While playing, opens the info sheet from the transport strip and
+    /// asserts the live decoder facts match the fixture, including
+    /// "Now-Playing Titles: Supported" (`supportsIcyMetadata`) — only
+    /// reliable once a real `StreamTitle` has actually landed, per
+    /// `StreamDetails.withObservedTitles()`. Then plays a library track
+    /// instead — there is no user-facing "Stop" for radio, and pausing
+    /// leaves the station as the current queue item — and reopens the
+    /// same station's info from its catalog row (the only path once it's
+    /// no longer current) to assert it shows what was captured on
+    /// connect, offline.
+    func testStreamDetailsShowLiveFactsThenPersistedProfileOffline() {
+        let app = self.launch()
+        let inv = MenuInvoker(app: app)
+        self.openRadio(app, inv)
+        self.addStation(app, inv, name: "E2E Dial FM", streamURL: self.server.streamURL.absoluteString)
+
+        let row = app.staticTexts["E2E Dial FM"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.doubleClick()
+        XCTAssertTrue(app.waitUntilPlaying(timeout: 15), "the fake stream never started playing")
+        inv.waitFor("strip shows the scripted ICY title", timeout: 20) {
+            inv.value("nowPlayingStrip.title.button") == "Opening Theme"
+        }
+
+        inv.element("nowPlayingStrip.info").click()
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5), "info sheet never opened")
+        // These rows carry `.textSelection(.enabled)`, which — like the
+        // strip's updatesFrequently title — bridges content to `.value`
+        // rather than `.label` (found empirically).
+        XCTAssertEqual(inv.value("radio.info.value.nowPlayingTitles"), "Supported")
+        self.assertNotNilAndNotEmpty(inv.value("radio.info.value.codec"), "live codec must be shown while playing")
+        self.assertNotNilAndNotEmpty(
+            inv.value("radio.info.value.sampleRate"),
+            "live sample rate must be shown while playing"
+        )
+        inv.element("radio.info.close").click()
+        inv.waitFor("info sheet closes") { !app.sheets.firstMatch.exists }
+
+        // Pausing the same station leaves it the current queue item —
+        // `nowPlayingRadioStreamURL` stays set, so `liveDetails` stays
+        // non-nil (found empirically: there is no user-facing "Stop"
+        // action for radio, only pause). Playing a library track instead
+        // genuinely clears the station as current, the same way it would
+        // for a real user browsing away to something else.
+        inv.selectSidebar("Songs")
+        app.firstTrackRow.doubleClick()
+        XCTAssertTrue(app.waitUntilPlaying(timeout: 15), "the library track never started playing")
+
+        inv.selectSidebar("Radio")
+        inv.waitFor("on Radio") { app.windows.firstMatch.title == "Radio" }
+        XCTAssertTrue(app.staticTexts["E2E Dial FM"].waitForExistence(timeout: 5))
+        self.openRowInfo(app, inv)
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5), "row info sheet never opened")
+        XCTAssertNil(
+            inv.value("radio.info.value.nowPlayingTitles"),
+            "Now-Playing Titles only applies to a live connection; must be absent once stopped"
+        )
+        self.assertNotNilAndNotEmpty(
+            inv.value("radio.info.value.codec"),
+            "the persisted profile must still show the codec"
+        )
+        self.assertNotNilAndNotEmpty(
+            inv.value("radio.info.value.lastConnected"),
+            "the persisted profile must show when the station last connected"
+        )
+    }
+
+    // MARK: - Playlist-URL indirection
+
+    /// Pastes the fake server's `.m3u` endpoint (not the stream itself)
+    /// into Add Station, asserts the sheet switches to the found-stations
+    /// list showing the scripted station, then Add All and asserts it
+    /// lands in the catalog under the name the playlist gave it.
+    func testPlaylistURLIndirectionOffersFoundStationsForAddAll() {
+        let app = self.launch()
+        let inv = MenuInvoker(app: app)
+        self.openRadio(app, inv)
+
+        inv.element("radio.addStation").click()
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5), "add-station sheet never opened")
+        inv.pasteText(self.server.playlistURL.absoluteString, into: inv.element("radio.sheet.streamURL"))
+        inv.element("radio.sheet.submit").click()
+
+        XCTAssertTrue(inv.element("radio.sheet.foundList").waitForExistence(timeout: 5), "found-stations list never appeared")
+        XCTAssertTrue(inv.element("radio.sheet.foundRow.0").waitForExistence(timeout: 5))
+        // The row's two Text children (name, stream URL) auto-combine into
+        // one element, but only the first survives into its label/value —
+        // the second is dropped entirely (found empirically). The name
+        // alone is enough here: this fixture's playlist has one station.
+        let rowText = (inv.label("radio.sheet.foundRow.0") ?? "") + (inv.value("radio.sheet.foundRow.0") ?? "")
+        XCTAssertTrue(rowText.contains("E2E Dial FM"), "found row was \"\(rowText)\"")
+
+        inv.element("radio.sheet.addAll").click()
+        inv.waitFor("add-station sheet dismisses") { !app.sheets.firstMatch.exists }
+
+        XCTAssertTrue(
+            app.staticTexts["E2E Dial FM"].waitForExistence(timeout: 5),
+            "the playlist's station never landed in the catalog"
+        )
+    }
+
+    // MARK: - Reconnect
+
+    /// Scripts a bare connection drop shorter than the combined FFmpeg
+    /// (`reconnect_max_retries`/`reconnect_delay_max`,
+    /// `FFmpegDecoder+Options.swift`) and app-level
+    /// (`AudioEngine.maxReconnectAttempts`, `AudioEngine+Reconnect.swift`)
+    /// retry budget, then asserts playback resumes on its own and no
+    /// failure alert appears. The server is never told to refuse new
+    /// connections, so the very next reconnect attempt succeeds.
+    func testReconnectRecoversFromAShortDrop() {
+        let app = self.launch()
+        let inv = MenuInvoker(app: app)
+        self.openRadio(app, inv)
+        self.addStation(app, inv, name: "E2E Dial FM", streamURL: self.server.streamURL.absoluteString)
+        app.staticTexts["E2E Dial FM"].doubleClick()
+        XCTAssertTrue(app.waitUntilPlaying(timeout: 15), "the fake stream never started playing")
+        inv.waitFor("strip shows the scripted ICY title", timeout: 20) {
+            inv.value("nowPlayingStrip.title.button") == "Opening Theme"
+        }
+
+        self.server.dropConnections()
+
+        XCTAssertTrue(app.waitUntilPlaying(timeout: 30), "playback never resumed after a short, recoverable drop")
+        XCTAssertFalse(
+            app.alerts.firstMatch.waitForExistence(timeout: 2),
+            "a short, recoverable drop must not surface a failure alert"
+        )
+    }
+
+    /// Scripts a drop combined with the server refusing all new connections
+    /// for well longer than the layered retry budget above could plausibly
+    /// take to exhaust, and asserts the app gives up and surfaces a
+    /// failure toast. Deliberately *not* the "Playback Error" `.alert`
+    /// bound to `LibraryViewModel.playbackErrorMessage` — that only fires
+    /// for the initial `qp.play(items:...)` call throwing synchronously
+    /// (`LibraryViewModel+Radio.swift`). A mid-stream exhaustion instead
+    /// flows `AudioEngine.emit(.failed)` -> `QueuePlayer`'s state
+    /// pass-through -> `NowPlayingViewModel.onPlaybackError` ->
+    /// `LibraryViewModel.showToast(...)`. The `ToastBanner` carries
+    /// `.accessibilityAddTraits(.isStaticText)` (`RootView.swift`), which —
+    /// like `.updatesFrequently`/`.textSelection(.enabled)` elsewhere in
+    /// this suite — bridges its text via `.value`, not `.label`.
+    func testReconnectExhaustionSurfacesAFailureToast() {
+        let app = self.launch()
+        let inv = MenuInvoker(app: app)
+        self.openRadio(app, inv)
+        self.addStation(app, inv, name: "E2E Dial FM", streamURL: self.server.streamURL.absoluteString)
+        app.staticTexts["E2E Dial FM"].doubleClick()
+        XCTAssertTrue(app.waitUntilPlaying(timeout: 15), "the fake stream never started playing")
+        inv.waitFor("strip shows the scripted ICY title", timeout: 20) {
+            inv.value("nowPlayingStrip.title.button") == "Opening Theme"
+        }
+
+        self.server.refuseConnections(for: 180)
+        self.server.dropConnections()
+
+        // Worst case is FFmpeg's own reconnect budget (up to 3 attempts x
+        // (15s read timeout + 5s backoff), FFmpegDecoder+Options.swift)
+        // followed by the app-level rebuild loop (up to 3 attempts x 20s
+        // stabilize window, AudioEngine+Reconnect.swift); give it generous
+        // headroom above that rather than cutting it close.
+        let toastText = "Playback stopped: the audio stream could not be reached."
+        let toast = app.descendants(matching: .any).matching(NSPredicate(format: "value == %@", toastText)).firstMatch
+        XCTAssertTrue(toast.waitForExistence(timeout: 120), "reconnect exhaustion must surface a failure toast")
+    }
+
+    /// Drives a real `NSOpenPanel` end to end: File > Import Playlist… (⌘⌥⇧O)
+    /// opens the sheet, "Choose Files…" opens the panel, ⌘⇧G ("Go to
+    /// Folder") navigates straight to the dial file `E2ESeeder` wrote
+    /// inside the app's own sandbox container — the runner cannot write
+    /// there itself, and the app cannot read anywhere else, so the file's
+    /// path is threaded in via `BOCAN_E2E_DIAL_FILE_URL` rather than the
+    /// test creating it (`E2EEnvironment.swift`/`E2ESeeder.swift`) — and
+    /// Import adds the one HTTP entry as a radio station.
+    func testDialFileImportAddsARadioStation() {
+        let dialFileURL = self.session.home.appendingPathComponent("dial.m3u")
+        let app = self.launch(environment: ["BOCAN_E2E_DIAL_FILE_URL": self.server.streamURL.absoluteString])
+        let inv = MenuInvoker(app: app)
+
+        app.typeKey("o", modifierFlags: [.command, .option, .shift])
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5), "the playlist import sheet never opened")
+
+        let windowCountBeforePanel = app.windows.count
+        inv.element("playlistImport.chooseFiles").click()
+        inv.waitFor("the open panel appears") { app.windows.count > windowCountBeforePanel }
+
+        app.typeKey("g", modifierFlags: [.command, .shift])
+        inv.settle(0.5)
+        app.typeText(dialFileURL.path)
+        app.typeKey(.return, modifierFlags: [])
+        inv.settle(0.5)
+        app.typeKey(.return, modifierFlags: [])
+
+        inv.waitFor("the open panel closes") { app.windows.count == windowCountBeforePanel }
+        inv.waitFor("the Import button is enabled") { inv.element("playlistImport.import").isEnabled }
+        inv.element("playlistImport.import").click()
+        inv.waitFor("the import sheet dismisses") { !app.sheets.firstMatch.exists }
+
+        // A pure-station M3U navigates to Radio and adds the row (no
+        // playlist is created for it) -- both persistent signals, unlike
+        // the 2s-auto-dismissing "Added N radio stations" toast this
+        // asserted on originally; that toast proved flaky to query
+        // reliably (broad `descendants(matching: .any)` value-matching
+        // timed out evaluating against the live AX tree) without adding
+        // any coverage this doesn't already give.
+        inv.waitFor("navigates to Radio after a pure-station import") { app.windows.firstMatch.title == "Radio" }
+        let radioRows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'radio.row.'"))
+        XCTAssertEqual(radioRows.count, 1, "importing the dial file must add exactly one radio station")
+    }
+
+    /// `XCTAssertNotNil` alone would pass on an empty string, which is
+    /// exactly the wrong-property symptom (`.label` on a `.value`-bridged
+    /// element) this suite already found once; require real content.
+    private func assertNotNilAndNotEmpty(
+        _ value: String?,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertTrue(!(value ?? "").isEmpty, message, file: file, line: line)
+    }
+
+    // MARK: - Helpers
+
+    /// Opens the catalog row's info sheet via its right-click "Get Info"
+    /// context menu item — the first item in that menu
+    /// (`RadioView.swift`). A synthetic `.hover()` never reliably revealed
+    /// the row's hover-only info button in testing — a `List` row is
+    /// `NSTableView`-backed, unlike the plain-view hover targets that
+    /// worked directly elsewhere in this suite (found empirically) — so
+    /// "Get Info" was added to the row's context menu as a real,
+    /// hover-independent entry point (also useful for keyboard/rotor
+    /// users, not just automation). Right-click is a raw mouse event
+    /// synthesized at a screen coordinate, so it reaches the real row view
+    /// regardless of `.accessibilityElement(children: .combine)`. Selects
+    /// the item by keyboard rather than `app.menuItems["Get Info"]`: that
+    /// label is reused across several other context/menu-bar items
+    /// elsewhere in the app (Artists, Track Table, Queue, Podcasts, the
+    /// Track menu), so the query matches more than one element.
+    private func openRowInfo(_ app: XCUIApplication, _ inv: MenuInvoker) {
+        inv.elementWithIdentifierPrefix("radio.row.").rightClick()
+        inv.settle(0.3)
+        app.typeKey(.downArrow, modifierFlags: [])
+        inv.settle(0.2)
+        app.typeKey(.return, modifierFlags: [])
+        inv.settle(0.3)
+    }
+
+    private func openRadio(_ app: XCUIApplication, _ inv: MenuInvoker) {
+        inv.selectSidebar("Radio")
+        inv.waitFor("on Radio") { app.windows.firstMatch.title == "Radio" }
+    }
+
+    /// Drives the add-station sheet's form stage to completion; the sheet
+    /// dismisses on success (a `.saved` `AddResolution`). Leaves the
+    /// playlist-indirection (`.found`) case to its own journey.
+    private func addStation(_ app: XCUIApplication, _ inv: MenuInvoker, name: String, streamURL: String) {
+        inv.element("radio.addStation").click()
+        XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 5), "add-station sheet never opened")
+
+        let nameField = inv.element("radio.sheet.name")
+        XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+        inv.pasteText(name, into: nameField)
+
+        inv.pasteText(streamURL, into: inv.element("radio.sheet.streamURL"))
+
+        inv.element("radio.sheet.submit").click()
+        inv.waitFor("add-station sheet dismisses") { !app.sheets.firstMatch.exists }
+    }
+
+    private func launch(environment: [String: String] = [:]) -> XCUIApplication {
+        let app = self.session.launch(environment: environment, arguments: MenuManifest.matrixDefaults)
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.waitForTrackRows(timeout: 60), "fixture scan never produced rows")
+        app.activate()
+        return app
+    }
+}

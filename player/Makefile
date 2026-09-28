@@ -1,0 +1,419 @@
+.PHONY: help bootstrap bundle-fpcalc embed-deps brew-bundle doctor check-swiftlint-version check-swiftformat-version open generate build tests test test-coverage coverage-all test-e2e test-e2e-smoke test-audio-engine test-persistence test-metadata test-library test-acoustics test-ui test-playback test-scrobble test-subsonic test-podcasts test-sync-server test-observability uitest lint format pseudolocale format-check install-hooks clean downloads audit-db data-dictionary vital-signs vital-signs-trend demo demo-gif demo-mp4
+
+# Pinned SwiftLint version. CI installs this exact release; `doctor` fails when
+# the local install differs. SwiftLint's force_unwrapping/superfluous_disable
+# behaviour changed between patch releases (0.63.2 vs 0.63.3), so an unpinned
+# version silently diverges local from CI. Single source of truth: bump the
+# `.swiftlint-version` file and CI follows automatically.
+EXPECTED_SWIFTLINT := $(shell cat .swiftlint-version 2>/dev/null)
+
+# Pinned SwiftFormat version. Same rationale as SwiftLint: formatting rules
+# (e.g. redundantSendable, single-line conditional bodies) shift between
+# releases, so an unpinned local copy reformats unrelated files and diverges
+# from CI. CI installs this exact release and `doctor` fails on a mismatch.
+# Single source of truth: bump `.swiftformat-version` and CI follows.
+EXPECTED_SWIFTFORMAT := $(shell cat .swiftformat-version 2>/dev/null)
+
+# Extra xcodebuild settings injected into `build`/`test`/`test-coverage`. Empty by
+# default, so a local build signs with the team in project.yml. CI runners have
+# no certificate, so every workflow exports this as an environment variable to
+# build ad-hoc signed with no team, and without the keychain-access-groups
+# entitlement (which ad-hoc signing cannot carry without a provisioning profile):
+#   XCB_OVERRIDE='CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= CODE_SIGN_ENTITLEMENTS='
+XCB_OVERRIDE ?=
+
+# Flags for xcbeautify on every xcodebuild pipe. Empty locally, so a build or
+# test run shows its full beautified output. CI exports `--quiet`, so a green
+# run prints only the tasks with warnings or errors, and a failed test still
+# prints in full (#458).
+XCBEAUTIFY_FLAGS ?=
+
+# Flags for `swift test` in the per-module targets. Empty locally. CI exports
+# `-q`, which drops the build progress and the per-test started/passed lines
+# and keeps compiler diagnostics, failures and the run summary (#458).
+SWIFT_TEST_FLAGS ?=
+
+# The workspace SPM pins. Tracked on purpose: without it every build (the
+# release build included) resolves each package to the newest version its
+# range allows. `lint` fails when it is missing or untracked, because 2.19.0
+# shipped unpinned after a commit deleted it and nothing noticed.
+WORKSPACE_RESOLVED := Bocan.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+## tests: Run format, lint, full test matrix — one line per stage, errors shown inline
+tests:
+	@bash Scripts/run-tests.sh
+
+## help: Print all available targets
+help:
+	@grep -E '^## [a-zA-Z0-9_-]+:' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ": "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' | \
+		sed 's/## //'
+
+## bootstrap: Install all tools and git hooks
+bootstrap: brew-bundle install-hooks bundle-fpcalc
+	@echo "✓ Bootstrap complete. Run 'make doctor' to verify."
+
+## bundle-fpcalc: Copy fpcalc + FFmpeg dylibs from Homebrew into Resources/ and relink
+bundle-fpcalc:
+	bash Scripts/build-fpcalc.sh
+	xcodegen generate
+
+## embed-deps: Bundle TagLib/FFmpeg dylibs into a built Bocan.app (post-export; ad-hoc sign)
+## Usage: make embed-deps APP=build/export/Bocan.app
+embed-deps:
+	bash Scripts/embed-deps.sh "$(APP)"
+
+## brew-bundle: Install Brewfile dependencies
+brew-bundle:
+	brew bundle
+
+## doctor: Print tool versions (also run in CI)
+doctor:
+	@echo "=== Bòcan dev environment ==="
+	@swift --version
+	@xcodebuild -version | head -1
+	@swiftlint version
+	@swiftformat --version
+	@xcbeautify --version
+	@xcodegen --version
+	@gh --version | head -1
+	@printf 'ffmpeg     '; ffmpeg -version 2>/dev/null | head -1 || echo '(missing)'
+	@printf 'fpcalc     '; fpcalc -version 2>/dev/null | head -1 || echo '(missing)'
+	@printf 'taglib     '; pkg-config --modversion taglib 2>/dev/null || echo '(missing)'
+	@echo "=============================="
+	@if [ ! -f Brewfile.lock.json ]; then \
+		echo "⚠️  WARNING: Brewfile.lock.json is missing. Run 'brew bundle install' then commit the lock file."; \
+	fi
+	@$(MAKE) -s check-swiftlint-version check-swiftformat-version
+	@Scripts/check-ffmpeg-major.sh
+
+## check-swiftlint-version: Fail unless the installed SwiftLint is the release pinned in .swiftlint-version
+check-swiftlint-version:
+	@actual="$$(swiftlint version 2>/dev/null)"; \
+	if [ -z "$(EXPECTED_SWIFTLINT)" ]; then \
+		echo "⚠️  WARNING: .swiftlint-version is missing; cannot verify the SwiftLint pin."; \
+	elif [ "$$actual" != "$(EXPECTED_SWIFTLINT)" ]; then \
+		echo "✗ SwiftLint version mismatch: have '$$actual', expected '$(EXPECTED_SWIFTLINT)' (.swiftlint-version)."; \
+		echo "  CI pins this exact release; lint results diverge across SwiftLint versions."; \
+		echo "  Install the pinned version, e.g.:  curl -sSL https://github.com/realm/SwiftLint/releases/download/$(EXPECTED_SWIFTLINT)/portable_swiftlint.zip -o /tmp/sl.zip && unzip -o /tmp/sl.zip swiftlint -d /opt/homebrew/bin"; \
+		exit 1; \
+	else \
+		echo "✓ SwiftLint $$actual matches the pin"; \
+	fi
+
+## check-swiftformat-version: Fail unless the installed SwiftFormat is the release pinned in .swiftformat-version
+check-swiftformat-version:
+	@actual="$$(swiftformat --version 2>/dev/null)"; \
+	if [ -z "$(EXPECTED_SWIFTFORMAT)" ]; then \
+		echo "⚠️  WARNING: .swiftformat-version is missing; cannot verify the SwiftFormat pin."; \
+	elif [ "$$actual" != "$(EXPECTED_SWIFTFORMAT)" ]; then \
+		echo "✗ SwiftFormat version mismatch: have '$$actual', expected '$(EXPECTED_SWIFTFORMAT)' (.swiftformat-version)."; \
+		echo "  CI pins this exact release; formatting results diverge across SwiftFormat versions."; \
+		echo "  Install the pinned version, e.g.:  curl -sSL https://github.com/nicklockwood/SwiftFormat/releases/download/$(EXPECTED_SWIFTFORMAT)/swiftformat.zip -o /tmp/sf.zip && unzip -o /tmp/sf.zip swiftformat -d /opt/homebrew/bin"; \
+		exit 1; \
+	else \
+		echo "✓ SwiftFormat $$actual matches the pin"; \
+	fi
+
+## open: Open the Xcode project
+open:
+	@open Bocan.xcodeproj
+
+## generate: Regenerate Bocan.xcodeproj from project.yml
+generate:
+	xcodegen generate
+
+## build: Build the Debug configuration
+build:
+	set -o pipefail && xcodebuild \
+		-project Bocan.xcodeproj \
+		-scheme Bocan \
+		-configuration Debug \
+		-destination 'platform=macOS' \
+		$(XCB_OVERRIDE) \
+		build \
+		| xcbeautify $(XCBEAUTIFY_FLAGS)
+
+## test: Run unit + integration tests (excludes UITests)
+test:
+	@echo "=============================="
+	@echo "= Executing Xcode Test"
+	@echo "=============================="
+	rm -rf build/TestResults.xcresult
+	set -o pipefail && xcodebuild \
+		-project Bocan.xcodeproj \
+		-scheme Bocan \
+		-configuration Debug \
+		-destination 'platform=macOS' \
+		-resultBundlePath build/TestResults.xcresult \
+		-skip-testing:BocanUITests \
+		$(XCB_OVERRIDE) \
+		test \
+		| xcbeautify $(XCBEAUTIFY_FLAGS)
+
+## test-coverage: Run tests and fail if coverage < 80%
+test-coverage:
+	@echo "=============================="
+	@echo "= Executing Coverage Test"
+	@echo "=============================="
+	rm -rf build/TestResults.xcresult
+	set -o pipefail && xcodebuild \
+		-project Bocan.xcodeproj \
+		-scheme Bocan \
+		-configuration Debug \
+		-destination 'platform=macOS' \
+		-resultBundlePath build/TestResults.xcresult \
+		-enableCodeCoverage YES \
+		-skip-testing:BocanUITests \
+		$(XCB_OVERRIDE) \
+		test \
+		| xcbeautify $(XCBEAUTIFY_FLAGS)
+	Scripts/coverage-report.sh build/TestResults.xcresult 80
+
+## test-e2e: Run the whole-app E2E journeys (BocanUITests; launches the app repeatedly)
+test-e2e:
+	@echo "=============================="
+	@echo "= Executing E2E Journeys"
+	@echo "=============================="
+	rm -rf build/E2EResults.xcresult
+	set -o pipefail && xcodebuild \
+		-project Bocan.xcodeproj \
+		-scheme Bocan \
+		-configuration Debug \
+		-destination 'platform=macOS' \
+		-resultBundlePath build/E2EResults.xcresult \
+		-only-testing:BocanUITests \
+		$(XCB_OVERRIDE) \
+		test \
+		| xcbeautify $(XCBEAUTIFY_FLAGS)
+
+# The curated <=10 minute subset for a quick pre-release sanity check: phase 28
+# journeys, the menu structural crawl, one surface, one radio journey, and the
+# track context menu inside an album opened from the grid (the 2.17.1 fault:
+# a right-click that raised nothing). Deliberately excludes the reconnect pair
+# (slow, the flake watch) and hover tooltip checks (quarantinable by design) --
+# those belong in the full `test-e2e` run.
+E2E_SMOKE_TESTS := \
+	-only-testing:BocanUITests/FoundationJourneys \
+	-only-testing:BocanUITests/MenuCrawlTests/testMenuBarMatchesManifest \
+	-only-testing:BocanUITests/ToolbarSurfaceTests/testToolbarSurface \
+	-only-testing:BocanUITests/RadioStreamJourneyTests/testAddByURLPlaysAndShowsScriptedTitle \
+	-only-testing:BocanUITests/BrowseSurfaceTests/testTrackContextMenuOpensInsideAnAlbum
+
+## test-e2e-smoke: Run a curated <=10 minute E2E subset for quick local pre-release checks
+test-e2e-smoke:
+	@echo "=============================="
+	@echo "= Executing E2E Smoke Subset"
+	@echo "=============================="
+	rm -rf build/E2ESmokeResults.xcresult
+	set -o pipefail && xcodebuild \
+		-project Bocan.xcodeproj \
+		-scheme Bocan \
+		-configuration Debug \
+		-destination 'platform=macOS' \
+		-resultBundlePath build/E2ESmokeResults.xcresult \
+		$(E2E_SMOKE_TESTS) \
+		$(XCB_OVERRIDE) \
+		test \
+		| xcbeautify $(XCBEAUTIFY_FLAGS)
+
+## coverage-all: Run SPM module tests with coverage and fail if any module is below threshold
+## Defaults to 70%. Override with COVERAGE_THRESHOLD=NN for a global
+## floor, or COVERAGE_MIN_<MODULE>=NN for a per-module floor (e.g. COVERAGE_MIN_UI=20).
+coverage-all:
+	@echo "=============================="
+	@echo "= Per-module Coverage Gate"
+	@echo "=============================="
+	COVERAGE_MIN_UI=$(or $(COVERAGE_MIN_UI),20) \
+		Scripts/coverage-all.sh $(or $(COVERAGE_THRESHOLD),70)
+
+## test-audio-engine: Run AudioEngine SPM package tests (requires FFmpeg via Homebrew)
+test-audio-engine:
+	@echo "=============================="
+	@echo "= Executing AudioEngine Test"
+	@echo "=============================="
+	cd Modules/AudioEngine && swift test $(SWIFT_TEST_FLAGS)
+
+## test-persistence: Run Persistence SPM package tests
+test-persistence:
+	@echo "=============================="
+	@echo "= Executing Persistence Test"
+	@echo "=============================="
+	cd Modules/Persistence && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-metadata: Run Metadata SPM package tests
+test-metadata:
+	@echo "=============================="
+	@echo "= Executing Metadata Test"
+	@echo "=============================="
+	cd Modules/Metadata && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-library: Run Library SPM package tests
+test-library:
+	@echo "=============================="
+	@echo "= Executing Library Test"
+	@echo "=============================="
+	cd Modules/Library && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-acoustics: Run Acoustics SPM package tests
+test-acoustics:
+	@echo "=============================="
+	@echo "= Executing Acoustics Test"
+	@echo "=============================="
+	cd Modules/Acoustics && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-ui: Run UI SPM package tests
+test-ui:
+	@echo "=============================="
+	@echo "= Executing UI Test"
+	@echo "=============================="
+	cd Modules/UI && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-playback: Run Playback SPM package tests (RouteManager, QueuePlayer, GaplessScheduler, etc.)
+test-playback:
+	@echo "=============================="
+	@echo "= Executing Playback Test"
+	@echo "=============================="
+	cd Modules/Playback && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-scrobble: Run Scrobble SPM package tests
+test-scrobble:
+	@echo "=============================="
+	@echo "= Executing Scrobble Test"
+	@echo "=============================="
+	cd Modules/Scrobble && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-subsonic: Run Subsonic SPM package tests
+test-subsonic:
+	@echo "=============================="
+	@echo "= Executing Subsonic Test"
+	@echo "=============================="
+	cd Modules/Subsonic && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-podcasts: Run Podcasts SPM package tests
+test-podcasts:
+	@echo "=============================="
+	@echo "= Executing Podcasts Test"
+	@echo "=============================="
+	cd Modules/Podcasts && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-sync-server: Run SyncServer SPM package tests
+test-sync-server:
+	@echo "=============================="
+	@echo "= Executing SyncServer Test"
+	@echo "=============================="
+	cd Modules/SyncServer && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## test-observability: Run Observability SPM package tests
+test-observability:
+	@echo "=============================="
+	@echo "= Executing Observability Test"
+	@echo "=============================="
+	cd Modules/Observability && swift test $(SWIFT_TEST_FLAGS) --enable-code-coverage
+
+## uitest: Run UI smoke tests (BocanUITests scheme target)
+uitest:
+	set -o pipefail && xcodebuild \
+		-project Bocan.xcodeproj \
+		-scheme Bocan \
+		-configuration Debug \
+		-destination 'platform=macOS' \
+		-only-testing:BocanUITests \
+		test \
+		| xcbeautify $(XCBEAUTIFY_FLAGS)
+
+## lint: Run SwiftLint (strict, violations only; refuses to run on an unpinned SwiftLint)
+lint: check-swiftlint-version
+	swiftlint lint --strict --quiet
+	@python3 Scripts/audit-help-text.py --summary
+	@python3 Scripts/audit-try-optional.py --summary
+	@python3 Scripts/audit-appkit-imports.py --summary
+	@test -f $(WORKSPACE_RESOLVED) && git ls-files --error-unmatch $(WORKSPACE_RESOLVED) >/dev/null 2>&1 \
+		|| { echo "error: $(WORKSPACE_RESOLVED) is missing or untracked; without it every build resolves unpinned (restore it from git history)"; exit 1; }
+
+## format: Run SwiftFormat (modifies files)
+format: check-swiftformat-version
+	swiftformat .
+
+## pseudolocale: Regenerate the en-XA pseudolocale in the UI String Catalog
+pseudolocale:
+	python3 Scripts/gen-pseudolocale.py
+
+## audit-db: Report dead / default-only / sparse columns in a library DB and columns no Swift code references (DB=path to override)
+audit-db:
+	@src="$${DB:-$$HOME/Library/Containers/io.cloudcauldron.bocan/Data/Library/Application Support/Bocan/library.sqlite}"; \
+	if [ ! -f "$$src" ]; then echo "audit-db: no database at $$src (set DB=/path/to/library.sqlite)"; exit 1; fi; \
+	tmp="$$(mktemp -d)/library.sqlite"; \
+	sqlite3 "$$src" ".backup '$$tmp'" || exit 1; \
+	echo "==> column population ($$src)"; \
+	python3 Scripts/audit-db-schema.py "$$tmp" --treat-empty-as-null; \
+	echo; echo "==> columns with no Swift reference outside migrations and tests"; \
+	python3 Scripts/audit-db-xref.py "$$tmp" Modules --show-files || true; \
+	rm -rf "$$(dirname "$$tmp")"
+
+## data-dictionary: Regenerate docs/data-dictionary.md from a freshly migrated schema plus docs/data-dictionary-notes.json (DB=path to use a real library instead)
+data-dictionary:
+	@tmp="$$(mktemp -d)/schema.sqlite"; \
+	if [ -n "$$DB" ]; then sqlite3 "$$DB" ".backup '$$tmp'" || exit 1; \
+	else swift run --package-path Modules/Persistence -c release bocan-schema "$$tmp" 2>&1 | tail -1 || exit 1; fi; \
+	python3 Scripts/gen-data-dictionary.py "$$tmp"; \
+	rm -rf "$$(dirname "$$tmp")"
+
+## release-preview: Show the version and CHANGELOG section the next release would produce (nothing is written)
+release-preview:
+	@echo "Next version: $$(Scripts/release.sh next)"
+	@echo
+	@Scripts/release.sh preview
+
+## test-scripts: Run the shell script tests under Scripts/tests (CI runs them on Linux)
+test-scripts:
+	@for t in Scripts/tests/*.sh; do bash "$$t" || exit 1; done
+
+## format-check: Run SwiftFormat in lint mode (CI)
+format-check: check-swiftformat-version
+	swiftformat --lint .
+
+## install-hooks: Install git pre-commit hook
+install-hooks:
+	@cp Scripts/pre-commit .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "✓ Pre-commit hook installed"
+
+## clean: Remove derived data and build artefacts
+clean:
+	rm -rf build/ DerivedData/
+	xcodebuild clean -project Bocan.xcodeproj -scheme Bocan 2>/dev/null || true
+
+## downloads: Print GitHub Release DMG download counts (server-side, no client telemetry)
+downloads:
+	@Scripts/release-downloads.sh
+
+## vital-signs: Print the repository vital signs as a markdown table, each row with the command that produced it
+## SLOW=1 adds the clean Release build time and the Periphery scan; RECORD=1 appends the run to docs/vital-signs.csv; LABEL=pre-2.15.0 names it
+vital-signs:
+	@Scripts/vital-signs.sh $(if $(SLOW),--slow,) $(if $(RECORD),--record,) $(if $(LABEL),--label $(LABEL),)
+
+## vital-signs-trend: Show docs/vital-signs.csv as one column per recorded run, with the change and a sparkline (N=6 runs to show, FILTER=text)
+vital-signs-trend:
+	@Scripts/vital-signs-trend.py $(or $(N),6) $(if $(FILTER),--filter "$(FILTER)",)
+
+# The README demo (Scripts/demo/README.md). A private venv keeps PyAutoGUI
+# and PyObjC out of the system Python; it is built on first use.
+DEMO_VENV := build/demo/venv
+
+$(DEMO_VENV)/.stamp: Scripts/demo/requirements.txt
+	python3 -m venv $(DEMO_VENV)
+	$(DEMO_VENV)/bin/pip install -q -r Scripts/demo/requirements.txt
+	@touch $@
+
+## demo: Record the scripted README tour of the installed app to build/demo/demo.mov (DEMO_ARGS=--no-record to rehearse, --settings to add the Settings panes)
+demo: $(DEMO_VENV)/.stamp
+	@$(DEMO_VENV)/bin/python Scripts/demo/tour.py --out build/demo/demo.mov $(DEMO_ARGS)
+
+## demo-gif: Encode build/demo/demo.mov to build/demo/demo.gif (WIDTH=1280, FPS=15)
+demo-gif:
+	@Scripts/demo/encode.sh build/demo/demo.mov build/demo/demo.gif $(or $(WIDTH),1280) $(or $(FPS),15)
+
+## demo-mp4: Encode build/demo/demo.mov to build/demo/demo.mp4 for Facebook and friends (WIDTH=1920, FPS=30)
+demo-mp4:
+	@Scripts/demo/encode-mp4.sh build/demo/demo.mov build/demo/demo.mp4 $(or $(WIDTH),1920) $(or $(FPS),30)

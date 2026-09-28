@@ -1,0 +1,148 @@
+import SwiftUI
+
+// MARK: - VisualizerPane
+
+/// Right-side overlay pane showing the visualizer, mutually exclusive with `LyricsPane`.
+///
+/// Embed this as a trailing overlay inside `BocanRootView`, replacing `LyricsPane`
+/// when `vm.paneVisible` is `true`.
+public struct VisualizerPane: View {
+    // MARK: - Dependencies
+
+    @ObservedObject public var vm: VisualizerViewModel
+
+    public var nowPlayingVM: NowPlayingViewModel
+
+    // MARK: - State
+
+    @AppStorage("visualizer.paneWidth") private var paneWidth: Double = 300
+    @State private var resizeDragStart: Double?
+    @State private var overlayTrigger = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    // MARK: - Init
+
+    public init(vm: VisualizerViewModel, nowPlayingVM: NowPlayingViewModel) {
+        self.vm = vm
+        self.nowPlayingVM = nowPlayingVM
+    }
+
+    // MARK: - Body
+
+    public var body: some View {
+        if self.vm.paneVisible {
+            VStack(spacing: 0) {
+                self.header
+                Divider()
+                ZStack(alignment: .topLeading) {
+                    VisualizerHost(vm: self.vm)
+                    NowPlayingOverlay(
+                        title: self.nowPlayingVM.title,
+                        artist: self.nowPlayingVM.artist,
+                        album: self.nowPlayingVM.album,
+                        fadeAfter: 3,
+                        refreshTrigger: self.overlayTrigger
+                    )
+                    VisualizerControlOverlay(
+                        vm: self.vm,
+                        reduceMotion: self.reduceMotion,
+                        fadeAfter: 3,
+                        refreshTrigger: self.overlayTrigger
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                }
+                .onHover { _ in self.overlayTrigger += 1 }
+            }
+            .frame(width: self.paneWidth)
+            // ignoresSafeAreaEdges: [] — the ShapeStyle background form
+            // defaults to .all, which paints the black up through the top
+            // safe area, i.e. under the toolbar and native tab strip in a
+            // regular window (fullscreen has no top safe area, hiding the
+            // bug there). The pane must stay inside its own frame.
+            .background(Color.black, ignoresSafeAreaEdges: [])
+            .overlay(alignment: .leading) {
+                HStack(spacing: 0) {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(width: 6)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                                .onChanged { value in
+                                    if self.resizeDragStart == nil {
+                                        self.resizeDragStart = self.paneWidth
+                                    }
+                                    let newWidth = (self.resizeDragStart ?? self.paneWidth) - value.translation.width
+                                    self.paneWidth = max(220, min(600, newWidth))
+                                }
+                                .onEnded { _ in self.resizeDragStart = nil }
+                        )
+                        .onHover { hovering in
+                            if hovering {
+                                NSCursor.resizeLeftRight.push()
+                            } else {
+                                NSCursor.pop()
+                            }
+                        }
+                    Divider()
+                }
+            }
+            // .contain, not the default: setting both a label and an
+            // identifier on a compound container implicitly combines its
+            // children, silently overriding their own separately-set
+            // identifiers (the close button's, the host's, the mode/palette
+            // steppers') with this one (ADR-084).
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(A11y.Visualizer.pane)
+            .accessibilityLabel(L10n.string("Visualizer pane, \(self.vm.mode.displayName)"))
+            .transition(self.reduceMotion ? .opacity : .move(edge: .trailing))
+            .onAppear { self.vm.start() }
+            .onDisappear { self.vm.stop() }
+        }
+    }
+
+    // MARK: - Sub-views
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text(localized: "Visualizer")
+                .font(.headline)
+                .foregroundStyle(.white)
+                .accessibilityAddTraits(.isHeader)
+
+            Spacer()
+
+            Button {
+                self.openWindow(id: "visualizer-fullscreen")
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .help(L10n.string("Open fullscreen visualizer (⌘⇧F)"))
+            .accessibilityLabel(L10n.string("Open fullscreen visualizer"))
+
+            Button {
+                if self.reduceMotion {
+                    self.vm.paneVisible = false
+                } else {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        self.vm.paneVisible = false
+                    }
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .help(L10n.string("Close visualizer pane"))
+            .accessibilityLabel(L10n.string("Close visualizer pane"))
+            .accessibilityIdentifier(A11y.Visualizer.closeButton)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.black, ignoresSafeAreaEdges: [])
+    }
+
+    @Environment(\.openWindow) private var openWindow
+}

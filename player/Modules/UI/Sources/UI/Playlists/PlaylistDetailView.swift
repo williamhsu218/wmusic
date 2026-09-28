@@ -1,0 +1,112 @@
+import AppKit
+import Library
+import Persistence
+import SwiftUI
+
+// MARK: - PlaylistDetailView
+
+/// Main content for a selected playlist.  Shows the header, an ordered
+/// list of tracks using the shared TracksView component, and a drop target
+/// for adding tracks by drag-and-drop.
+public struct PlaylistDetailView: View {
+    @StateObject private var vm: PlaylistDetailViewModel
+    @ObservedObject public var library: LibraryViewModel
+    public let playlistID: Int64
+
+    public init(playlistID: Int64, library: LibraryViewModel, service: PlaylistService) {
+        self.playlistID = playlistID
+        self.library = library
+        self._vm = StateObject(
+            wrappedValue: PlaylistDetailViewModel(service: service, database: library.database)
+        )
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            PlaylistHeader(
+                title: self.vm.title,
+                trackCount: self.vm.trackCount,
+                duration: self.vm.totalDuration,
+                accent: self.accentColour,
+                coverImage: self.userCoverImage,
+                mosaicImage: self.vm.mosaicImage,
+                playAction: { Task { await self.playAll() } },
+                shuffleAction: { Task { await self.playShuffled() } }
+            )
+
+            Group {
+                if self.vm.isLoading {
+                    LoadingState()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if self.vm.tracks.isEmpty {
+                    EmptyState(
+                        symbol: "music.note.list",
+                        title: L10n.string("Empty Playlist"),
+                        message: L10n.string("Drag tracks here, or use \"Add to Playlist\" from the Songs view.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    TracksView(
+                        vm: self.library.tracks,
+                        library: self.library,
+                        sortable: true,
+                        supportsManualOrder: self.vm.playlist?.kind == .manual,
+                        removeFromPlaylist: { [weak vm] tracks in
+                            guard let vm else { return }
+                            var offsets = IndexSet()
+                            for (idx, t) in vm.tracks.enumerated()
+                                where tracks.contains(where: { $0.id == t.id && $0.id != nil }) {
+                                offsets.insert(idx)
+                            }
+                            guard !offsets.isEmpty else { return }
+                            Task { await vm.remove(at: offsets) }
+                        },
+                        onMove: self.vm.playlist?.kind == .manual
+                            ? { [weak vm] source, destination in
+                                guard let vm else { return }
+                                Task { await vm.move(from: source, to: destination) }
+                            }
+                            : nil
+                    )
+                    .tint(self.accentColour ?? Color.accentColor)
+                }
+            }
+            .overlay(
+                TrackDropTarget { ids in
+                    Task { await self.vm.addTracks(ids) }
+                }
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier(A11y.PlaylistDetail.view)
+        .task(id: self.playlistID) {
+            await self.vm.load(playlistID: self.playlistID)
+            self.library.tracks.setTracks(self.vm.tracks, preserveOrder: true)
+        }
+        .onChange(of: self.vm.tracks.map(\.id)) { _, _ in
+            self.library.tracks.setTracks(self.vm.tracks, preserveOrder: true)
+        }
+    }
+
+    // MARK: - Actions
+
+    private func playAll() async {
+        await self.library.play(tracks: self.vm.tracks, fromPlaylistID: self.playlistID, startingAt: 0)
+    }
+
+    private func playShuffled() async {
+        guard !self.vm.tracks.isEmpty else { return }
+        await self.library.play(tracks: self.vm.tracks, fromPlaylistID: self.playlistID, shuffle: true)
+    }
+
+    private var accentColour: Color? {
+        guard let hex = self.vm.playlist?.accentColor else { return nil }
+        return Color(hex: hex)
+    }
+
+    /// `NSImage` loaded from the user-set `coverArtPath`, or `nil` if not set.
+    private var userCoverImage: NSImage? {
+        guard let path = self.vm.playlist?.coverArtPath else { return nil }
+        return NSImage(contentsOfFile: path)
+    }
+}

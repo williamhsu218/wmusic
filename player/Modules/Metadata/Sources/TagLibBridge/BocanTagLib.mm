@@ -1,0 +1,611 @@
+#import "BocanTagLib.h"
+
+// TagLib 2.x headers — included in a plain .mm so the ObjC++ compiler
+// handles the C++ includes; no Swift translation unit ever sees these.
+#include <taglib.h>
+#include <fileref.h>
+#include <tag.h>
+#include <tpropertymap.h>
+#include <tvariant.h>
+#include <audioproperties.h>
+#include <tfilestream.h>
+#include <tstring.h>
+#include <tstringlist.h>
+
+// Format-specific AudioProperties subclasses that expose bitsPerSample().
+#include <aiffproperties.h>
+#include <apeproperties.h>
+#include <dsdiffproperties.h>
+#include <dsfproperties.h>
+#include <flacproperties.h>
+#include <mp4properties.h>
+#include <trueaudioproperties.h>
+#include <wavpackproperties.h>
+#include <wavproperties.h>
+
+#include <cmath>
+
+/// TagLib's MP4 codec as the short name `BOCTags.mp4Codec` carries (#529).
+static NSString *mp4CodecName(TagLib::MP4::Properties::Codec codec) {
+    switch (codec) {
+        case TagLib::MP4::Properties::AAC:  return @"aac";
+        case TagLib::MP4::Properties::ALAC: return @"alac";
+        case TagLib::MP4::Properties::AC3:  return @"ac3";
+        case TagLib::MP4::Properties::EAC3: return @"eac3";
+        case TagLib::MP4::Properties::FLAC: return @"flac";
+        case TagLib::MP4::Properties::DTS:  return @"dts";
+        case TagLib::MP4::Properties::Opus: return @"opus";
+        default:                            return @"unknown";
+    }
+}
+#include <exception>
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// The "N" of an "n/N" track or disc string, or nil when there is no slash
+/// or nothing numeric follows it.
+static NSString *totalAfterSlash(NSString *value) {
+    if (!value) return nil;
+    NSRange slash = [value rangeOfString:@"/"];
+    if (slash.location == NSNotFound) return nil;
+    NSString *rest = [[value substringFromIndex:slash.location + 1]
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    return rest.integerValue > 0 ? rest : nil;
+}
+
+/// Bit depth for formats whose AudioProperties subclass carries it.
+///
+/// The base `TagLib::AudioProperties` has no bitsPerSample(), so this
+/// tries each lossless / PCM subclass in turn. Lossy formats (MP3, AAC,
+/// Vorbis, Opus) have no meaningful bit depth and return 0 ("unknown");
+/// MP4 is gated on the ALAC codec for the same reason, since the AAC
+/// sample entry nominally claims 16 bits.
+static int bitsPerSample(const TagLib::AudioProperties *ap) {
+    if (!ap) return 0;
+    if (auto *p = dynamic_cast<const TagLib::FLAC::Properties *>(ap))       return p->bitsPerSample();
+    if (auto *p = dynamic_cast<const TagLib::RIFF::WAV::Properties *>(ap))  return p->bitsPerSample();
+    if (auto *p = dynamic_cast<const TagLib::RIFF::AIFF::Properties *>(ap)) return p->bitsPerSample();
+    if (auto *p = dynamic_cast<const TagLib::APE::Properties *>(ap))        return p->bitsPerSample();
+    if (auto *p = dynamic_cast<const TagLib::WavPack::Properties *>(ap))    return p->bitsPerSample();
+    if (auto *p = dynamic_cast<const TagLib::TrueAudio::Properties *>(ap))  return p->bitsPerSample();
+    if (auto *p = dynamic_cast<const TagLib::DSF::Properties *>(ap))        return p->bitsPerSample();
+    if (auto *p = dynamic_cast<const TagLib::DSDIFF::Properties *>(ap))     return p->bitsPerSample();
+    if (auto *p = dynamic_cast<const TagLib::MP4::Properties *>(ap)) {
+        return p->codec() == TagLib::MP4::Properties::ALAC ? p->bitsPerSample() : 0;
+    }
+    return 0;
+}
+
+static NSString *_Nullable tagStringToNS(const TagLib::String &s) {
+    if (s.isEmpty()) return nil;
+    // TagLib stores Unicode, so UTF-8 is normally the correct lossless form.
+    if (NSString *utf8 = [NSString stringWithUTF8String:s.toCString(true)]) {
+        return utf8;
+    }
+    // Some files carry Latin-1 bytes in a frame mis-declared as UTF-8 (and ID3v1
+    // has no encoding field at all). When the UTF-8 conversion fails, recover the
+    // raw 8-bit form decoded as Latin-1 so the tag is not silently dropped to nil
+    // (issue #259). Latin-1 maps every byte, so this never itself returns nil.
+    const std::string latin1 = s.to8Bit(false);
+    return [[NSString alloc] initWithBytes:latin1.data()
+                                    length:latin1.size()
+                                  encoding:NSISOLatin1StringEncoding];
+}
+
+static NSString *_Nullable firstValue(const TagLib::PropertyMap &props,
+                                      const char *key) {
+    TagLib::String k(key);
+    if (props.contains(k)) {
+        const auto &list = props[k];
+        if (!list.isEmpty()) {
+            return tagStringToNS(list.front());
+        }
+    }
+    return nil;
+}
+
+// TagLib normalises the compilation flag (ID3 TCMP, MP4 cpil, Vorbis
+// COMPILATION) to the "COMPILATION" property. Treat 1/true/yes as set.
+static BOOL parseCompilation(const TagLib::PropertyMap &props) {
+    NSString *raw = firstValue(props, "COMPILATION");
+    if (!raw) return NO;
+    NSString *v = [[raw stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+    return [v isEqualToString:@"1"] || [v isEqualToString:@"true"] || [v isEqualToString:@"yes"];
+}
+
+static double replayGainDB(const TagLib::PropertyMap &props, const char *key) {
+    NSString *raw = firstValue(props, key);
+    if (!raw) return NAN;
+    // Format: "-3.21 dB" or "-3.21" (strip suffix)
+    NSString *trimmed = [[raw stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceCharacterSet]]
+        componentsSeparatedByString:@" "].firstObject ?: raw;
+    double v = trimmed.doubleValue;
+    return v;
+}
+
+static double replayGainPeak(const TagLib::PropertyMap &props, const char *key) {
+    NSString *raw = firstValue(props, key);
+    if (!raw) return NAN;
+    double v = raw.doubleValue;
+    return (v == 0.0 && ![raw hasPrefix:@"0"]) ? NAN : v;
+}
+
+/// EBU R128 Q7.8 fixed-point → dB
+static double r128Gain(const TagLib::PropertyMap &props, const char *key) {
+    NSString *raw = firstValue(props, key);
+    if (!raw) return NAN;
+    long long q = raw.longLongValue;
+    // 0x7FFF sentinel (TagLib default "not set") → NAN
+    if (q == 0x7FFF) return NAN;
+    return (double)q / 256.0;
+}
+
+// ---------------------------------------------------------------------------
+// BOCCoverArt
+// ---------------------------------------------------------------------------
+
+@implementation BOCCoverArt
+- (instancetype)initWithData:(NSData *)data
+                    mimeType:(NSString *)mimeType
+                 pictureType:(NSInteger)pictureType {
+    self = [super init];
+    if (self) {
+        _data = data;
+        _mimeType = [mimeType copy];
+        _pictureType = pictureType;
+    }
+    return self;
+}
+@end
+
+// ---------------------------------------------------------------------------
+// BOCTags
+// ---------------------------------------------------------------------------
+
+@implementation BOCTags
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _coverArt = @[];
+        _extendedTags = @{};
+        _replaygainTrackGain = NAN;
+        _replaygainTrackPeak = NAN;
+        _replaygainAlbumGain = NAN;
+        _replaygainAlbumPeak = NAN;
+        _r128TrackGain = NAN;
+        _r128AlbumGain = NAN;
+    }
+    return self;
+}
+@end
+
+// ---------------------------------------------------------------------------
+// BOCTagLibBridge
+// ---------------------------------------------------------------------------
+
+@implementation BOCTagLibBridge
+
++ (nullable BOCTags *)readTagsFromPath:(NSString *)path
+                                 error:(NSError *__autoreleasing _Nullable *)outError {
+    try {
+    // Open read-only. `FileRef(path)` defaults to a read-write stream, and on
+    // quarantined files macOS rewrites the quarantine/provenance metadata on
+    // every write-intent open (even with zero bytes written). That metadata
+    // change emits a fresh FSEvents event, which re-triggers the library
+    // rescan that called this reader: a self-sustaining feedback loop.
+    // Reading must never open with write intent. The stream must outlive
+    // `fileRef`; FileRef does not take ownership.
+    TagLib::FileStream stream([path fileSystemRepresentation], /* openReadOnly */ true);
+    TagLib::FileRef fileRef(
+        &stream,
+        /* readAudioProperties */ true,
+        TagLib::AudioProperties::Accurate
+    );
+
+    if (fileRef.isNull() || !fileRef.tag()) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"io.cloudcauldron.bocan.metadata"
+                                           code:1
+                                       userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"TagLib could not open file: %@", path]
+            }];
+        }
+        return nil;
+    }
+
+    BOCTags *tags = [[BOCTags alloc] init];
+
+    // -----------------------------------------------------------------------
+    // Basic tag fields
+    // -----------------------------------------------------------------------
+    auto *tag = fileRef.tag();
+    tags.title  = tagStringToNS(tag->title());
+    tags.artist = tagStringToNS(tag->artist());
+    tags.album  = tagStringToNS(tag->album());
+    tags.genre  = tagStringToNS(tag->genre());
+    tags.comment = tagStringToNS(tag->comment());
+    tags.year   = (NSInteger)tag->year();
+    // Raw date/year string (preserves values TagLib's numeric year() strips,
+    // e.g. "1979-1980", "1974-05", ISO timestamps).
+    {
+        NSString *d = firstValue(fileRef.properties(), "DATE");
+        if (!d) d = firstValue(fileRef.properties(), "ORIGINALDATE");
+        if (!d) d = firstValue(fileRef.properties(), "YEAR");
+        tags.dateText = d;
+    }
+    tags.trackNumber = (NSInteger)tag->track();
+
+    // -----------------------------------------------------------------------
+    // PropertyMap (extended tags)
+    // -----------------------------------------------------------------------
+    TagLib::PropertyMap props = fileRef.properties();
+
+    tags.albumArtist    = firstValue(props, "ALBUMARTIST");
+    tags.isCompilation  = parseCompilation(props);
+    tags.composer       = firstValue(props, "COMPOSER");
+    tags.sortTitle      = firstValue(props, "TITLESORT");
+    tags.sortArtist     = firstValue(props, "ARTISTSORT");
+    tags.sortAlbumArtist = firstValue(props, "ALBUMARTISTSORT");
+    tags.sortAlbum      = firstValue(props, "ALBUMSORT");
+    tags.lyrics         = firstValue(props, "LYRICS");
+    // Musical key: TagLib maps ID3 TKEY and the MP4 atom to INITIALKEY, but a
+    // bare KEY Vorbis comment (Picard, Mixed In Key on FLAC / Ogg) is passed
+    // through as-is (issue #407).
+    tags.key            = firstValue(props, "INITIALKEY");
+    if (!tags.key) tags.key = firstValue(props, "KEY");
+    tags.isrc           = firstValue(props, "ISRC");
+    // MusicBrainz release-group primary type (issue #403). Picard writes
+    // RELEASETYPE multi-valued with the primary type first and secondaries
+    // (compilation, live, ...) after; TagLib maps the ID3 TXXX and MP4 atoms
+    // to the same key. The full list survives in extendedTags.
+    tags.releaseType    = firstValue(props, "RELEASETYPE");
+    if (!tags.releaseType) tags.releaseType = firstValue(props, "MUSICBRAINZ_ALBUMTYPE");
+
+    // BPM
+    NSString *bpmStr = firstValue(props, "BPM");
+    tags.bpm = bpmStr ? bpmStr.doubleValue : 0.0;
+
+    // Track / disc totals. Vorbis-family tags carry them as separate keys;
+    // ID3v2 TRCK / TPOS and MP4 trkn / disk surface in the PropertyMap as a
+    // combined "n/N" TRACKNUMBER / DISCNUMBER, so fall back to the part after
+    // the slash (issue #404). integerValue stops at the slash, so the number
+    // half is unaffected either way.
+    NSString *trackTotalStr = firstValue(props, "TRACKTOTAL");
+    if (!trackTotalStr) trackTotalStr = firstValue(props, "TOTALTRACKS");
+    if (!trackTotalStr) trackTotalStr = totalAfterSlash(firstValue(props, "TRACKNUMBER"));
+    tags.trackTotal = trackTotalStr ? (NSInteger)trackTotalStr.integerValue : 0;
+
+    NSString *discNumberStr = firstValue(props, "DISCNUMBER");
+    tags.discNumber = discNumberStr ? (NSInteger)discNumberStr.integerValue : 0;
+    NSString *discTotalStr  = firstValue(props, "DISCTOTAL");
+    if (!discTotalStr) discTotalStr = firstValue(props, "TOTALDISCS");
+    if (!discTotalStr) discTotalStr = totalAfterSlash(discNumberStr);
+    tags.discTotal  = discTotalStr  ? (NSInteger)discTotalStr.integerValue  : 0;
+
+    // MusicBrainz. Key naming follows the Picard convention and is deliberately
+    // counter-intuitive: the historical MUSICBRAINZ_TRACKID tag stores the
+    // *recording* MBID, while MUSICBRAINZ_RELEASETRACKID stores the
+    // track-in-release MBID.
+    tags.musicbrainzRecordingID   = firstValue(props, "MUSICBRAINZ_TRACKID");
+    tags.musicbrainzTrackID       = firstValue(props, "MUSICBRAINZ_RELEASETRACKID");
+    tags.musicbrainzArtistID      = firstValue(props, "MUSICBRAINZ_ARTISTID");
+    tags.musicbrainzAlbumArtistID = firstValue(props, "MUSICBRAINZ_ALBUMARTISTID");
+    tags.musicbrainzReleaseID     = firstValue(props, "MUSICBRAINZ_ALBUMID");
+    tags.musicbrainzReleaseGroupID = firstValue(props, "MUSICBRAINZ_RELEASEGROUPID");
+
+    // ReplayGain
+    tags.replaygainTrackGain = replayGainDB(props,   "REPLAYGAIN_TRACK_GAIN");
+    tags.replaygainTrackPeak = replayGainPeak(props, "REPLAYGAIN_TRACK_PEAK");
+    tags.replaygainAlbumGain = replayGainDB(props,   "REPLAYGAIN_ALBUM_GAIN");
+    tags.replaygainAlbumPeak = replayGainPeak(props, "REPLAYGAIN_ALBUM_PEAK");
+
+    // EBU R128 (stored as Q7.8 integer strings)
+    tags.r128TrackGain = r128Gain(props, "R128_TRACK_GAIN");
+    tags.r128AlbumGain = r128Gain(props, "R128_ALBUM_GAIN");
+
+    // -----------------------------------------------------------------------
+    // Full PropertyMap → NSDictionary<NSString *, NSArray<NSString *> *>
+    // Captures multi-valued tags (Vorbis comments / ID3v2.4) that the flat
+    // BOCTags fields cannot represent.
+    // -----------------------------------------------------------------------
+    {
+        NSMutableDictionary<NSString *, NSArray<NSString *> *> *ext =
+            [NSMutableDictionary dictionaryWithCapacity:props.size()];
+        for (auto it = props.begin(); it != props.end(); ++it) {
+            NSString *key = tagStringToNS(it->first);
+            if (!key || key.length == 0) continue;
+            const TagLib::StringList &values = it->second;
+            NSMutableArray<NSString *> *arr =
+                [NSMutableArray arrayWithCapacity:values.size()];
+            for (const auto &v : values) {
+                NSString *s = tagStringToNS(v);
+                if (s) [arr addObject:s];
+            }
+            if (arr.count > 0) ext[key] = [arr copy];
+        }
+        tags.extendedTags = [ext copy];
+    }
+
+    // -----------------------------------------------------------------------
+    // Cover art (TagLib 2.0 complexProperties API)
+    // -----------------------------------------------------------------------
+    auto pictureList = fileRef.complexProperties("PICTURE");
+    NSMutableArray<BOCCoverArt *> *arts = [NSMutableArray array];
+    for (const auto &pic : pictureList) {
+        // data
+        NSData *imgData = nil;
+        if (pic.contains(TagLib::String("data"))) {
+            const auto &v = pic[TagLib::String("data")];
+            auto byteVec = v.value<TagLib::ByteVector>();
+            imgData = [NSData dataWithBytes:byteVec.data() length:byteVec.size()];
+        }
+        if (!imgData || imgData.length == 0) continue;
+
+        // mimeType
+        NSString *mime = @"image/jpeg";
+        if (pic.contains(TagLib::String("mimeType"))) {
+            const auto &mv = pic[TagLib::String("mimeType")];
+            NSString *ms = tagStringToNS(mv.value<TagLib::String>());
+            if (ms.length > 0) mime = ms;
+        }
+
+        // pictureType (0 = Other, 3 = Front Cover)
+        NSInteger picType = 0;
+        if (pic.contains(TagLib::String("pictureType"))) {
+            const auto &tv = pic[TagLib::String("pictureType")];
+            picType = (NSInteger)tv.value<int>();
+        }
+
+        [arts addObject:[[BOCCoverArt alloc] initWithData:imgData
+                                                 mimeType:mime
+                                              pictureType:picType]];
+    }
+    tags.coverArt = [arts copy];
+
+    // -----------------------------------------------------------------------
+    // Audio properties
+    // -----------------------------------------------------------------------
+    if (auto *ap = fileRef.audioProperties()) {
+        tags.duration   = ap->lengthInSeconds();
+        tags.sampleRate = ap->sampleRate();
+        tags.bitrate    = ap->bitrate();
+        tags.channels   = ap->channels();
+        if (auto *mp4 = dynamic_cast<const TagLib::MP4::Properties *>(ap)) {
+            tags.mp4Codec = mp4CodecName(mp4->codec());
+        }
+        // bitDepth lives on the format-specific subclasses, not the base
+        // class (issue #405). Fall back to a BITSPERSAMPLE tag, which a few
+        // taggers write, only when the container gave us nothing.
+        NSInteger depth = bitsPerSample(ap);
+        if (depth <= 0) {
+            NSString *bdStr = firstValue(props, "BITSPERSAMPLE");
+            depth = bdStr ? (NSInteger)bdStr.integerValue : 0;
+        }
+        tags.bitDepth = depth > 0 ? depth : 0;
+    }
+
+    return tags;
+    } catch (const std::exception &e) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"io.cloudcauldron.bocan.metadata"
+                                            code:10
+                                        userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"TagLib threw std::exception while reading %@: %s",
+                    path, e.what()]
+            }];
+        }
+        return nil;
+    } catch (...) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"io.cloudcauldron.bocan.metadata"
+                                            code:11
+                                        userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"TagLib threw an unknown C++ exception while reading %@",
+                    path]
+            }];
+        }
+        return nil;
+    }
+}
+
+@end
+
+// ---------------------------------------------------------------------------
+// BOCTagWriter
+// ---------------------------------------------------------------------------
+
+@implementation BOCTagWriter
+
++ (BOOL)writeTagsToPath:(NSString *)path
+                   tags:(BOCTags *)tags
+                  error:(NSError *__autoreleasing _Nullable *)outError {
+    try {
+    TagLib::FileRef fileRef([path fileSystemRepresentation]);
+
+    if (fileRef.isNull() || !fileRef.tag()) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"io.cloudcauldron.bocan.metadata"
+                                           code:2
+                                       userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"TagLib cannot open file for writing: %@", path]
+            }];
+        }
+        return NO;
+    }
+
+    // -----------------------------------------------------------------------
+    // Basic tag fields (TagLib primary tag interface)
+    // -----------------------------------------------------------------------
+    auto *tag = fileRef.tag();
+    if (tags.title)           tag->setTitle(TagLib::String(tags.title.UTF8String, TagLib::String::UTF8));
+    if (tags.artist)          tag->setArtist(TagLib::String(tags.artist.UTF8String, TagLib::String::UTF8));
+    if (tags.album)           tag->setAlbum(TagLib::String(tags.album.UTF8String, TagLib::String::UTF8));
+    if (tags.genre)           tag->setGenre(TagLib::String(tags.genre.UTF8String, TagLib::String::UTF8));
+    if (tags.comment)         tag->setComment(TagLib::String(tags.comment.UTF8String, TagLib::String::UTF8));
+    if (tags.year > 0)        tag->setYear((unsigned int)tags.year);
+    if (tags.trackNumber > 0) tag->setTrack((unsigned int)tags.trackNumber);
+
+    // -----------------------------------------------------------------------
+    // Extended tags via PropertyMap
+    // -----------------------------------------------------------------------
+    TagLib::PropertyMap props = fileRef.properties();
+
+    // Set a property when the value is non-empty; erase the key when it is nil.
+    // Every writer does a full read-modify-write (TagReader → mutate → TagWriter),
+    // so a nil field always means "absent or explicitly cleared", never "leave
+    // whatever the file had" — without the erase, clearing a field was a no-op.
+    auto setProp = [&](const char *key, NSString *value) {
+        if (value.length > 0) {
+            props[TagLib::String(key)] = TagLib::StringList(
+                TagLib::String(value.UTF8String, TagLib::String::UTF8));
+        } else {
+            props.erase(TagLib::String(key));
+        }
+    };
+
+    setProp("ALBUMARTIST",      tags.albumArtist);
+    setProp("COMPOSER",         tags.composer);
+    setProp("TITLESORT",        tags.sortTitle);
+    setProp("ARTISTSORT",       tags.sortArtist);
+    setProp("ALBUMARTISTSORT",  tags.sortAlbumArtist);
+    setProp("ALBUMSORT",        tags.sortAlbum);
+    setProp("LYRICS",           tags.lyrics);
+    // Write the key back under whichever name the file already uses so a
+    // Vorbis file tagged with KEY does not grow a duplicate INITIALKEY.
+    {
+        BOOL usesBareKey = props.contains("KEY") && !props.contains("INITIALKEY");
+        setProp(usesBareKey ? "KEY" : "INITIALKEY", tags.key);
+    }
+    setProp("ISRC",             tags.isrc);
+    // RELEASETYPE: replace only the primary (first) value so Picard's
+    // secondary types stay; never erase the key from a single nil field.
+    if (tags.releaseType.length > 0) {
+        TagLib::String key("RELEASETYPE");
+        TagLib::StringList list = props.contains(key) ? props[key] : TagLib::StringList();
+        TagLib::String primary(tags.releaseType.UTF8String, TagLib::String::UTF8);
+        if (list.isEmpty()) {
+            list.append(primary);
+        } else {
+            list[0] = primary;
+        }
+        props[key] = list;
+    }
+
+    if (tags.bpm > 0) {
+        NSString *bpmStr = [NSString stringWithFormat:@"%.0f", tags.bpm];
+        props["BPM"] = TagLib::StringList(TagLib::String(bpmStr.UTF8String));
+    }
+    if (tags.trackTotal > 0) {
+        props["TRACKTOTAL"] = TagLib::StringList(TagLib::String(
+            [NSString stringWithFormat:@"%ld", (long)tags.trackTotal].UTF8String));
+    }
+    if (tags.discNumber > 0) {
+        props["DISCNUMBER"] = TagLib::StringList(TagLib::String(
+            [NSString stringWithFormat:@"%ld", (long)tags.discNumber].UTF8String));
+    }
+    if (tags.discTotal > 0) {
+        props["DISCTOTAL"] = TagLib::StringList(TagLib::String(
+            [NSString stringWithFormat:@"%ld", (long)tags.discTotal].UTF8String));
+    }
+
+    // MusicBrainz — same Picard-convention key naming as the read side above:
+    // MUSICBRAINZ_TRACKID carries the recording MBID.
+    setProp("MUSICBRAINZ_TRACKID",        tags.musicbrainzRecordingID);
+    setProp("MUSICBRAINZ_RELEASETRACKID", tags.musicbrainzTrackID);
+    setProp("MUSICBRAINZ_ARTISTID",       tags.musicbrainzArtistID);
+    setProp("MUSICBRAINZ_ALBUMARTISTID",  tags.musicbrainzAlbumArtistID);
+    setProp("MUSICBRAINZ_ALBUMID",        tags.musicbrainzReleaseID);
+    setProp("MUSICBRAINZ_RELEASEGROUPID", tags.musicbrainzReleaseGroupID);
+
+    // ReplayGain
+    if (!std::isnan(tags.replaygainTrackGain)) {
+        NSString *v = [NSString stringWithFormat:@"%.2f dB", tags.replaygainTrackGain];
+        props["REPLAYGAIN_TRACK_GAIN"] = TagLib::StringList(TagLib::String(v.UTF8String));
+    }
+    if (!std::isnan(tags.replaygainTrackPeak)) {
+        NSString *v = [NSString stringWithFormat:@"%.8f", tags.replaygainTrackPeak];
+        props["REPLAYGAIN_TRACK_PEAK"] = TagLib::StringList(TagLib::String(v.UTF8String));
+    }
+    if (!std::isnan(tags.replaygainAlbumGain)) {
+        NSString *v = [NSString stringWithFormat:@"%.2f dB", tags.replaygainAlbumGain];
+        props["REPLAYGAIN_ALBUM_GAIN"] = TagLib::StringList(TagLib::String(v.UTF8String));
+    }
+    if (!std::isnan(tags.replaygainAlbumPeak)) {
+        NSString *v = [NSString stringWithFormat:@"%.8f", tags.replaygainAlbumPeak];
+        props["REPLAYGAIN_ALBUM_PEAK"] = TagLib::StringList(TagLib::String(v.UTF8String));
+    }
+
+    fileRef.setProperties(props);
+
+    // -----------------------------------------------------------------------
+    // Cover art via complexProperties (TagLib 2.0+)
+    // -----------------------------------------------------------------------
+    // Always call setComplexProperties so that an intentionally-empty array
+    // clears existing embedded art. Callers that want to preserve art must
+    // include it in tags.coverArt.
+    {
+        TagLib::List<TagLib::VariantMap> picList;
+        for (BOCCoverArt *art in tags.coverArt) {
+            const auto *bytes = static_cast<const char *>(art.data.bytes);
+            TagLib::ByteVector bv(bytes, static_cast<unsigned int>(art.data.length));
+            TagLib::VariantMap pic;
+            pic.insert(TagLib::String("data"), TagLib::Variant(bv));
+            pic.insert(TagLib::String("mimeType"),
+                TagLib::Variant(TagLib::String(art.mimeType.UTF8String, TagLib::String::UTF8)));
+            pic.insert(TagLib::String("pictureType"), TagLib::Variant((int)art.pictureType));
+            picList.append(pic);
+        }
+        fileRef.setComplexProperties("PICTURE", picList);
+    }
+
+    // -----------------------------------------------------------------------
+    // Save
+    // -----------------------------------------------------------------------
+    bool saved = fileRef.save();
+    if (!saved) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"io.cloudcauldron.bocan.metadata"
+                                           code:3
+                                       userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"TagLib save() failed for: %@", path]
+            }];
+        }
+        return NO;
+    }
+
+    return YES;
+    } catch (const std::exception &e) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"io.cloudcauldron.bocan.metadata"
+                                            code:12
+                                        userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"TagLib threw std::exception while writing %@: %s",
+                    path, e.what()]
+            }];
+        }
+        return NO;
+    } catch (...) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"io.cloudcauldron.bocan.metadata"
+                                            code:13
+                                        userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                    @"TagLib threw an unknown C++ exception while writing %@",
+                    path]
+            }];
+        }
+        return NO;
+    }
+}
+
+@end

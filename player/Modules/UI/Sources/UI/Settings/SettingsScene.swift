@@ -1,0 +1,297 @@
+import SwiftUI
+
+// MARK: - SettingsScene
+
+/// Top-level `Settings` scene content.
+///
+/// Sidebar-style navigation (à la macOS System Settings), grouped into sections
+/// so related panes — notably the audio panes (Equaliser / Effects / ReplayGain)
+/// under "Playback" — read as a set rather than 14 flat tabs (#305). About is
+/// intentionally absent — it is reached via the standard "WMusic → About" menu.
+///
+/// Deep-links from elsewhere (sidebar buttons, menu items) navigate via the
+/// injected ``SettingsRouter``, whose pending request survives until this scene
+/// appears — so opening Settings directly to a page is reliable on first open.
+public struct SettingsScene: View {
+    @State private var selection: SettingsPage = .general
+    private let router: SettingsRouter
+    private let scrobbleViewModel: ScrobbleSettingsViewModel?
+    private let backupViewModel: BackupSettingsViewModel
+    private let subsonicViewModel: SubsonicSettingsViewModel?
+    private let phoneSyncViewModel: PhoneSyncViewModel?
+
+    public init(
+        router: SettingsRouter,
+        backupViewModel: BackupSettingsViewModel,
+        scrobbleViewModel: ScrobbleSettingsViewModel? = nil,
+        subsonicViewModel: SubsonicSettingsViewModel? = nil,
+        phoneSyncViewModel: PhoneSyncViewModel? = nil
+    ) {
+        self.router = router
+        self.scrobbleViewModel = scrobbleViewModel
+        self.backupViewModel = backupViewModel
+        self.subsonicViewModel = subsonicViewModel
+        self.phoneSyncViewModel = phoneSyncViewModel
+    }
+
+    private var sections: [SettingsSection] {
+        SettingsSection.sidebar(includeScrobble: self.scrobbleViewModel != nil)
+    }
+
+    public var body: some View {
+        NavigationSplitView {
+            List(selection: self.$selection) {
+                ForEach(self.sections) { section in
+                    Section {
+                        ForEach(section.pages, id: \.self) { page in
+                            Label(page.title, systemImage: page.systemImage)
+                                .tag(page)
+                                .accessibilityIdentifier(A11y.SettingsIDs.sidebarRow(page.rawValue))
+                        }
+                    } header: {
+                        if let title = section.title {
+                            Text(title)
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 215, max: 260)
+        } detail: {
+            self.detail(for: self.selection)
+                .navigationTitle(self.selection.title)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 720, minHeight: 460)
+        .background(WindowSignpostBracket(name: "ui.settingsSession"))
+        .onAppear { self.consumePendingNavigation() }
+        .onChange(of: self.router.pendingPage) { _, _ in self.consumePendingNavigation() }
+    }
+
+    /// Navigate to any page the router has queued, then clear the request so it
+    /// doesn't re-fire. Runs on appear (first open) and on change (already open).
+    private func consumePendingNavigation() {
+        guard let page = self.router.pendingPage else { return }
+        self.selection = page
+        if page == .sources, let id = self.router.pendingServerID, let vm = self.subsonicViewModel {
+            Task { await vm.selectServer(id) }
+        }
+        self.router.pendingPage = nil
+        self.router.pendingServerID = nil
+    }
+
+    @ViewBuilder
+    private func detail(for tab: SettingsPage) -> some View {
+        switch tab {
+        case .general:
+            GeneralSettingsView()
+
+        case .library:
+            LibrarySettingsView()
+
+        case .sources:
+            if let subsonicViewModel = self.subsonicViewModel {
+                SubsonicSettingsView(viewModel: subsonicViewModel)
+            } else {
+                ContentUnavailableView(
+                    L10n.string("Sources Unavailable"),
+                    systemImage: "server.rack",
+                    description: Text(localized: "Music server sources can't be configured right now.")
+                )
+            }
+
+        case .playback:
+            PlaybackSettingsView()
+
+        case .equaliser:
+            EQSettingsView()
+
+        case .effects:
+            EffectsSettingsView()
+
+        case .replayGain:
+            ReplayGainSettingsTabView()
+
+        case .appearance:
+            AppearanceSettingsView()
+
+        case .advanced:
+            AdvancedSettingsView(backupVM: self.backupViewModel)
+
+        case .lyrics:
+            LyricsSettingsView()
+
+        case .visualizer:
+            VisualizerSettingsView()
+
+        case .smartPlaylists:
+            SmartPlaylistsSettingsView()
+
+        case .scrobble:
+            if let scrobbleViewModel = self.scrobbleViewModel {
+                ScrobbleSettingsView(viewModel: scrobbleViewModel)
+            }
+
+        case .diagnostics:
+            DiagnosticsSettingsView()
+
+        case .podcasts:
+            PodcastSettingsView()
+
+        case .phoneSync:
+            self.phoneSyncDetail
+        }
+    }
+
+    @ViewBuilder
+    private var phoneSyncDetail: some View {
+        if let phoneSyncViewModel = self.phoneSyncViewModel {
+            PhoneSyncSettingsView(viewModel: phoneSyncViewModel)
+        } else {
+            ContentUnavailableView(
+                L10n.string("Phone Sync Unavailable"),
+                systemImage: "iphone.slash",
+                description: Text(localized: "Phone Sync can't be configured right now.")
+            )
+        }
+    }
+}
+
+// MARK: - SettingsSection
+
+/// A labelled group of pages in the Settings sidebar. A `nil` title renders an
+/// unlabelled top section (matching macOS System Settings).
+struct SettingsSection: Identifiable {
+    let title: String?
+    let pages: [SettingsPage]
+    var id: String {
+        self.title ?? "_top"
+    }
+
+    /// The ordered sidebar sections. Sources is always present so a first-timer
+    /// can find server setup; Scrobbling appears only when its provider exists.
+    /// The audio panes (Equaliser/Effects/ReplayGain) are grouped under Playback
+    /// rather than left as loose top-level tabs (#305).
+    static func sidebar(includeScrobble: Bool) -> [Self] {
+        var advanced: [SettingsPage] = []
+        if includeScrobble {
+            advanced.append(.scrobble)
+        }
+        advanced.append(contentsOf: [.advanced, .diagnostics])
+        return [
+            Self(title: nil, pages: [.general, .appearance]),
+            Self(title: L10n.string("Library"), pages: [.library, .sources, .smartPlaylists, .podcasts, .phoneSync]),
+            Self(title: L10n.string("Playback"), pages: [.playback, .equaliser, .effects, .replayGain]),
+            Self(title: L10n.string("Now Playing"), pages: [.lyrics, .visualizer]),
+            Self(title: L10n.string("Advanced"), pages: advanced),
+        ]
+    }
+}
+
+// MARK: - SettingsPage presentation
+
+extension SettingsPage {
+    var title: String {
+        switch self {
+        case .general:
+            L10n.string("General")
+
+        case .library:
+            L10n.string("Library")
+
+        case .sources:
+            L10n.string("Sources")
+
+        case .playback:
+            L10n.string("Playback")
+
+        case .equaliser:
+            L10n.string("Equaliser")
+
+        case .effects:
+            L10n.string("Effects")
+
+        case .replayGain:
+            L10n.string("ReplayGain")
+
+        case .appearance:
+            L10n.string("Appearance")
+
+        case .advanced:
+            L10n.string("Advanced")
+
+        case .lyrics:
+            L10n.string("Lyrics")
+
+        case .visualizer:
+            L10n.string("Visualizer")
+
+        case .smartPlaylists:
+            L10n.string("Smart Playlists")
+
+        case .scrobble:
+            L10n.string("Scrobbling")
+
+        case .diagnostics:
+            L10n.string("Diagnostics")
+
+        case .podcasts:
+            L10n.string("Podcasts")
+
+        case .phoneSync:
+            L10n.string("Phone Sync")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general:
+            "gear"
+
+        case .library:
+            "music.note.list"
+
+        case .sources:
+            "server.rack"
+
+        case .playback:
+            "play.circle"
+
+        case .equaliser:
+            "slider.vertical.3"
+
+        case .effects:
+            "waveform.badge.magnifyingglass"
+
+        case .replayGain:
+            "chart.bar.fill"
+
+        case .appearance:
+            "paintpalette"
+
+        case .advanced:
+            "wrench.and.screwdriver"
+
+        case .lyrics:
+            "text.quote"
+
+        case .visualizer:
+            "waveform"
+
+        case .smartPlaylists:
+            "sparkles"
+
+        case .scrobble:
+            "dot.radiowaves.left.and.right"
+
+        case .diagnostics:
+            "stethoscope"
+
+        case .podcasts:
+            "antenna.radiowaves.left.and.right"
+
+        case .phoneSync:
+            "iphone.and.arrow.forward"
+        }
+    }
+}

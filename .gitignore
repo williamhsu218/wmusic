@@ -1,0 +1,10 @@
+.DS_Store
+.build-logs/
+backups/
+player/.build/
+player/build/
+player/DerivedData/
+player/Secrets.xcconfig
+player/Resources/fpcalc
+player/Resources/libav*.dylib
+player/Resources/libsw*.dylib

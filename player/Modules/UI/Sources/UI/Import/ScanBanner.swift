@@ -1,0 +1,239 @@
+import Library
+import Persistence
+import SwiftUI
+
+// MARK: - ScanBanner
+
+/// A non-blocking progress card that floats over the bottom of the content
+/// area while `LibraryViewModel` is scanning, then auto-hides 3 seconds after
+/// the scan finishes.
+///
+/// Mount it as an overlay, never as a safe-area inset: an inset resizes the
+/// content, so each time the banner came or went every row of the list below
+/// moved, and a double-click that straddled the auto-hide played the song
+/// under the one clicked (found by an E2E run, 2026-09-27):
+///
+/// ```swift
+/// ContentPane(vm: vm)
+///     .overlay(alignment: .bottom) {
+///         ScanBanner(vm: vm).padding(12)
+///     }
+/// ```
+public struct ScanBanner: View {
+    @ObservedObject public var vm: LibraryViewModel
+    @AppStorage(DeepDiveSetting.key) private var deepDiveEnabled = false
+
+    /// Timer token used to auto-dismiss the summary after a short delay.
+    @State private var dismissTimer: Timer?
+
+    public init(vm: LibraryViewModel) {
+        self.vm = vm
+    }
+
+    // MARK: - Body
+
+    public var body: some View {
+        Group {
+            if self.vm.isScanning {
+                self.scanningBanner
+            } else if self.vm.scanSummary != nil {
+                self.summaryBanner
+            } else if self.deepDiveEnabled, let progress = self.vm.enrichmentProgress, !progress.isComplete {
+                self.enrichmentBanner(progress)
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: self.vm.isScanning)
+        .animation(.easeInOut(duration: 0.25), value: self.vm.scanSummary != nil)
+        .animation(.easeInOut(duration: 0.25), value: self.vm.enrichmentProgress?.isComplete)
+        .onChange(of: self.vm.scanSummary != nil) { _, summaryVisible in
+            if summaryVisible {
+                self.scheduleDismiss()
+            }
+        }
+    }
+
+    // MARK: - Scanning banner
+
+    private var scanningBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(localized: "Scanning…")
+                    .font(Typography.footnote.weight(.medium))
+                    .foregroundStyle(Color.textPrimary)
+
+                Text(self.scanSubtitle)
+                    .font(Typography.caption)
+                    .foregroundStyle(Color.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            Button(L10n.string("Cancel")) {
+                self.vm.cancelScan()
+            }
+            .buttonStyle(.borderless)
+            .font(Typography.footnote)
+            .foregroundStyle(Color.textSecondary)
+            .help(L10n.string("Cancel the running library scan"))
+            .accessibilityLabel(L10n.string("Cancel scan"))
+            .accessibilityHint(L10n.string("Stops the in-progress library scan. Files already imported are kept."))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(self.bannerBackground)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    // MARK: - Summary banner
+
+    private var summaryBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityHidden(true)
+
+            Text(self.summaryText)
+                .font(Typography.footnote)
+                .foregroundStyle(Color.textPrimary)
+                .accessibilityLabel(self.summaryAccessibilityLabel)
+
+            Spacer()
+
+            Button {
+                self.dismissTimer?.invalidate()
+                self.vm.dismissScanSummary()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(Typography.caption)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(Color.textSecondary)
+            .help(L10n.string("Dismiss the scan summary"))
+            .accessibilityLabel(L10n.string("Dismiss"))
+            .accessibilityHint(L10n.string("Hides the scan summary banner."))
+            .accessibilityIdentifier(A11y.ScanBanner.dismissButton)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(self.bannerBackground)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    // MARK: - Enrichment banner
+
+    /// The one-off MusicBrainz artist lookup pass (#401) runs at one request
+    /// every 1.5 s, so a large library takes an hour or more; without this
+    /// line nothing showed it was happening.
+    private func enrichmentBanner(_ progress: ArtistEnrichmentProgress) -> some View {
+        HStack(spacing: 10) {
+            ProgressView(value: Double(progress.fetched), total: Double(max(progress.total, 1)))
+                .progressViewStyle(.linear)
+                .frame(width: 120)
+                .accessibilityHidden(true)
+
+            Text(self.enrichmentText(progress))
+                .font(Typography.caption)
+                .foregroundStyle(Color.textSecondary)
+                .lineLimit(1)
+                .help(self.enrichmentHelp)
+                .accessibilityIdentifier(A11y.ScanBanner.enrichmentProgress)
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(self.bannerBackground)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private var enrichmentHelp: String {
+        L10n.string("WMusic looks up each artist on MusicBrainz once, slowly, to respect its rate limit.")
+            + " " + L10n.string("Everything else keeps working meanwhile.")
+    }
+
+    private func enrichmentText(_ progress: ArtistEnrichmentProgress) -> String {
+        let fetched = progress.fetched.formatted(IntegerFormatStyle<Int>.number)
+        let total = progress.total.formatted(IntegerFormatStyle<Int>.number)
+        return L10n.string("Looking up artists on MusicBrainz: \(fetched) of \(total)")
+    }
+
+    // MARK: - Helpers
+
+    /// A card, since it floats over the list rather than sitting above it.
+    private var bannerBackground: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(Color(NSColor.windowBackgroundColor))
+            .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+    }
+
+    private var scanSubtitle: String {
+        var parts: [String] = []
+        if self.vm.scanWalked > 0 {
+            parts.append(L10n.string("\(self.vm.scanWalked.formatted(.number)) files walked"))
+        }
+        if self.vm.scanInserted > 0 {
+            parts.append(L10n.string("\(self.vm.scanInserted.formatted(.number)) new"))
+        }
+        if self.vm.scanUpdated > 0 {
+            parts.append(L10n.string("\(self.vm.scanUpdated.formatted(.number)) updated"))
+        }
+        if !self.vm.scanCurrentPath.isEmpty {
+            parts.append(self.vm.scanCurrentPath)
+        }
+        return parts.isEmpty ? L10n.string("Preparing…") : parts.joined(separator: " · ")
+    }
+
+    private var summaryText: String {
+        guard let s = self.vm.scanSummary else { return "" }
+        // ADR-007 audit M1: the previous wording read "4231 files · 120 new
+        // tracks", which made readers parse the file count as a separate item
+        // count from "new tracks". Disambiguate by leading with "Scanned N
+        // files —" and breaking the breakdown out into new / updated /
+        // unchanged / errors. All counts use locale-aware formatting.
+        let total = s.inserted + s.updated + s.skipped
+        var parts: [String] = []
+        parts.append(L10n.string("\(s.inserted.formatted(.number)) new"))
+        if s.updated > 0 {
+            parts.append(L10n.string("\(s.updated.formatted(.number)) updated"))
+        }
+        if s.skipped > 0 {
+            parts.append(L10n.string("\(s.skipped.formatted(.number)) unchanged"))
+        }
+        if s.errors > 0 {
+            parts.append(L10n.string("\(s.errors) errors"))
+        }
+        return L10n.string("Scanned \(total.formatted(.number)) files — \(parts.joined(separator: ", "))")
+    }
+
+    private var summaryAccessibilityLabel: String {
+        guard let s = self.vm.scanSummary else { return "" }
+        let total = s.inserted + s.updated + s.skipped
+        var parts: [String] = []
+        parts.append(L10n.string("\(s.inserted.formatted(.number)) new"))
+        if s.updated > 0 {
+            parts.append(L10n.string("\(s.updated.formatted(.number)) updated"))
+        }
+        if s.skipped > 0 {
+            parts.append(L10n.string("\(s.skipped.formatted(.number)) unchanged"))
+        }
+        if s.errors > 0 {
+            parts.append(L10n.string("\(s.errors) errors"))
+        }
+        return L10n.string("Scan complete. Scanned \(total.formatted(.number)) files: \(parts.joined(separator: ", ")).")
+    }
+
+    private func scheduleDismiss() {
+        self.dismissTimer?.invalidate()
+        self.dismissTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak vm] _ in
+            Task { @MainActor [weak vm] in
+                vm?.dismissScanSummary()
+            }
+        }
+    }
+}

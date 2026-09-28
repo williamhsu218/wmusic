@@ -1,0 +1,38 @@
+import Library
+import SwiftUI
+
+// MARK: - TracksView Table definitions
+
+extension TracksView {
+    var sortableTable: some View {
+        TrackTable(
+            rows: self.vm.rows,
+            rowsVersion: self.vm.rowsVersion,
+            selection: self.$vm.selection,
+            sortOrder: self.$sortOrder,
+            nowPlayingTrackID: self.nowPlaying.nowPlayingTrackID,
+            sortable: true,
+            playlistNodes: self.library.playlistSidebar.nodes,
+            actions: self.trackContextMenuActions,
+            scrollRequest: self.vm.scrollRequest,
+            scrollTargetTrackID: self.vm.scrollTargetTrackID,
+            onMove: self.effectiveOnMove
+        )
+    }
+
+    var plainTable: some View {
+        TrackTable(
+            rows: self.vm.rows,
+            rowsVersion: self.vm.rowsVersion,
+            selection: self.$vm.selection,
+            sortOrder: self.$sortOrder,
+            nowPlayingTrackID: self.nowPlaying.nowPlayingTrackID,
+            sortable: false,
+            playlistNodes: self.library.playlistSidebar.nodes,
+            actions: self.trackContextMenuActions,
+            scrollRequest: self.vm.scrollRequest,
+            scrollTargetTrackID: self.vm.scrollTargetTrackID,
+            onMove: self.effectiveOnMove
+        )
+    }
+}

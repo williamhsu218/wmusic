@@ -1,0 +1,158 @@
+import Library
+import SwiftUI
+
+// MARK: - CoverArtFetchSheet
+
+/// Search + results picker for cover art from MusicBrainz / Cover Art Archive.
+public struct CoverArtFetchSheet: View {
+    @ObservedObject public var vm: CoverArtFetchViewModel
+    @Binding public var isPresented: Bool
+    public var onSelect: (Data) -> Void
+
+    public init(
+        vm: CoverArtFetchViewModel,
+        isPresented: Binding<Bool>,
+        onSelect: @escaping (Data) -> Void
+    ) {
+        self.vm = vm
+        self._isPresented = isPresented
+        self.onSelect = onSelect
+    }
+
+    private let columns = [
+        GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 12),
+    ]
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            // Search bar
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    TextField(L10n.string("Artist"), text: self.$vm.searchArtist)
+                        .textFieldStyle(.roundedBorder)
+                    TextField(L10n.string("Album"), text: self.$vm.searchAlbum)
+                        .textFieldStyle(.roundedBorder)
+                }
+                // No Return shortcut: Apply below is the default action, and
+                // two buttons claiming Return made the key's behaviour random.
+                Button(L10n.string("Search")) { self.vm.search() }
+                    .disabled(self.vm.searchArtist.isEmpty && self.vm.searchAlbum.isEmpty)
+                    .help(L10n.string("Looks for artwork on the Cover Art Archive, matching the artist and album above."))
+            }
+            .padding()
+
+            Divider()
+
+            // Results grid
+            if self.vm.isSearching {
+                ProgressView(L10n.string("Searching…"))
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error = self.vm.lastError {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if self.vm.candidates.isEmpty {
+                Text(localized: "No results")
+                    .foregroundStyle(Color.textTertiary)
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: self.columns, spacing: 12) {
+                        ForEach(self.vm.candidates) { candidate in
+                            CandidateCell(
+                                candidate: candidate,
+                                thumbnail: self.vm.thumbnails[candidate.id],
+                                isSelected: self.vm.selectedCandidateID == candidate.id
+                            )
+                            .onTapGesture {
+                                self.vm.selectedCandidateID = candidate.id
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            }
+
+            Divider()
+
+            // Bottom actions
+            HStack {
+                Spacer()
+                Button(L10n.string("Cancel")) { self.isPresented = false }
+                    .keyboardShortcut(.escape)
+                Button {
+                    Task {
+                        if let data = await self.vm.applySelected() {
+                            self.onSelect(data)
+                            self.isPresented = false
+                        }
+                    }
+                } label: {
+                    if self.vm.isApplying {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text(localized: "Downloading…")
+                        }
+                    } else {
+                        Text(localized: "Apply")
+                    }
+                }
+                .disabled(self.vm.selectedCandidateID == nil || self.vm.isApplying)
+                .keyboardShortcut(.defaultAction)
+                .help(L10n.string("Downloads the image you picked at full size and puts it on this album."))
+            }
+            .padding()
+        }
+        .frame(minWidth: 480, minHeight: 400)
+        .onAppear {
+            // Only auto-search when the fields carry something; an empty query
+            // is a guaranteed miss and flashes an error before the user types.
+            guard !(self.vm.searchArtist.isEmpty && self.vm.searchAlbum.isEmpty) else { return }
+            self.vm.search()
+        }
+    }
+}
+
+// MARK: - CandidateCell
+
+private struct CandidateCell: View {
+    let candidate: CoverArtCandidate
+    let thumbnail: Data?
+    let isSelected: Bool
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Group {
+                if let data = self.thumbnail, let img = NSImage(data: data) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Color.secondary.opacity(0.2)
+                }
+            }
+            .frame(width: 120, height: 120)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(self.isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
+            )
+
+            Text(self.candidate.title)
+                .font(.caption)
+                .lineLimit(1)
+            if let year = self.candidate.year {
+                Text(String(year))
+                    .font(.caption2)
+                    .foregroundStyle(Color.textTertiary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(L10n.string("\(self.candidate.title) by \(self.candidate.artist)"))
+    }
+}
+
+import AppKit

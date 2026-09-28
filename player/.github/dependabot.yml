@@ -1,0 +1,72 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/Observability
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/AudioEngine
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/Persistence
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/Metadata
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/Playback
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/Library
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/UI
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/Acoustics
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: swift
+    directory: /Modules/Scrobble
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"

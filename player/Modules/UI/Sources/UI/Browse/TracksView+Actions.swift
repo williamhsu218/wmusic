@@ -1,0 +1,283 @@
+import AppKit
+import Persistence
+import SwiftUI
+
+// MARK: - TracksView context menu actions
+
+extension TracksView {
+    /// Assembles the `TrackContextMenuActions` struct that bridges the
+    /// AppKit context menu in `TrackTable` to the library view-model.
+    ///
+    /// Each closure is called synchronously on the main thread by AppKit.
+    /// Async library operations are wrapped in `Task { … }` inside the closures.
+    var trackContextMenuActions: TrackContextMenuActions {
+        let lib = self.library
+        let removeFromPlaylistAction = self.removeFromPlaylist.map { remove in
+            { tracks in
+                _ = Task { await Self.confirmRemoveFromPlaylist(tracks: tracks, remove: remove) }
+            }
+        }
+        return TrackContextMenuActions(
+            playNow: { track in
+                Task { await lib.play(track: track) }
+            },
+            playSingle: { track in
+                // Replace the queue with just this single track — the
+                // Option+double-click "play only this" gesture.
+                Task { await lib.play(tracks: [track], startingAt: 0) }
+            },
+            playAlbum: { track in
+                Task { await lib.playAlbum(track: track, shuffle: false) }
+            },
+            shuffleAlbum: { track in
+                Task { await lib.playAlbum(track: track, shuffle: true) }
+            },
+            playArtist: { track in
+                Task { await lib.playArtist(track: track) }
+            },
+            playNext: { tracks in
+                Task { await lib.playNext(tracks: tracks) }
+            },
+            addToQueue: { tracks in
+                Task { await lib.addToQueue(tracks: tracks) }
+            },
+            addToPlaylist: { playlistID, tracks in
+                let ids = tracks.compactMap(\.id)
+                Task {
+                    do {
+                        try await lib.playlistService.addTracks(ids, to: playlistID)
+                        // The sidebar's counts come from its own snapshot of
+                        // the tree, so the badge next to the playlist kept the
+                        // old number until something else reloaded it. The
+                        // drag-and-drop path goes through the view model and
+                        // has always refreshed.
+                        await lib.playlistSidebar.reload()
+                    } catch {
+                        // The user chose a playlist from the menu; a silent
+                        // failure looks like the tracks were added (#480).
+                        lib.log.error("playlist.addTracks.failed", [
+                            "playlist": playlistID,
+                            "error": String(reflecting: error),
+                        ])
+                        lib.showToast(ToastMessage(text: L10n.string("Couldn’t add those tracks to the playlist.")))
+                    }
+                }
+            },
+            newPlaylistFromSelection: { tracks in
+                let ids = tracks.compactMap(\.id)
+                lib.playlistSidebar.beginNewPlaylist(trackIDs: ids)
+            },
+            love: { tracks in
+                lib.toggleLoved(for: tracks)
+            },
+            goToArtist: { artistID in
+                Task { await lib.selectDestination(.artist(artistID)) }
+            },
+            goToAlbum: { albumID in
+                Task { await lib.selectDestination(.album(albumID)) }
+            },
+            showInFinder: { track in
+                if let url = URL(string: track.fileURL) {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            },
+            rescanFile: { track in
+                if let id = track.id {
+                    // .utility priority gives macOS lower I/O scheduling weight,
+                    // preventing VFS contention with the CoreAudio decode path.
+                    Task(priority: .utility) { await lib.rescanTrack(id: id) }
+                }
+            },
+            getInfo: { tracks in
+                lib.showTagEditor(tracks: tracks)
+            },
+            identify: { track in
+                lib.showIdentifyTrack(track)
+            },
+            removeFromLibrary: { tracks in
+                Task { await Self.confirmRemoveFromLibrary(tracks: tracks, library: lib) }
+            },
+            deleteFromDisk: { tracks in
+                Task { await Self.confirmDeleteFromDisk(tracks: tracks, library: lib) }
+            },
+            copy: { rows in
+                let header = ["Title", "Artist", "Album", "Track", "Year", "Genre", "Duration", "Rating"]
+                    .joined(separator: "\t")
+                let lines = rows.map { row in
+                    [
+                        row.title,
+                        row.artistName,
+                        row.albumName,
+                        row.trackNumber > 0 ? String(row.trackNumber) : "",
+                        row.yearText,
+                        row.genre,
+                        Formatters.duration(row.duration),
+                        String(Formatters.stars(from: row.rating)),
+                    ].joined(separator: "\t")
+                }
+                let tsv = ([header] + lines).joined(separator: "\n")
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(tsv, forType: .string)
+            },
+            toggleShuffle: { trackID, excluded in
+                Task { await lib.setTrackExcludedFromShuffle(trackID: trackID, excluded: excluded) }
+            },
+            computeReplayGain: { tracks in
+                let ids = tracks.compactMap(\.id)
+                Task { await lib.computeReplayGain(forTrackIDs: ids) }
+            },
+            rate: { tracks, stars in
+                lib.setRating(stars: stars, for: tracks)
+            },
+            removeFromPlaylist: removeFromPlaylistAction,
+            editLyrics: self.lyricsViewModel.map { lyrics in
+                { track in
+                    if let id = track.id {
+                        lyrics.openEditor(for: id)
+                    } else {
+                        lyrics.openEditor()
+                    }
+                }
+            },
+            fetchLyricsFromLRClib: self.lrclibEnabled ? self.lyricsViewModel.map { lyrics in
+                { track in
+                    if let id = track.id {
+                        lyrics.forceFetch(for: id)
+                    }
+                }
+            } : nil
+        )
+    }
+
+    // MARK: - Destructive confirmations
+
+    /// Presents `alert` as a non-blocking sheet on the key window.
+    ///
+    /// Unlike `NSAlert.runModal()` this does **not** spin a nested modal run loop,
+    /// so async tasks awaiting on the main actor continue to be dispatched while
+    /// the sheet is on screen. Falls back to `runModal()` only if no window is
+    /// available (should not occur in normal operation).
+    @MainActor
+    static func runAlertAsync(_ alert: NSAlert) async -> NSApplication.ModalResponse {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
+            return alert.runModal()
+        }
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { response in
+                continuation.resume(returning: response)
+            }
+        }
+    }
+
+    /// `UserDefaults` key for "Don't ask again" on the soft-delete (Remove from
+    /// Library) confirmation. Trash deletion is *never* suppressible — it
+    /// touches the filesystem, so we always confirm.
+    /// Shared with album/artist removal (RemoveFromLibraryConfirm) so the
+    /// "Don't ask again" preference is unified across all soft-delete prompts.
+    static let suppressRemoveKey = "library.suppressRemoveConfirmation"
+
+    /// Presents the soft-delete confirmation. Honours the suppression flag.
+    /// Note: the flag only suppresses *Remove from Library* — trashing a file
+    /// always asks, regardless.
+    @MainActor
+    static func confirmRemoveFromLibrary(tracks: [Track], library: LibraryViewModel) async {
+        let ids = tracks.compactMap(\.id)
+        guard !ids.isEmpty else { return }
+
+        let suppressed = UserDefaults.standard.bool(forKey: Self.suppressRemoveKey)
+        if suppressed {
+            Task { await library.removeTracks(ids: ids) }
+            return
+        }
+
+        let alert = NSAlert()
+        if tracks.count == 1 {
+            let title = tracks.first?.title ?? L10n.string("track")
+            alert.messageText = L10n.string("Remove “\(title)” from library?")
+        } else {
+            alert.messageText = L10n.string("Remove \(tracks.count) tracks from library?")
+        }
+        alert.informativeText = L10n.string(
+            "The files will stay on disk and can be re-added later by rescanning the folder."
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: L10n.string("Remove"))
+        alert.addButton(withTitle: L10n.string("Cancel"))
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = L10n.string("Don’t ask again")
+
+        let response = await runAlertAsync(alert)
+        guard response == .alertFirstButtonReturn else { return }
+
+        if alert.suppressionButton?.state == .on {
+            UserDefaults.standard.set(true, forKey: Self.suppressRemoveKey)
+        }
+
+        Task { await library.removeTracks(ids: ids) }
+    }
+
+    /// Presents the trash-and-remove confirmation for one or more tracks. Always
+    /// asks — there’s no “don’t ask again” path because the action is
+    /// destructive on disk.
+    @MainActor
+    static func confirmDeleteFromDisk(tracks: [Track], library: LibraryViewModel) async {
+        guard !tracks.isEmpty else { return }
+
+        let alert = NSAlert()
+        if tracks.count == 1 {
+            let title = tracks[0].title ?? L10n.string("this track")
+            alert.messageText = L10n.string("Move “\(title)” to Trash and remove from WMusic?")
+            alert.informativeText = L10n.string(
+                "The file will be moved to the Trash. You can restore it from the Trash until you empty it."
+            )
+        } else {
+            alert.messageText = L10n.string("Move \(tracks.count) tracks to Trash and remove from WMusic?")
+            alert.informativeText = L10n.string(
+                "The files will be moved to the Trash. You can restore them from the Trash until you empty it."
+            )
+        }
+        alert.alertStyle = .warning
+        let trashButton = alert.addButton(withTitle: L10n.string("Move to Trash"))
+        trashButton.hasDestructiveAction = true
+        alert.addButton(withTitle: L10n.string("Cancel"))
+
+        let response = await runAlertAsync(alert)
+        guard response == .alertFirstButtonReturn else { return }
+
+        Task { @MainActor in
+            let failures = await library.deleteTracksFromDisk(tracks: tracks)
+            // ADR-007 audit M3: offer permanent-delete fallback for any files
+            // that could not be trashed (external volume, permissions…).
+            for (track, error) in failures {
+                await Self.confirmPermanentDelete(track: track, error: error, library: library)
+            }
+        }
+    }
+
+    /// Secondary confirmation shown when `trashItem` fails. Asks the user
+    /// whether to permanently delete the file. Only called from
+    /// `confirmDeleteFromDisk` after the user has already confirmed the
+    /// initial trash request.
+    @MainActor
+    private static func confirmPermanentDelete(
+        track: Track,
+        error: any Error,
+        library: LibraryViewModel
+    ) async {
+        guard let id = track.id else { return }
+        let title = track.title ?? L10n.string("this track")
+
+        let alert = NSAlert()
+        alert.messageText = L10n.string("Move to Trash failed: \(error.localizedDescription)")
+        alert.informativeText =
+            L10n.string("Permanently delete “\(title)”? This cannot be undone — the file will not be moved to the Trash.")
+        alert.alertStyle = .critical
+        let deleteButton = alert.addButton(withTitle: L10n.string("Delete Permanently"))
+        deleteButton.hasDestructiveAction = true
+        alert.addButton(withTitle: L10n.string("Cancel"))
+
+        guard await self.runAlertAsync(alert) == .alertFirstButtonReturn else { return }
+
+        Task { await library.permanentlyDeleteTrackFromDisk(id: id) }
+    }
+}

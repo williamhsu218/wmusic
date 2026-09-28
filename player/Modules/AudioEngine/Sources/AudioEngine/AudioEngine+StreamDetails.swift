@@ -1,0 +1,73 @@
+import AVFoundation
+
+// MARK: - AudioEngine + current-source facts (ADR-078 slice 5)
+
+/// Read-only facts about the currently loaded source: the decoder's native
+/// format, and the stream details FFmpeg-backed sources capture at open.
+public extension AudioEngine {
+    /// The native source format of the currently loaded track.
+    ///
+    /// Used by `GaplessScheduler` to determine format compatibility before
+    /// scheduling the next track onto the same `AVAudioPlayerNode`.
+    var sourceFormat: AVAudioFormat? {
+        get async { self.decoder?.sourceFormat }
+    }
+
+    /// Stream facts from the currently audible decoder. Only FFmpeg-backed
+    /// sources carry them; AVFoundation-decoded local files return nil.
+    /// Served live so observed-title evidence upgrades the snapshot. Mind
+    /// the gapless caveat on `decoder`: for the last ~0.8 s of a transition
+    /// this describes the incoming track.
+    var currentStreamDetails: StreamDetails? {
+        get async {
+            guard let dec = self.decoder as? FFmpegDecoder else { return nil }
+            return await dec.liveDetails
+        }
+    }
+
+    /// FFmpeg's short codec name for the currently loaded source, from
+    /// whichever decoder is installed (ADR-092). Nil between loads and for a
+    /// decoder that cannot say. Same gapless caveat as `currentStreamDetails`:
+    /// for the last ~0.8 s of a transition this names the incoming track.
+    var currentCodec: String? {
+        get async { self.decoder?.codec }
+    }
+
+    /// Whether a seek must be refused because the source is a live remote
+    /// stream (no duration, http source). FFmpeg degrades such a seek into
+    /// reading the stream at the server's pace, which holds the transport
+    /// gate for minutes and starves all playback (the ADR-078 launch hang).
+    /// Podcasts carry a real duration and still seek. Logs when refusing.
+    internal func refuseLiveStreamSeek(_ time: TimeInterval) -> Bool {
+        guard self.isLiveStream else { return false }
+        self.log.warning("engine.seek.ignoredLiveStream", ["time": time])
+        return true
+    }
+
+    /// Whether the loaded source is a live HTTP(S) stream with no length,
+    /// which cannot seek.
+    internal var isLiveStream: Bool {
+        guard self._duration <= 0, let scheme = self.currentURL?.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    /// Replaces the title-forwarding task for the freshly installed decoder.
+    /// Called from `load` and the reconnect rebuild; a decoder without ICY
+    /// metadata yields a task that ends at its first (immediate) finish.
+    internal func rewireTitleForwarding() {
+        self.titleForwardTask?.cancel()
+        guard let dec = self.decoder as? FFmpegDecoder else {
+            self.titleForwardTask = nil
+            return
+        }
+        let continuation = self.streamTitleContinuation
+        self.titleForwardTask = Task {
+            for await title in dec.titleUpdates {
+                if Task.isCancelled {
+                    return
+                }
+                continuation.yield(title)
+            }
+        }
+    }
+}

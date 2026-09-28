@@ -1,0 +1,175 @@
+import Acoustics
+import Foundation
+import Observability
+import Persistence
+
+// MARK: - CoverArtSearchService
+
+/// Combines the shared `Acoustics.MusicBrainzClient` (#412) + `CoverArtArchiveClient` into a single
+/// search → candidates flow.
+///
+/// Strategy:
+/// 1. Search MusicBrainz for release-groups matching artist + album.
+/// 2. For each release-group, fetch the Cover Art Archive index.
+/// 3. Build `CoverArtCandidate` values from front-cover images.
+///
+/// Results are cached in memory for `cacheDuration` (default: 24 h).
+/// Thumbnail data is cached on disk in `<AppSupport>/WMusic/CoverArtCache/Fetch/`.
+public actor CoverArtSearchService: CoverArtFetcher {
+    // MARK: - Dependencies
+
+    private let mbClient: MusicBrainzClient
+    private let caaClient: CoverArtArchiveClient
+    private let diskCache: FetchThumbnailCache
+    private let log = AppLogger.make(.library)
+
+    // MARK: - In-memory search result cache
+
+    private struct CacheEntry {
+        let candidates: [CoverArtCandidate]
+        let expiresAt: Date
+    }
+
+    private var searchCache: [String: CacheEntry] = [:]
+    private let cacheDuration: TimeInterval
+
+    // MARK: - Init
+
+    /// - Parameter thumbnailCacheRoot: the `CoverArtCache` folder that holds
+    ///   the thumbnail cache (tests pass a temp directory). `nil` uses
+    ///   `<AppSupport>/WMusic/CoverArtCache`.
+    public init(
+        mbClient: MusicBrainzClient = MusicBrainzClient(),
+        caaClient: CoverArtArchiveClient = CoverArtArchiveClient(),
+        cacheDuration: TimeInterval = 86400,
+        thumbnailCacheRoot: URL? = nil
+    ) {
+        self.mbClient = mbClient
+        self.caaClient = caaClient
+        self.diskCache = FetchThumbnailCache(root: thumbnailCacheRoot ?? FetchThumbnailCache.defaultRoot)
+        self.cacheDuration = cacheDuration
+    }
+
+    // MARK: - CoverArtFetcher
+
+    public func search(artist: String, album: String) async throws -> [CoverArtCandidate] {
+        let key = "\(artist)||||\(album)"
+        if let entry = self.searchCache[key], entry.expiresAt > Date() {
+            return entry.candidates
+        }
+
+        self.log.debug("coverart.search", ["artist": artist, "album": album])
+
+        let groups = try await self.mbClient.searchReleaseGroups(artist: artist, album: album)
+
+        var candidates: [CoverArtCandidate] = []
+        for group in groups.prefix(5) {
+            try Task.checkCancellation()
+            let index: CAAIndex?
+            do {
+                index = try await self.caaClient.index(releaseGroupID: group.id)
+            } catch {
+                // One group failing does not sink the search, but a run of
+                // these is why a cover search comes back empty (#492).
+                self.log.debug("coverart.caaIndex.failed", [
+                    "group": group.id,
+                    "error": String(reflecting: error),
+                ])
+                index = nil
+            }
+            if let index {
+                let frontImages = index.images.filter(\.front)
+                for img in frontImages.prefix(1) {
+                    guard let thumbURL = img.thumbnailURL, let fullURL = img.imageURL else { continue }
+                    let candidate = CoverArtCandidate(
+                        id: group.id + (img.id ?? ""),
+                        releaseGroupID: group.id,
+                        releaseID: nil,
+                        title: group.title ?? "",
+                        artist: group.artistName,
+                        year: group.year,
+                        thumbnailURL: thumbURL,
+                        fullURL: fullURL,
+                        source: .coverArtArchive
+                    )
+                    candidates.append(candidate)
+                }
+            }
+        }
+
+        self.searchCache[key] = CacheEntry(
+            candidates: candidates,
+            expiresAt: Date().addingTimeInterval(self.cacheDuration)
+        )
+        self.log.debug("coverart.search.done", ["count": candidates.count])
+        return candidates
+    }
+
+    public func image(for candidate: CoverArtCandidate, size: CoverArtSize) async throws -> Data {
+        let url = size == .thumbnail ? candidate.thumbnailURL : candidate.fullURL
+        let cacheKey = candidate.id + (size == .thumbnail ? "-thumb" : "-full")
+
+        if let cached = await self.diskCache.load(key: cacheKey) {
+            return cached
+        }
+
+        let data = try await self.caaClient.download(imageURL: url)
+        await self.diskCache.save(data: data, key: cacheKey)
+        return data
+    }
+}
+
+// MARK: - FetchThumbnailCache
+
+/// Disk cache for fetched cover art thumbnails.
+///
+/// Stored in `<AppSupport>/WMusic/CoverArtCache/Fetch/` — separate from the
+/// main cover art cache so it can be evicted independently. `CoverArtCache/`
+/// holds nothing else and every file is re-downloadable, so it is marked as a
+/// cache for backup tools (#569). Not to be confused with `CoverArt/`, which
+/// is not a cache.
+private actor FetchThumbnailCache {
+    static let defaultRoot: URL = (
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+    ).appendingPathComponent("WMusic/CoverArtCache", isDirectory: true)
+
+    private let cacheDir: URL
+    private let log = AppLogger.make(.library)
+
+    /// - Parameter root: the `CoverArtCache` folder; thumbnails go in `Fetch/`.
+    init(root: URL) {
+        self.cacheDir = root.appendingPathComponent("Fetch", isDirectory: true)
+        try? FileManager.default.createDirectory(at: self.cacheDir, withIntermediateDirectories: true)
+        CacheDirectoryMarker.mark(root, excludeFromBackup: true, log: self.log)
+    }
+
+    func load(key: String) -> Data? {
+        let url = self.cacheDir.appendingPathComponent(key.sha256Hex + ".bin")
+        return try? Data(contentsOf: url)
+    }
+
+    func save(data: Data, key: String) {
+        let url = self.cacheDir.appendingPathComponent(key.sha256Hex + ".bin")
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // Not fatal, but every later search re-downloads this thumbnail (#492).
+            self.log.debug("coverart.thumbnailCache.writeFailed", [
+                "key": key,
+                "error": String(reflecting: error),
+            ])
+        }
+    }
+}
+
+// MARK: - String sha256 helper
+
+import CryptoKit
+
+private extension String {
+    var sha256Hex: String {
+        let hash = SHA256.hash(data: Data(self.utf8))
+        return hash.map { String(format: "%02x", $0) }.joined()
+    }
+}

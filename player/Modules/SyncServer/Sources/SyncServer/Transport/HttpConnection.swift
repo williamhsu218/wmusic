@@ -1,0 +1,191 @@
+import Foundation
+import Network
+import Observability
+import Security
+
+/// Drives one accepted `NWConnection`: after the TLS handshake it records the
+/// negotiated peer certificate into a `ConnectionContext`, then reads requests,
+/// dispatches them through the `Router`, and writes responses. HTTP/1.1
+/// keep-alive is supported; the connection closes on any parse error.
+///
+/// All request handling runs on this actor's executor, off the MainActor.
+actor HttpConnection {
+    private let connection: NWConnection
+    private let context = ConnectionContext()
+    private let router: Router
+    private let pairingMode: @Sendable () -> Bool
+    private let isTrusted: @Sendable (String) -> Bool
+    private var parser = HttpRequestParser()
+    private let log = AppLogger.make(.sync)
+
+    init(
+        connection: NWConnection,
+        router: Router,
+        pairingMode: @escaping @Sendable () -> Bool,
+        isTrusted: @escaping @Sendable (String) -> Bool
+    ) {
+        self.connection = connection
+        self.router = router
+        self.pairingMode = pairingMode
+        self.isTrusted = isTrusted
+    }
+
+    nonisolated func start(queue: DispatchQueue) {
+        // The listener does not retain the handler, so the state handler holds a
+        // strong reference to keep this actor alive for the connection's life;
+        // reaching a terminal state clears the handler to break the cycle.
+        self.connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                Task { await self.onReady() }
+            case .failed, .cancelled:
+                self.connection.stateUpdateHandler = nil
+            default:
+                break
+            }
+        }
+        self.connection.start(queue: queue)
+    }
+
+    private func onReady() async {
+        self.populateContext()
+        await self.readLoop()
+        self.connection.cancel()
+    }
+
+    /// Reads the peer certificate from the negotiated TLS metadata and records
+    /// the admission decision for the router's authorization check.
+    private func populateContext() {
+        guard
+            let metadata = self.connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
+            return
+        }
+        var leafDER: Data?
+        _ = sec_protocol_metadata_access_peer_certificate_chain(metadata.securityProtocolMetadata) { certificate in
+            if leafDER == nil {
+                let secCert = sec_certificate_copy_ref(certificate).takeRetainedValue()
+                leafDER = SecCertificateCopyData(secCert) as Data
+            }
+        }
+        guard let leafDER else { return }
+        let fingerprint = ServerFingerprint(certificateDER: leafDER).hex
+        self.context.recordPeer(
+            certificateDER: leafDER,
+            fingerprint: fingerprint,
+            isPairing: self.pairingMode(),
+            isTrusted: self.isTrusted(fingerprint)
+        )
+    }
+
+    // MARK: - Read / dispatch loop
+
+    private enum ReceiveResult {
+        case chunk(Data)
+        case final(Data)
+        case end
+    }
+
+    private func readLoop() async {
+        while true {
+            switch await self.receiveChunk() {
+            case let .chunk(data):
+                if await self.ingest(data) {
+                    return
+                }
+            case let .final(data):
+                _ = await self.ingest(data)
+                return
+            case .end:
+                return
+            }
+        }
+    }
+
+    private func receiveChunk() async -> ReceiveResult {
+        await withCheckedContinuation { continuation in
+            self.connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
+                if error != nil {
+                    continuation.resume(returning: .end)
+                } else if isComplete {
+                    continuation.resume(returning: .final(data ?? Data()))
+                } else {
+                    continuation.resume(returning: .chunk(data ?? Data()))
+                }
+            }
+        }
+    }
+
+    /// Feeds bytes to the parser; dispatches a completed request and writes the
+    /// response. Returns `true` when the connection should close.
+    private func ingest(_ data: Data) async -> Bool {
+        guard !data.isEmpty else { return false }
+        switch self.parser.feed(data) {
+        case .incomplete:
+            return false
+        case let .failure(response):
+            await self.send(response)
+            return true
+        case let .request(request, leftover):
+            let response = await self.router.dispatch(request, context: self.context)
+            await self.send(response)
+            self.parser = HttpRequestParser()
+            if !leftover.isEmpty {
+                return await self.ingest(leftover)
+            }
+            return false
+        }
+    }
+
+    private func send(_ response: HttpResponse) async {
+        if let stream = response.stream {
+            await self.sendStreamed(response, stream: stream)
+        } else {
+            do {
+                try await self.rawSend(response.serialized())
+            } catch {
+                // Usually the phone closed the connection first, which is
+                // ordinary, so this is debug: enough to explain a reply the
+                // phone says it never received (#498).
+                self.log.debug("sync.http.sendFailed", [
+                    "status": response.status,
+                    "error": String(reflecting: error),
+                ])
+            }
+        }
+    }
+
+    /// Sends the header block, then drives the producer, which writes body chunks
+    /// via `rawSend`. A write error (client gone) throws out of the producer,
+    /// unwinding it so any held security scope is released.
+    private func sendStreamed(_ response: HttpResponse, stream: StreamBody) async {
+        do {
+            try await self.rawSend(response.headerBlock(contentLength: stream.length))
+            try await stream.producer { [weak self] chunk in
+                guard let self else { throw CancellationError() }
+                try await self.rawSend(chunk)
+            }
+        } catch {
+            // The client disconnected or the file read failed; the read loop
+            // will observe the closed connection and tear down. Same fault as
+            // the buffered path above, and the one a `try?` search cannot see:
+            // a half-sent file otherwise leaves nothing behind (#498).
+            self.log.debug("sync.http.streamFailed", [
+                "status": response.status,
+                "length": stream.length,
+                "error": String(reflecting: error),
+            ])
+        }
+    }
+
+    private func rawSend(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            self.connection.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            })
+        }
+    }
+}

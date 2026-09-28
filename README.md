@@ -17,6 +17,7 @@ WMusic 是面向 macOS 本地曲库的播放器开发工作区。`player/` 是�
 - `player/`：播放器源码与其原始 Apache-2.0 许可、第三方声明；[来源与本地改动](player/UPSTREAM.md)。
 - `themes/WMusic-Nocturne/`：现有 foobar2000 深蓝主题、布局和组件清单。
 - `window-resize-hook.m`、`build/`、`backups/`：旧 foobar2000 定制与回滚材料，不属于新播放器构建。
-- [选型与验收口径](PLAYER_SELECTION.md)：候选项目比较、取舍和仍待实机确认的能力。
+- [选型与验收口径](PLAYER_SELECTION.md)：候选项目比较与取舍。
+- [本地候选验收记录](VALIDATION.md)：构建、运行、合成音频播放和仍待确认的能力。
 
 `DEVELOPMENT_PLAN.md` 是 2025 年从零开发 Rust/Tauri 跨平台播放器的历史提案；当前 macOS 实施方案以本文和 `PLAYER_SELECTION.md` 为准。

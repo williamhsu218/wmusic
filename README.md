@@ -1,6 +1,6 @@
 # WMusic
 
-WMusic 是面向 macOS 本地曲库的播放器开发工作区。`player/` 是从开源 [Bòcan](https://github.com/bocan/bocan-music) 引入的独立 SwiftUI 播放器候选；`themes/WMusic-Nocturne/` 与现有 foobar2000 配置保留作视觉参考和回滚资料。两个播放器的数据与安装目录彼此独立。
+WMusic 是面向 macOS 本地曲库的播放器开发工作区，仅计划本机使用或私下给朋友使用。`player/` 是从开源 [Bòcan](https://github.com/bocan/bocan-music) 引入的独立 SwiftUI 播放器候选；`themes/WMusic-Nocturne/` 与现有 foobar2000 配置保留作视觉参考和回滚资料。两个播放器的数据与安装目录彼此独立。
 
 ## 本地开发
 

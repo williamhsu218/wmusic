@@ -1,12 +1,14 @@
-# Supported Formats
+# WMusic Supported Formats
 
-Bòcan detects formats by **magic bytes** — never file extensions — so renamed
-files are decoded correctly without guessing.
+Playback selects a decoder from **magic bytes**. Library scanning first filters
+by supported file extensions, so renamed files may need a recognised extension
+before they appear in the library.
 
 Decoding uses two back-ends:
 
 - **AVFoundation** — Apple's built-in audio stack. Zero extra dependencies.
-- **FFmpeg (LGPL)** — bundled FFmpeg libraries, LGPL build only (no GPL codecs).
+- **FFmpeg** — this local build links Homebrew FFmpeg. Its current formula is
+  GPL-3.0-or-later; see [local validation](../VALIDATION.md) before sharing a build.
 
 ---
 
@@ -47,7 +49,8 @@ Decoding uses two back-ends:
 
 ## DSD
 
-DSD is decoded to PCM via DoP (DSD over PCM) for output to standard DACs.
+DSD files are decoded by FFmpeg and converted to floating-point PCM for output.
+This build does not provide native DSD or DoP passthrough.
 
 | Format | Extensions | Engine |
 |---|---|---|
@@ -65,13 +68,14 @@ DSD is decoded to PCM via DoP (DSD over PCM) for output to standard DACs.
 
 ## Output
 
-All formats are decoded internally to **32-bit float PCM**. Output to hardware
-supports up to **32-bit / 384 kHz**. DSD is output via DoP.
+All formats are decoded internally to **32-bit float PCM**. The available
+hardware output format depends on the selected device and macOS audio path.
 
 ## What isn't supported
 
-- **TAK** — patent-encumbered; no LGPL-safe decoder available
+- **TAK** — the library scanner does not currently accept `.tak`, even though
+  this machine's FFmpeg includes a TAK decoder
 - **SACD ISO** — raw disc images; individual DSF/DFF tracks play fine
-- **RealAudio** (`.ra`, `.rm`) — no LGPL-safe decoder
+- **RealAudio** (`.ra`, `.rm`) — not accepted by the current library scanner
 - **WMA Lossless / WMA Pro** — may fall back to FFmpeg probe; results vary
 - **Encrypted files** — Apple DRM (FairPlay) and WMA DRM files will not play

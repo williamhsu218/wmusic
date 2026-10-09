@@ -10,6 +10,8 @@ struct ExpandedLyricsView: View {
     let onSeek: (TimeInterval) -> Void
 
     @State private var followsPlayback = true
+    @State private var syncedPosition = ScrollPosition(idType: Int.self, edge: .top)
+    @State private var plainPosition = ScrollPosition(edge: .top)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
 
@@ -29,11 +31,13 @@ struct ExpandedLyricsView: View {
                             .foregroundStyle(Color.textPrimary)
                             .lineSpacing(12)
                             .multilineTextAlignment(.leading)
-                            .textSelection(.enabled)
+                            .textSelection(.disabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, inset)
                             .padding(.vertical, 36)
                     }
+                    .modifier(LyricsScrollInteraction(position: self.$plainPosition))
+                    .onAppear { self.plainPosition.scrollTo(edge: .top) }
                     .id(self.trackID)
                 case .none:
                     LyricsView(vm: self.vm, onSeek: self.onSeek)
@@ -49,63 +53,64 @@ struct ExpandedLyricsView: View {
     private func syncedLyrics(
         _ lines: [LyricsDocument.LyricsLine], size: CGSize, fontSize: CGFloat, inset: CGFloat
     ) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 26) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
-                        self.lineRow(line, index: index, fontSize: fontSize)
-                            .id(index)
-                    }
-                }
-                .padding(.horizontal, inset)
-                // Enough breathing room to center the first and last lines too.
-                .padding(.top, max(28, size.height * 0.35))
-                .padding(.bottom, max(40, size.height * 0.5))
-            }
-            .scrollIndicators(.hidden)
-            .onScrollPhaseChange { _, phase in
-                if phase == .interacting { self.followsPlayback = false }
-            }
-            .mask {
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black, location: 0.09),
-                    .init(color: .black, location: 0.86),
-                    .init(color: .clear, location: 1),
-                ], startPoint: .top, endPoint: .bottom)
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if !self.followsPlayback {
-                    Button {
-                        self.followsPlayback = true
-                        self.scrollToCurrentLine(proxy, animated: true)
-                    } label: {
-                        Label(L10n.string("Follow Lyrics"), systemImage: "arrow.down.to.line")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
-                    .padding(20)
-                    .accessibilityIdentifier(A11y.NowPlaying.expandedLyricsFollow)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 26) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                    self.lineRow(line, index: index, fontSize: fontSize)
+                        .id(index)
                 }
             }
-            .onAppear { self.scrollToCurrentLine(proxy, animated: false) }
-            .onChange(of: self.vm.currentLineIndex) { _, _ in
-                guard self.followsPlayback else { return }
-                self.scrollToCurrentLine(proxy, animated: true)
-            }
-            .onChange(of: self.trackID) { _, _ in
-                self.followsPlayback = true
-                self.scrollToCurrentLine(proxy, animated: false)
-            }
-            .onChange(of: self.isPresented) { _, visible in
-                if visible {
+            .scrollTargetLayout()
+            .padding(.horizontal, inset)
+            // Enough breathing room to center the first and last lines too.
+            .padding(.top, max(28, size.height * 0.35))
+            .padding(.bottom, max(40, size.height * 0.5))
+        }
+        .modifier(LyricsScrollInteraction(position: self.$syncedPosition) {
+            self.followsPlayback = false
+        })
+        .onScrollPhaseChange { _, phase in
+            if phase == .interacting { self.followsPlayback = false }
+        }
+        .mask {
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .black, location: 0.09),
+                .init(color: .black, location: 0.86),
+                .init(color: .clear, location: 1),
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !self.followsPlayback {
+                Button {
                     self.followsPlayback = true
-                    self.scrollToCurrentLine(proxy, animated: false)
+                    self.scrollToCurrentLine(animated: true)
+                } label: {
+                    Label(L10n.string("Follow Lyrics"), systemImage: "arrow.down.to.line")
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .padding(20)
+                .accessibilityIdentifier(A11y.NowPlaying.expandedLyricsFollow)
             }
-            .onChange(of: size) { _, _ in
-                if self.followsPlayback { self.scrollToCurrentLine(proxy, animated: false) }
+        }
+        .onAppear { self.scrollToCurrentLine(animated: false) }
+        .onChange(of: self.vm.currentLineIndex) { _, _ in
+            guard self.followsPlayback else { return }
+            self.scrollToCurrentLine(animated: true)
+        }
+        .onChange(of: self.trackID) { _, _ in
+            self.followsPlayback = true
+            self.scrollToCurrentLine(animated: false)
+        }
+        .onChange(of: self.isPresented) { _, visible in
+            if visible {
+                self.followsPlayback = true
+                self.scrollToCurrentLine(animated: false)
             }
+        }
+        .onChange(of: size) { _, _ in
+            if self.followsPlayback { self.scrollToCurrentLine(animated: false) }
         }
     }
 
@@ -133,10 +138,10 @@ struct ExpandedLyricsView: View {
         .help(L10n.string("Jumps playback to this line."))
     }
 
-    private func scrollToCurrentLine(_ proxy: ScrollViewProxy, animated: Bool) {
+    private func scrollToCurrentLine(animated: Bool) {
         guard self.isPresented else { return }
         withAnimation(animated && !self.reduceMotion ? .easeInOut(duration: 0.45) : nil) {
-            proxy.scrollTo(self.vm.currentLineIndex ?? 0, anchor: .center)
+            self.syncedPosition.scrollTo(id: self.vm.currentLineIndex ?? 0, anchor: .center)
         }
     }
 }

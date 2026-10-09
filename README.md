@@ -4,11 +4,11 @@ WMusic 是面向 macOS 本地曲库的播放器开发工作区，仅计划本机
 
 ## 下载
 
-源码仓库：[williamhsu218/wmusic](https://github.com/williamhsu218/wmusic)。安装包见 [GitHub Releases](https://github.com/williamhsu218/wmusic/releases/latest)，当前版本为 **1.0.1 (2)**。
+源码仓库：[williamhsu218/wmusic](https://github.com/williamhsu218/wmusic)。安装包见 [GitHub Releases](https://github.com/williamhsu218/wmusic/releases/latest)，当前版本为 **1.0.2 (3)**。
 
-下载 `WMusic-1.0.1-macos-arm64.zip`，解压后将 `WMusic.app` 放入 `/Applications`。更新前先正常退出旧应用，并保留旧应用与曲库备份；本工作区的更新继续使用下文的安装脚本维护唯一回滚。安装包不包含音乐文件或用户数据库，运行时无需安装 Homebrew。
+下载 `WMusic-1.0.2-macos-arm64.zip`，解压后将 `WMusic.app` 放入 `/Applications`。更新前先正常退出旧应用，并保留旧应用与曲库备份；本工作区的更新继续使用下文的安装脚本维护唯一回滚。安装包不包含音乐文件或用户数据库，运行时无需安装 Homebrew。
 
-此预编译包要求 **Apple Silicon 和 macOS 27+**：主程序的构建目标为 macOS 15，但本次附带音频库的最低系统版本为 macOS 27。应用采用 ad-hoc 签名，未经过 Apple 公证；其他 Mac 的首次打开与实际播放仍需对应机器验收。附件包含 SHA-256 校验值与构建信息，版本内容和验证范围见 [1.0.1 发布说明](docs/releases/v1.0.1.md)。
+此预编译包要求 **Apple Silicon 和 macOS 27+**：主程序的构建目标为 macOS 15，但本次附带音频库的最低系统版本为 macOS 27。应用采用 ad-hoc 签名，未经过 Apple 公证；其他 Mac 的首次打开与实际播放仍需对应机器验收。附件包含 SHA-256 校验值与构建信息，版本内容和验证范围见 [1.0.2 发布说明](docs/releases/v1.0.2.md)。
 
 ## 本地开发
 

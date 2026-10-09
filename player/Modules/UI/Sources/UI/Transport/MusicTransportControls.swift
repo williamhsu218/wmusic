@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The transport control row shown in `NowPlayingStrip` when playing music
 /// (not a podcast). Contains love, info, previous, play/pause, next, shuffle,
-/// repeat, and stop-after-current buttons.
+/// and repeat buttons. Stop After Current remains available in the Playback menu.
 struct MusicTransportControls: View {
     var vm: NowPlayingViewModel
     var library: LibraryViewModel
@@ -158,24 +158,6 @@ struct MusicTransportControls: View {
             .accessibilityAddTraits(.isToggle)
             .accessibilityIdentifier(A11y.NowPlaying.repeatButton)
 
-            Button {
-                Task { await self.vm.toggleStopAfterCurrent() }
-            } label: {
-                Image(systemName: "stop.circle\(self.vm.stopAfterCurrent ? ".fill" : "")")
-                    .scaledSystemFont(size: 15, weight: .medium)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(self.vm.stopAfterCurrent ? AccentPalette.color(for: self.accentColorKey) : Color.textTertiary)
-            .activeToggleIndicator(self.vm.stopAfterCurrent)
-            .help(self.vm.stopAfterCurrent ? L10n.string("Stop after current track: On") : L10n.string("Stop after current track: Off"))
-            .accessibilityLabel(self.vm.stopAfterCurrent
-                ? L10n.string("Stop After Current: On") : L10n.string("Stop After Current: Off"))
-            .accessibilityHint(self.vm.stopAfterCurrent
-                ? L10n.string("Activate to keep playing after this track")
-                : L10n.string("Activate to stop playback after this track"))
-            .accessibilityAddTraits(.isToggle)
-            .accessibilityIdentifier(A11y.NowPlaying.stopAfterCurrentButton)
         }
         .focusSection()
     }

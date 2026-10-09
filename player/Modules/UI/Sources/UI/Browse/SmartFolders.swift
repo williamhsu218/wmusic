@@ -1,5 +1,3 @@
-import Observability
-import Persistence
 import SwiftUI
 
 // MARK: - SmartFolderView
@@ -19,32 +17,32 @@ public struct SmartFolderView: View {
     }
 
     public var body: some View {
-        TracksView(vm: self.vm, library: self.library, title: self.destination.displayTitle)
-            .task {
-                let repo = TrackRepository(database: library.database)
-                let result: [Track]
-                do {
-                    switch self.destination {
-                    case .recentlyAdded:
-                        result = try await repo.recentlyAdded(days: 30)
+        // Navigation already loads this destination. A second fetch here
+        // reassigned all rows shortly after the first one and rebuilt artwork
+        // cells while the new page was appearing.
+        TracksView(
+            vm: self.vm,
+            library: self.library,
+            title: self.destination.displayTitle,
+            emphasizesPlayCount: self.destination == .mostPlayed,
+            destinationSortOrder: self.destination.sortOrder
+        )
+        .id(self.destination)
+    }
+}
 
-                    case .recentlyPlayed:
-                        result = try await repo.recentlyPlayed(days: 90)
-
-                    case .mostPlayed:
-                        result = try await repo.mostPlayed(limit: 100)
-
-                    default:
-                        result = []
-                    }
-                    self.vm.setTracks(result)
-                } catch {
-                    AppLogger.make(.ui).error(
-                        "smartfolder.load.failed",
-                        ["destination": String(describing: self.destination), "error": String(reflecting: error)]
-                    )
-                }
-            }
+private extension SidebarDestination {
+    var sortOrder: [KeyPathComparator<TrackRow>]? {
+        switch self {
+        case .recentlyAdded:
+            [KeyPathComparator(\TrackRow.addedAt, order: .reverse)]
+        case .recentlyPlayed:
+            [KeyPathComparator(\TrackRow.lastPlayedAt, order: .reverse)]
+        case .mostPlayed:
+            [KeyPathComparator(\TrackRow.playCount, order: .reverse)]
+        default:
+            nil
+        }
     }
 }
 
@@ -55,6 +53,9 @@ extension SidebarDestination {
         switch self {
         case .songs:
             L10n.string("Songs")
+
+        case .musicFolder:
+            L10n.string("Music Folder")
 
         case .albums:
             L10n.string("Albums")

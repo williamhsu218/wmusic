@@ -15,6 +15,9 @@ public enum SidebarDestination: Hashable, Sendable, Codable {
     case genres
     case composers
 
+    /// A registered music source's songs, scoped to `library_roots.id`.
+    case musicFolder(Int64)
+
     // MARK: - Smart folders
 
     case recentlyAdded

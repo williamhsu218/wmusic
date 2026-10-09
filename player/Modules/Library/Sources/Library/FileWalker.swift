@@ -19,12 +19,15 @@ public enum FileWalker {
     /// - Parameters:
     ///   - rootURL: Directory or single file to walk.
     ///   - supportedExtensions: Lower-case file extensions to emit.
+    ///   - onError: Reports an incomplete walk so callers can preserve indexed
+    ///     tracks when a network share is offline or disconnects mid-scan.
     ///   - iCloudDownload: When `true`, request download of any iCloud
     ///     placeholders encountered. ADR-004 audit H7.
     public static func walk(
         _ rootURL: URL,
         supportedExtensions: Set<String>,
-        iCloudDownload: Bool = false
+        iCloudDownload: Bool = false,
+        onError: @escaping @Sendable (URL, Error) -> Void = { _, _ in }
     ) -> AsyncStream<URL> {
         AsyncStream { continuation in
             let task = Task.detached(priority: .utility) {
@@ -32,6 +35,7 @@ public enum FileWalker {
                     rootURL,
                     extensions: supportedExtensions,
                     iCloudDownload: iCloudDownload,
+                    onError: onError,
                     yield: { continuation.yield($0) }
                 )
                 continuation.finish()
@@ -52,6 +56,7 @@ public enum FileWalker {
         _ url: URL,
         extensions supportedExtensions: Set<String>,
         iCloudDownload: Bool,
+        onError: @escaping (URL, Error) -> Void,
         yield: (URL) -> Void
     ) {
         // Cooperative cancellation: the owning scan can be cancelled mid-walk
@@ -65,7 +70,10 @@ public enum FileWalker {
         // If the root itself is a supported audio file, yield it directly.
         var isDir: ObjCBool = false
         let exists = fm.fileExists(atPath: url.path, isDirectory: &isDir)
-        guard exists else { return }
+        guard exists else {
+            onError(url, LibraryError.sourceUnavailable(url))
+            return
+        }
 
         if !isDir.boolValue {
             let ext = url.pathExtension.lowercased()
@@ -87,8 +95,15 @@ public enum FileWalker {
                 // straight from the URL cache instead of a second stat(2). #278.
                 .contentModificationDateKey,
             ],
-            options: [.skipsSubdirectoryDescendants]
-        ) else { return }
+            options: [.skipsSubdirectoryDescendants],
+            errorHandler: { failedURL, error in
+                onError(failedURL, error)
+                return true
+            }
+        ) else {
+            onError(url, LibraryError.sourceUnavailable(url))
+            return
+        }
 
         for case let child as URL in enumerator {
             // Cooperative cancellation inside the per-child loop: a single
@@ -122,13 +137,23 @@ public enum FileWalker {
                 continue
             }
 
-            let resourceValues = try? child.resourceValues(
-                forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey, .isHiddenKey]
-            )
-            let isDirectory = resourceValues?.isDirectory ?? false
-            let isPackage = resourceValues?.isPackage ?? false
-            let isSymlink = resourceValues?.isSymbolicLink ?? false
-            let isHidden = resourceValues?.isHidden ?? false
+            let resourceValues: URLResourceValues
+            do {
+                resourceValues = try child.resourceValues(
+                    forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey, .isHiddenKey]
+                )
+            } catch {
+                // A dangling symlink is intentionally skipped. Other stat
+                // failures mean the directory walk was incomplete.
+                if (try? fm.destinationOfSymbolicLink(atPath: child.path)) == nil {
+                    onError(child, error)
+                }
+                continue
+            }
+            let isDirectory = resourceValues.isDirectory ?? false
+            let isPackage = resourceValues.isPackage ?? false
+            let isSymlink = resourceValues.isSymbolicLink ?? false
+            let isHidden = resourceValues.isHidden ?? false
 
             if isHidden {
                 continue
@@ -149,6 +174,7 @@ public enum FileWalker {
                     child,
                     extensions: supportedExtensions,
                     iCloudDownload: iCloudDownload,
+                    onError: onError,
                     yield: yield
                 )
                 continue
@@ -168,7 +194,7 @@ public enum FileWalker {
     /// it. See #265.
     static func _collectForTesting(_ url: URL, extensions: Set<String>) -> [URL] {
         var out: [URL] = []
-        self.enumerate(url, extensions: extensions, iCloudDownload: false) { out.append($0) }
+        self.enumerate(url, extensions: extensions, iCloudDownload: false, onError: { _, _ in }) { out.append($0) }
         return out
     }
 }

@@ -1973,6 +1973,22 @@
         }
       }
     },
+    "1. Connect your NAS" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "1. Çóññéçţ ýóúŕ ÑÁŠ one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "1. 连接 NAS"
+          }
+        }
+      }
+    },
     "1.0× (off)" : {
       "localizations" : {
         "en" : {
@@ -2066,6 +2082,22 @@
         }
       }
     },
+    "NAS server address" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "nas.example óŕ nas.example one two three"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "nas.example 或 nas.example"
+          }
+        }
+      }
+    },
     "2 hr" : {
       "localizations" : {
         "en" : {
@@ -2078,6 +2110,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "2 ĥŕ one"
+          }
+        }
+      }
+    },
+    "2. Add the music folder" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "2. Áđđ ţĥé ḿúšíç ƒóĺđéŕ one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "2. 添加音乐文件夹"
           }
         }
       }
@@ -3281,6 +3329,22 @@
         }
       }
     },
+    "After reconnecting a share, click Rescan. Availability reflects the last scan. NAS folders may need a manual rescan to pick up remote changes." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Áƒţéŕ ŕéçóññéçţíñĝ á šĥáŕé, çĺíçķ Ŕéšçáñ. Áváíĺáƀíĺíţý ŕéƒĺéçţš ţĥé ĺášţ šçáñ. ÑÁŠ ƒóĺđéŕš ḿáý ñééđ á ḿáñúáĺ ŕéšçáñ ţó ƥíçķ úƥ ŕéḿóţé çĥáñĝéš. one two three four five six seven eight nine"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新连接共享后，请点击“重新扫描”。可用状态以上次扫描为准；NAS 上的文件变动可能需要手动扫描才能更新。"
+          }
+        }
+      }
+    },
     "Aggregate" : {
       "comment" : "Audio output transport type label shown in the route chip popover.",
       "extractionState" : "stale",
@@ -3608,6 +3672,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Áĺĺóŵíñĝ šéĺƒ-šíĝñéđ çéŕţíƒíçáţéš ḿéáñš ŴḾúšíç çáññóţ véŕíƒý ţĥáţ ţĥé šéŕvéŕ íš ŵĥó íţ çĺáíḿš ţó ƀé. one two three four five six seven"
+          }
+        }
+      }
+    },
+    "Already connected in Finder? Choose NAS Folder to add your music." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Áĺŕéáđý çóññéçţéđ íñ Ƒíñđéŕ? Çĥóóšé ÑÁŠ Ƒóĺđéŕ ţó áđđ ýóúŕ ḿúšíç. one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在 Finder 中连接？点击“选择 NAS 文件夹”添加音乐。"
           }
         }
       }
@@ -4314,6 +4394,22 @@
         }
       }
     },
+    "Available at last scan" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Áváíĺáƀĺé áţ ĺášţ šçáñ one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次扫描时可用"
+          }
+        }
+      }
+    },
     "Average Album Length by Decade" : {
       "localizations" : {
         "en-XA" : {
@@ -4999,6 +5095,22 @@
         }
       }
     },
+    "Check connected music folders for new or changed files" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çĥéçķ çóññéçţéđ ḿúšíç ƒóĺđéŕš ƒóŕ ñéŵ óŕ çĥáñĝéđ ƒíĺéš one two three four"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "扫描已连接的音乐文件夹，查找新增或修改的文件"
+          }
+        }
+      }
+    },
     "Check for Updates…" : {
       "localizations" : {
         "en-XA" : {
@@ -5051,6 +5163,22 @@
         }
       }
     },
+    "Choose NAS Folder…" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çĥóóšé ÑÁŠ Ƒóĺđéŕ… one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择 NAS 文件夹…"
+          }
+        }
+      }
+    },
     "Choose a Last.fm listening-history export (a CSV with uts, artist, and track columns)." : {
       "localizations" : {
         "en-XA" : {
@@ -5069,6 +5197,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Çĥóóšé á ƒóĺđéŕ çóñţáíñíñĝ ḿúšíç ţó áđđ ţó ýóúŕ ĺíƀŕáŕý one two three four"
+          }
+        }
+      }
+    },
+    "Choose a folder on an SMB share. Use Add Folder in Library for local folders." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çĥóóšé á ƒóĺđéŕ óñ áñ ŠḾƁ šĥáŕé. Úšé Áđđ Ƒóĺđéŕ íñ Ĺíƀŕáŕý ƒóŕ ĺóçáĺ ƒóĺđéŕš. one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请选择 SMB 共享中的文件夹。本地文件夹请在“Library”中点击“添加文件夹”。"
+          }
+        }
+      }
+    },
+    "Choose a folder on an already connected SMB share and import its music" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çĥóóšé á ƒóĺđéŕ óñ áñ áĺŕéáđý çóññéçţéđ ŠḾƁ šĥáŕé áñđ íḿƥóŕţ íţš ḿúšíç one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择已连接的 SMB 共享中的文件夹，将音乐加入曲库"
+          }
+        }
+      }
+    },
+    "Choose a music folder on your connected NAS. Connect the SMB share first if it is not listed." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çĥóóšé á ḿúšíç ƒóĺđéŕ óñ ýóúŕ çóññéçţéđ ÑÁŠ. Çóññéçţ ţĥé ŠḾƁ šĥáŕé ƒíŕšţ íƒ íţ íš ñóţ ĺíšţéđ. one two three four five six"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请选择已连接 NAS 上的音乐文件夹。如果未列出，请先连接 SMB 共享。"
           }
         }
       }
@@ -5107,6 +5283,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Çĥóóšé á šávé ĺóçáţíóñ áñđ éxƥóŕţ ţĥé ƥĺáýĺíšţ one two three"
+          }
+        }
+      }
+    },
+    "Choose a shared folder and sign in through macOS, then return here to choose your music folder." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çĥóóšé á šĥáŕéđ ƒóĺđéŕ áñđ šíĝñ íñ ţĥŕóúĝĥ ḿáçÓŠ, ţĥéñ ŕéţúŕñ ĥéŕé ţó çĥóóšé ýóúŕ ḿúšíç ƒóĺđéŕ. one two three four five six seven"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 macOS 中选择共享文件夹并登录，再回到这里选择音乐目录。"
           }
         }
       }
@@ -5309,6 +5501,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Çĥóóšé ŕóóţ… one"
+          }
+        }
+      }
+    },
+    "Choose shared music files on a NAS or a Subsonic-compatible streaming service" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çĥóóšé šĥáŕéđ ḿúšíç ƒíĺéš óñ á ÑÁŠ óŕ á Šúƀšóñíç-çóḿƥáţíƀĺé šţŕéáḿíñĝ šéŕvíçé one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择 NAS 共享音乐文件或兼容 Subsonic 的音乐服务"
           }
         }
       }
@@ -6091,12 +6299,76 @@
         }
       }
     },
+    "Connect a NAS music folder or a Subsonic-compatible music server" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çóññéçţ á ÑÁŠ ḿúšíç ƒóĺđéŕ óŕ á Šúƀšóñíç-çóḿƥáţíƀĺé ḿúšíç šéŕvéŕ one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连接 NAS 音乐文件夹或兼容 Subsonic 的音乐服务"
+          }
+        }
+      }
+    },
     "Connect a Subsonic-compatible music server" : {
       "localizations" : {
         "en-XA" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Çóññéçţ á Šúƀšóñíç-çóḿƥáţíƀĺé ḿúšíç šéŕvéŕ one two three"
+          }
+        }
+      }
+    },
+    "Connect an SMB share, then choose its music folder. Songs appear in your library without copying the audio files to this Mac." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çóññéçţ áñ ŠḾƁ šĥáŕé, ţĥéñ çĥóóšé íţš ḿúšíç ƒóĺđéŕ. Šóñĝš áƥƥéáŕ íñ ýóúŕ ĺíƀŕáŕý ŵíţĥóúţ çóƥýíñĝ ţĥé áúđíó ƒíĺéš ţó ţĥíš Ḿáç. one two three four five six seven eight"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连接 SMB 共享后，选择其中的音乐文件夹。歌曲会加入曲库，音频文件不会复制到这台 Mac。"
+          }
+        }
+      }
+    },
+    "Connect in Finder…" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çóññéçţ íñ Ƒíñđéŕ… one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 Finder 中连接…"
+          }
+        }
+      }
+    },
+    "Connect to this server in macOS, then choose a shared folder and sign in" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çóññéçţ ţó ţĥíš šéŕvéŕ íñ ḿáçÓŠ, ţĥéñ çĥóóšé á šĥáŕéđ ƒóĺđéŕ áñđ šíĝñ íñ one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通过 macOS 连接此服务器，然后选择共享文件夹并登录"
           }
         }
       }
@@ -6323,6 +6595,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Çóúĺđ Ñóţ Ĺóáđ one two"
+          }
+        }
+      }
+    },
+    "Could not add the NAS folder: %@" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Çóúĺđ ñóţ áđđ ţĥé ÑÁŠ ƒóĺđéŕ: %@ one two three"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法添加 NAS 文件夹：%@"
           }
         }
       }
@@ -9164,6 +9452,38 @@
         }
       }
     },
+    "Enter a LAN IP, Tailscale IP, or hostname. A share name is optional." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Éñţéŕ á ĹÁÑ ÍƤ, Ţáíĺšçáĺé ÍƤ, óŕ ĥóšţñáḿé. Á šĥáŕé ñáḿé íš óƥţíóñáĺ. one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "输入内网 IP、Tailscale IP 或主机名。共享目录可不填写。"
+          }
+        }
+      }
+    },
+    "Enter a server IP or hostname, optionally followed by a shared folder. Use SMB for music files and enter credentials only in the macOS connection window." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Éñţéŕ á šéŕvéŕ ÍƤ óŕ ĥóšţñáḿé, óƥţíóñáĺĺý ƒóĺĺóŵéđ ƀý á šĥáŕéđ ƒóĺđéŕ. Úšé ŠḾƁ ƒóŕ ḿúšíç ƒíĺéš áñđ éñţéŕ çŕéđéñţíáĺš óñĺý íñ ţĥé ḿáçÓŠ çóññéçţíóñ ŵíñđóŵ. one two three four five six seven eight nine ten"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请输入服务器 IP 或主机名，也可附带共享目录。音乐文件使用 SMB 连接；账户密码请在 macOS 连接窗口中填写。"
+          }
+        }
+      }
+    },
     "Enter this code on your phone." : {
       "localizations" : {
         "en-XA" : {
@@ -10338,6 +10658,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ƒóĺđéŕ: %1$@, %2$@ one two"
+          }
+        }
+      }
+    },
+    "Follow Lyrics" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Follow Lyrics"
+          }
+        },
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ƒóĺĺóŵ Ĺýŕíçš one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "跟随歌词"
           }
         }
       }
@@ -11957,6 +12300,29 @@
         }
       }
     },
+    "Instrumental" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Instrumental"
+          }
+        },
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Íñšţŕúḿéñţáĺ one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "间奏"
+          }
+        }
+      }
+    },
     "Integration" : {
       "localizations" : {
         "en-XA" : {
@@ -12280,6 +12646,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ķééƥ ţĥé ŕéšţóŕéđ qúéúé áñđ çóñţíñúé ŵĥéŕé ýóú ĺéƒţ óƒƒ. one two three four"
+          }
+        }
+      }
+    },
+    "Keep this NAS folder in the library" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ķééƥ ţĥíš ÑÁŠ ƒóĺđéŕ íñ ţĥé ĺíƀŕáŕý one two three"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "保留此 NAS 文件夹"
           }
         }
       }
@@ -13996,12 +14378,60 @@
         }
       }
     },
+    "Music Folder" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ḿúšíç Ƒóĺđéŕ one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "音乐文件夹"
+          }
+        }
+      }
+    },
+    "Music Servers" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ḿúšíç Šéŕvéŕš one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "音乐服务"
+          }
+        }
+      }
+    },
     "Music Sources" : {
       "localizations" : {
         "en-XA" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ḿúšíç Šóúŕçéš one"
+          }
+        }
+      }
+    },
+    "Music on your Synology or NAS" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ḿúšíç óñ ýóúŕ Šýñóĺóĝý óŕ ÑÁŠ one two three"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "群晖或 NAS 上的音乐"
           }
         }
       }
@@ -14111,6 +14541,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ḿúţé one"
+          }
+        }
+      }
+    },
+    "NAS Folders" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ÑÁŠ Ƒóĺđéŕš one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "NAS 文件夹"
+          }
+        }
+      }
+    },
+    "NAS Music Folders" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ÑÁŠ Ḿúšíç Ƒóĺđéŕš one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "NAS 音乐文件夹"
+          }
+        }
+      }
+    },
+    "NAS folder added. Its music is being scanned into your library." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ÑÁŠ ƒóĺđéŕ áđđéđ. Íţš ḿúšíç íš ƀéíñĝ šçáññéđ íñţó ýóúŕ ĺíƀŕáŕý. one two three four"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已添加 NAS 文件夹，正在扫描并导入音乐。"
           }
         }
       }
@@ -14551,6 +15029,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ñó ḾúšíçƁŕáíñž íđéñţíƒíéŕ ƒóŕ ţĥíš íţéḿ, áñđ ñó çóñƒíđéñţ ḿáţçĥ ƀý ñáḿé. one two three four five"
+          }
+        }
+      }
+    },
+    "No NAS Folders Added" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ñó ÑÁŠ Ƒóĺđéŕš Áđđéđ one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "尚未添加 NAS 文件夹"
           }
         }
       }
@@ -15103,6 +15597,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ñó šĥóŵ ñóţéš áváíĺáƀĺé. one two"
+          }
+        }
+      }
+    },
+    "No songs have been indexed from this folder yet. Reconnect the share if needed, then rescan." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ñó šóñĝš ĥávé ƀééñ íñđéxéđ ƒŕóḿ ţĥíš ƒóĺđéŕ ýéţ. Ŕéçóññéçţ ţĥé šĥáŕé íƒ ñééđéđ, ţĥéñ ŕéšçáñ. one two three four five six"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该文件夹尚未导入歌曲。如有需要，请重新连接共享后再扫描。"
           }
         }
       }
@@ -15909,6 +16419,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Óƥéñ Ŕéƥóŕţš Ƒóĺđéŕ íñ Ƒíñđéŕ one two three"
+          }
+        }
+      }
+    },
+    "Open Sources to reconnect or rescan this NAS folder" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Óƥéñ Šóúŕçéš ţó ŕéçóññéçţ óŕ ŕéšçáñ ţĥíš ÑÁŠ ƒóĺđéŕ one two three four"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开 Sources 重新连接或扫描此 NAS 文件夹"
           }
         }
       }
@@ -18259,6 +18785,38 @@
         }
       }
     },
+    "Reconnect this SMB share in Finder, then rescan" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ŕéçóññéçţ ţĥíš ŠḾƁ šĥáŕé íñ Ƒíñđéŕ, ţĥéñ ŕéšçáñ one two three four"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 Finder 中重新连接 SMB 共享，然后重新扫描"
+          }
+        }
+      }
+    },
+    "Reconnect…" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ŕéçóññéçţ… one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新连接…"
+          }
+        }
+      }
+    },
     "Recording" : {
       "localizations" : {
         "en-XA" : {
@@ -18723,6 +19281,38 @@
         }
       }
     },
+    "Remove NAS folder" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ŕéḿóvé ÑÁŠ ƒóĺđéŕ one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除 NAS 文件夹"
+          }
+        }
+      }
+    },
+    "Remove NAS folder from library?" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ŕéḿóvé ÑÁŠ ƒóĺđéŕ ƒŕóḿ ĺíƀŕáŕý? one two three"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从曲库移除 NAS 文件夹？"
+          }
+        }
+      }
+    },
     "Remove Server" : {
       "localizations" : {
         "en-XA" : {
@@ -18883,6 +19473,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ŕéḿóvé ţĥíš áŕţíšţ ƒŕóḿ ĺíƀŕáŕý? one two three"
+          }
+        }
+      }
+    },
+    "Remove this folder from the library without deleting music files" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ŕéḿóvé ţĥíš ƒóĺđéŕ ƒŕóḿ ţĥé ĺíƀŕáŕý ŵíţĥóúţ đéĺéţíñĝ ḿúšíç ƒíĺéš one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从曲库移除此文件夹，保留音乐文件"
           }
         }
       }
@@ -19300,6 +19906,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ŕéqúíŕéš Ḿéţáĺ ĝŕáƥĥíçš šúƥƥóŕţ, ŵĥíçĥ ţĥíš Ḿáç đóéš ñóţ ƥŕóvíđé. one two three four five"
+          }
+        }
+      }
+    },
+    "Rescan" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ŕéšçáñ one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新扫描"
           }
         }
       }
@@ -20626,6 +21248,22 @@
         }
       }
     },
+    "Server Address" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Šéŕvéŕ Áđđŕéšš one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "服务器地址"
+          }
+        }
+      }
+    },
     "Server URL" : {
       "localizations" : {
         "en-XA" : {
@@ -21340,6 +21978,22 @@
         }
       }
     },
+    "Sign in using the macOS window. WMusic does not store your NAS password." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Šíĝñ íñ úšíñĝ ţĥé ḿáçÓŠ ŵíñđóŵ. ŴḾúšíç đóéš ñóţ šţóŕé ýóúŕ ÑÁŠ ƥáššŵóŕđ. one two three four five"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 macOS 窗口中登录。WMusic 不保存 NAS 密码。"
+          }
+        }
+      }
+    },
     "Single" : {
       "localizations" : {
         "en-XA" : {
@@ -21934,6 +22588,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Šóúŕçé one"
+          }
+        }
+      }
+    },
+    "Source Type" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Šóúŕçé Ţýƥé one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "来源类型"
           }
         }
       }
@@ -23587,6 +24257,22 @@
         }
       }
     },
+    "This removes the folder's songs from the library. Music files on the NAS are kept." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ţĥíš ŕéḿóvéš ţĥé ƒóĺđéŕ'š šóñĝš ƒŕóḿ ţĥé ĺíƀŕáŕý. Ḿúšíç ƒíĺéš óñ ţĥé ÑÁŠ áŕé ķéƥţ. one two three four five six"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该文件夹的歌曲会从曲库移除，NAS 上的音乐文件会保留。"
+          }
+        }
+      }
+    },
     "This removes the server and its saved credentials from this Mac. Your music on the server isn't affected." : {
       "comment" : "A message displayed in a confirmation dialog that removes a",
       "isCommentAutoGenerated" : true,
@@ -24260,6 +24946,22 @@
         }
       }
     },
+    "Unavailable at last scan" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Úñáváíĺáƀĺé áţ ĺášţ šçáñ one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次扫描时不可用"
+          }
+        }
+      }
+    },
     "Unavailable while Reduce Motion is on." : {
       "localizations" : {
         "en" : {
@@ -24672,6 +25374,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Úšé Ţĥíš Ḿáţçĥ one two"
+          }
+        }
+      }
+    },
+    "Use a LAN IP, Tailscale IP, or device name, with or without smb://. You can choose the shared folder after connecting." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Úšé á ĹÁÑ ÍƤ, Ţáíĺšçáĺé ÍƤ, óŕ đévíçé ñáḿé, ŵíţĥ óŕ ŵíţĥóúţ šḿƀ://. Ýóú çáñ çĥóóšé ţĥé šĥáŕéđ ƒóĺđéŕ áƒţéŕ çóññéçţíñĝ. one two three four five six seven eight"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "填写内网 IP、Tailscale IP 或设备名，smb:// 可省略。连接后再选择共享文件夹即可。"
           }
         }
       }
@@ -26186,6 +26904,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ĺóŵéŕçášé one"
+          }
+        }
+      }
+    },
+    "macOS could not open the SMB connection. Try connecting from Finder's Go → Connect to Server menu." : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ḿáçÓŠ çóúĺđ ñóţ óƥéñ ţĥé ŠḾƁ çóññéçţíóñ. Ţŕý çóññéçţíñĝ ƒŕóḿ Ƒíñđéŕ'š Ĝó → Çóññéçţ ţó Šéŕvéŕ ḿéñú. one two three four five six seven"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "macOS 无法打开 SMB 连接。请尝试从 Finder 的“前往 → 连接服务器”菜单连接。"
           }
         }
       }

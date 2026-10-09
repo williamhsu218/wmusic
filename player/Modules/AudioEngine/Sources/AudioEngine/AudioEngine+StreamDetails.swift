@@ -33,6 +33,25 @@ public extension AudioEngine {
         get async { self.decoder?.codec }
     }
 
+    /// Read identity and facts from the decoder itself: `currentURL` changes
+    /// before a load installs its decoder, and is not the promoted gapless URL.
+    var currentSourceFactsSnapshot: TransportSourceFacts? {
+        get async {
+            guard let decoder = self.decoder else { return TransportSourceFacts() }
+            let url = decoder.sourceURL
+            let codec = decoder.codec
+            let details: StreamDetails?
+            if let stream = decoder as? FFmpegDecoder {
+                details = await stream.liveDetails
+            } else {
+                details = nil
+            }
+            // A load or promotion may have replaced it during the details hop.
+            guard self.decoder === decoder else { return TransportSourceFacts() }
+            return TransportSourceFacts(sourceURL: url, streamDetails: details, codec: codec)
+        }
+    }
+
     /// Whether a seek must be refused because the source is a live remote
     /// stream (no duration, http source). FFmpeg degrades such a seek into
     /// reading the stream at the server's pace, which holds the transport

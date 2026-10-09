@@ -20,6 +20,7 @@ public struct DiagnosticsSettingsView: View {
     @State private var expandedReport: URL?
     @State private var expandedContent = ""
     @State private var logBufferCount = 0
+    @State private var showContrastAudit = false
 
     public init() {}
 
@@ -107,10 +108,16 @@ public struct DiagnosticsSettingsView: View {
             // MARK: Colour contrast audit
 
             Section {
-                ContrastAuditView()
-                    .listRowInsets(EdgeInsets())
+                DisclosureGroup(isExpanded: self.$showContrastAudit) {
+                    if self.showContrastAudit {
+                        ContrastAuditView()
+                            .listRowInsets(EdgeInsets())
+                    }
+                } label: {
+                    Text(localized: "Colour Contrast Audit (WCAG 2.1 AA)")
+                }
             } header: {
-                Text(localized: "Colour Contrast Audit (WCAG 2.1 AA)")
+                EmptyView()
             } footer: {
                 Text(self.contrastFooter)
                     .font(.caption)
@@ -120,7 +127,11 @@ public struct DiagnosticsSettingsView: View {
         .formStyle(.grouped)
         .navigationTitle(L10n.string("Diagnostics"))
         .task {
-            self.reports = MetricKitListener.listReports()
+            let reports = await Task.detached(priority: .utility) {
+                MetricKitListener.listReports()
+            }.value
+            guard !Task.isCancelled else { return }
+            self.reports = reports
             self.logBufferCount = LogStore.shared.count
         }
     }

@@ -11,6 +11,9 @@ extension LibraryViewModel {
         case .songs:
             await self.loadSongsDestination(query: query)
 
+        case let .musicFolder(id):
+            await self.loadMusicFolderDestination(id: id, query: query)
+
         case .albums:
             await self.loadAlbumsDestination(query: query)
 
@@ -21,13 +24,13 @@ extension LibraryViewModel {
             await self.tracks.load()
 
         case .recentlyAdded:
-            await self.loadSmartFolder { try await $0.recentlyAdded() }
+            await self.loadSmartFolder(for: destination) { try await $0.recentlyAdded() }
 
         case .recentlyPlayed:
-            await self.loadSmartFolder { try await $0.recentlyPlayed() }
+            await self.loadSmartFolder(for: destination) { try await $0.recentlyPlayed() }
 
         case .mostPlayed:
-            await self.loadSmartFolder { try await $0.mostPlayed() }
+            await self.loadSmartFolder(for: destination) { try await $0.mostPlayed() }
 
         case let .artist(id):
             await self.artists.load()
@@ -223,6 +226,20 @@ extension LibraryViewModel {
         }
     }
 
+    private func loadMusicFolderDestination(id: Int64, query: String) async {
+        do {
+            try await self.tracks.load(libraryRootID: id, query: query)
+        } catch PersistenceError.notFound(entity: "library_roots", id: _) {
+            guard self.selectedDestination == .musicFolder(id) else { return }
+            self.log.warning("library.musicFolder.destinationGone", ["id": id])
+            self.selectedDestination = .songs
+            self.tracks.clearRows()
+            await self.loadSongsDestination(query: query)
+        } catch {
+            self.log.error("library.musicFolder.load.failed", ["id": id, "error": String(reflecting: error)])
+        }
+    }
+
     private func loadAlbumsDestination(query: String) async {
         if query.isEmpty {
             await self.albums.load()
@@ -239,7 +256,11 @@ extension LibraryViewModel {
         }
     }
 
-    private func loadSmartFolder(_ fetch: (TrackRepository) async throws -> [Track]) async {
+    private func loadSmartFolder(
+        for destination: SidebarDestination,
+        _ fetch: (TrackRepository) async throws -> [Track]
+    ) async {
+        self.tracks.beginSmartFolderLoading()
         let trackRepo = TrackRepository(database: database)
         let result: [Track]
         do {
@@ -250,6 +271,11 @@ extension LibraryViewModel {
             self.log.warning("library.smartFolder.failed", ["error": String(reflecting: error)])
             result = []
         }
-        self.tracks.setTracks(result)
+        await self.tracks.prepareSmartFolderRows()
+        guard self.selectedDestination == destination else { return }
+        // The repository defines each folder's order: date or play count.
+        // Reapplying the general Songs sort here silently changed Most Played
+        // into an artist/album listing and made navigation redraw the table.
+        self.tracks.finishSmartFolderRows(result)
     }
 }

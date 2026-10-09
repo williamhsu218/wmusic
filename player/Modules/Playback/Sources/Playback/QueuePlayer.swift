@@ -146,6 +146,7 @@ public actor QueuePlayer: Transport {
     /// than the window would otherwise lose its real end. Cleared by any
     /// manual load.
     private var armedBoundary: (itemID: QueueItem.ID, preparation: NextTrackPreparation)?
+    private var shuffleChangeGeneration = 0
 
     /// Periodic task that calls `historyRecorder.update(elapsed:)` while playing
     /// so that scrobbles fire at the 50 % threshold even before a track ends.
@@ -354,6 +355,10 @@ public actor QueuePlayer: Transport {
         get async { await self.engine.currentCodec }
     }
 
+    public var currentSourceFactsSnapshot: TransportSourceFacts? {
+        get async { await self.engine.currentSourceFactsSnapshot }
+    }
+
     /// Re-emits a live ICY title while the current item is internet radio:
     /// once to the UI stream, once to `MPNowPlayingInfoCenter` with the
     /// station name moved into the artist slot.
@@ -429,38 +434,14 @@ public actor QueuePlayer: Transport {
     /// round-trips inside `buildItems(for:)`, which become the dominant latency
     /// when queueing a large library (~32 queries/track, seconds for 10k+ tracks).
     ///
-    /// Pass `shuffle: true` to pre-shuffle the items with a fresh seed before
-    /// loading them into the queue.  This ensures the **first** track played is
-    /// already a randomly-selected one — not the original `items[0]`.  The queue
-    /// shuffle flag is also set so that auto-advance continues in shuffle order.
+    /// Pass `shuffle: true` to shuffle once while preserving the selected item.
+    /// The supplied order remains the baseline when shuffle is switched off.
     public func play(items: [QueueItem], startingAt index: Int = 0, shuffle: Bool = false) async throws {
         guard !items.isEmpty else { throw PlaybackError.queueEmpty }
-        // Increment before the first queue mutation so handleTrackEnded /
-        // handleGaplessTransition defer to this call during suspension points.
         self.activeReplaceCount += 1
         defer { activeReplaceCount -= 1 }
         await self.gaplessScheduler.reset()
-        let ordered: [QueueItem]
-        if shuffle {
-            let seed = UInt64.random(in: .min ... .max)
-            let clampedIndex = items.indices.contains(index) ? index : 0
-            // Pin the chosen track at position 0 so double-clicking a track in shuffle
-            // mode plays that track first, then shuffles the rest behind it.
-            // This matches the behaviour of iTunes / Music / Spotify.
-            // The explicitly chosen track is always kept even if it is marked
-            // excludedFromShuffle — exclusion means "don't surface randomly", not
-            // "never play".  All other excluded tracks are removed from the pool.
-            let chosen = items[clampedIndex]
-            let rest = items
-                .enumerated()
-                .filter { $0.offset != clampedIndex && !$0.element.excludedFromShuffle }
-                .map(\.element)
-            let shuffledRest = FisherYatesShuffle().shuffled(rest, seed: seed)
-            ordered = [chosen] + shuffledRest
-        } else {
-            ordered = items
-        }
-        await self.queue.replace(with: ordered, startAt: shuffle ? 0 : index)
+        await self.queue.replace(with: items, startAt: index)
         if shuffle {
             await self.queue.setShuffle(true)
         }
@@ -487,7 +468,7 @@ public actor QueuePlayer: Transport {
         defer { activeReplaceCount -= 1 }
         await self.gaplessScheduler.reset()
         await self.historyRecorder.trackSkipped(elapsed: self.engine.currentTime)
-        await self.queue.replace(with: snapshot, startAt: index)
+        await self.queue.seekToIndex(index)
         try await self.loadCurrentItem()
         try await self.engine.play()
         await self.nowPlayingCentre?.setPlaying(true)
@@ -515,22 +496,12 @@ public actor QueuePlayer: Transport {
         }
         let ids = tracks.compactMap(\.id)
         let items = try await buildItems(for: ids)
-        let ordered: [QueueItem]
-        if shuffle {
-            let seed = UInt64.random(in: .min ... .max)
-            // Fall back to the full list if every track is excluded, so the user
-            // isn't left with an empty queue after explicitly choosing this album.
-            let eligible = items.filter { !$0.excludedFromShuffle }
-            ordered = FisherYatesShuffle().shuffled(eligible.isEmpty ? items : eligible, seed: seed)
-        } else {
-            ordered = items
-        }
         self.activeReplaceCount += 1
         defer { activeReplaceCount -= 1 }
         await self.gaplessScheduler.reset()
-        await self.queue.replace(with: ordered, startAt: 0)
+        await self.queue.replace(with: items, startAt: 0)
         if shuffle {
-            await self.queue.setShuffle(true)
+            await self.queue.setShuffle(true, preservingCurrent: false)
         }
         try await self.loadCurrentItem()
         try await self.engine.play()
@@ -546,22 +517,12 @@ public actor QueuePlayer: Transport {
         }
         let ids = tracks.compactMap(\.id)
         let items = try await buildItems(for: ids)
-        let ordered: [QueueItem]
-        if shuffle {
-            let seed = UInt64.random(in: .min ... .max)
-            // Fall back to the full list if every track is excluded, so the user
-            // isn't left with an empty queue after explicitly choosing this artist.
-            let eligible = items.filter { !$0.excludedFromShuffle }
-            ordered = FisherYatesShuffle().shuffled(eligible.isEmpty ? items : eligible, seed: seed)
-        } else {
-            ordered = items
-        }
         self.activeReplaceCount += 1
         defer { activeReplaceCount -= 1 }
         await self.gaplessScheduler.reset()
-        await self.queue.replace(with: ordered, startAt: 0)
+        await self.queue.replace(with: items, startAt: 0)
         if shuffle {
-            await self.queue.setShuffle(true)
+            await self.queue.setShuffle(true, preservingCurrent: false)
         }
         try await self.loadCurrentItem()
         try await self.engine.play()
@@ -612,7 +573,15 @@ public actor QueuePlayer: Transport {
 
     /// Toggle shuffle on/off.
     public func setShuffle(_ on: Bool, strategy: (any ShuffleStrategy)? = nil) async {
+        self.shuffleChangeGeneration += 1
+        let generation = self.shuffleChangeGeneration
+        // Discard the old next-track preload, keeping the playing pump and time intact.
+        await self.gaplessScheduler.stop()
+        guard generation == self.shuffleChangeGeneration else { return }
+        self.armedBoundary = nil
         await self.queue.setShuffle(on)
+        guard generation == self.shuffleChangeGeneration else { return }
+        await self.gaplessScheduler.start()
     }
 
     /// Set the playback volume [0–1], forwarded to the audio engine.
@@ -1387,7 +1356,10 @@ public actor QueuePlayer: Transport {
         // outgoing item before advancing so a finished podcast episode can be
         // marked played on the handoff (not only on `handleTrackEnded`).
         let outgoing = await self.queue.currentItem
-        _ = await self.queue.advance()
+        guard await self.queue.advanceToItem(id: item.id) != nil else {
+            self.log.debug("queueplayer.gapless.staleItem", [:])
+            return
+        }
         // A crossfade or hand-over in the playing pump swaps no pump, so no
         // spurious end follows it and the settle window stays off (see
         // `armedBoundary`). Only a separate pump needs the window.
@@ -1434,15 +1406,13 @@ public actor QueuePlayer: Transport {
 
     private func subscribeToQueueChanges(stream: AsyncStream<QueueChange>) async {
         for await _ in stream {
-            let items = await queue.items
-            let currentIndex = await queue.currentIndex
-            let repeatMode = await queue.repeatMode
-            let shuffleState = await queue.shuffleState
+            let snapshot = await self.queue.persistenceSnapshot()
             await self.persistence.scheduleSave(
-                items: items,
-                currentIndex: currentIndex,
-                repeatMode: repeatMode,
-                shuffleState: shuffleState
+                items: snapshot.items,
+                currentIndex: snapshot.currentIndex,
+                repeatMode: snapshot.repeatMode,
+                shuffleState: snapshot.shuffleState,
+                sourceItems: snapshot.sourceItems
             )
         }
     }
@@ -1457,11 +1427,13 @@ public actor QueuePlayer: Transport {
             // Queue is empty on a schema mismatch — nothing more to restore.
             return
         }
-        await self.queue.replace(with: saved.items, startAt: saved.currentIndex ?? 0)
-        await self.queue.setRepeatMode(saved.repeatMode)
-        if case let .on(seed) = saved.shuffleState {
-            await self.queue.setShuffle(true, seed: seed)
-        }
+        await self.queue.restore(
+            items: saved.items,
+            currentIndex: saved.currentIndex,
+            repeatMode: saved.repeatMode,
+            shuffleState: saved.shuffleState,
+            sourceItems: saved.sourceItems
+        )
         self.log.debug("queueplayer.queue.restored", ["count": saved.items.count])
 
         // Identify items whose backing files have been moved or deleted while

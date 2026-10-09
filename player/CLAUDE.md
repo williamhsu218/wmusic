@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## WMusic local release
+
+The local WMusic fork follows [the workspace release rules](../AGENTS.md). From the workspace root, build the candidate with `script/build_local_app.sh`, then install the accepted candidate with `script/install_local_app.sh` after normally quitting the app. Production is `/Applications/WMusic.app`; the sole rollback is `.build-logs/install-backups/current-rollback/` with the previous app and library snapshot. The local Release package retains App Sandbox, uses ad-hoc signing and bundle ID `com.willhsu.wmusic.local`; its real library is in that bundle's container. These local release settings take precedence over upstream Bòcan CI release settings below.
+
 ## Project at a glance
 
 Bòcan is a native macOS music player (SwiftUI + Swift 6, macOS 15+, arm64 only). The codebase is a multi-module SPM workspace plus an Xcode shell app. There is no Catalyst, no Electron, no cross-platform layer.

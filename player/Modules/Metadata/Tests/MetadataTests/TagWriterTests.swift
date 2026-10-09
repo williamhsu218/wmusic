@@ -419,6 +419,28 @@ struct TagWriterTests {
         #expect(leftovers == [file.lastPathComponent], "no temp file left behind: \(leftovers)")
     }
 
+    @Test("a FLAC in a read-only folder stays intact and gives an actionable error")
+    func unwritableFolderPreservesOriginalFLAC() throws {
+        let (file, folder) = try tempCopyInOwnFolder(of: "sine-1s-44100-24-stereo.flac")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let original = try Data(contentsOf: file)
+        var tags = try TagReader().read(from: file)
+        tags.album = "Synthetic Test Album"
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
+
+        do {
+            try TagWriter().write(tags, to: file)
+            Issue.record("the parent folder should prevent atomic replacement")
+        } catch {
+            #expect(error.localizedDescription.contains("Add Folder"))
+            #expect(error.localizedDescription.contains("folder containing these tracks"))
+        }
+        #expect(try Data(contentsOf: file) == original)
+    }
+
     // MARK: - OGG
 
     @Test func writeAndReadBackTitle_ogg() throws {

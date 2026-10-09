@@ -318,6 +318,7 @@ public final class LibraryViewModel: ObservableObject { // swiftlint:disable:thi
     @Published public var scanCurrentPath = ""
     @Published public var scanSummary: ScanProgress.Summary?
     @Published public var libraryRoots: [LibraryRoot] = []
+    @Published public var networkFolders: [NetworkFolderSource] = []
     @Published public var isDragTargeted = false
 
     // MARK: - Playlist import/export sheet flags
@@ -399,6 +400,11 @@ public final class LibraryViewModel: ObservableObject { // swiftlint:disable:thi
     let scanner: LibraryScanner?
     let scrobbleService: ScrobbleService?
     var scanTask: Task<Void, Never>?
+    /// Shared across main-window instances. A new WindowGroup view must not
+    /// repeat the launch scan after the first window has finished loading.
+    var startupScanTriggered = false
+    /// The startup scan is allowed to run silently when the library is intact.
+    var activeScanIsStartup = false
     /// Pending debounced reload task scheduled by `scheduleWatcherReload()`.
     /// Cancelled and replaced whenever a new FSEvents batch arrives so that
     /// a burst of back-to-back file changes collapses into a single refresh.
@@ -912,6 +918,10 @@ public final class LibraryViewModel: ObservableObject { // swiftlint:disable:thi
             self?.showToast(ToastMessage(text: L10n.string("Playback stopped: the audio stream could not be reached.")))
         }
 
+        self.nowPlaying.onResolveLegacyQueueOrder = { [weak self] items, currentIndex in
+            self?.resolveLegacyQueueOrder(items: items, currentIndex: currentIndex)
+        }
+
         self.playlistSidebar.onDidDelete = { [weak self] deletedIDs in
             guard let self else { return }
             switch self.selectedDestination {
@@ -1039,7 +1049,7 @@ public final class LibraryViewModel: ObservableObject { // swiftlint:disable:thi
     /// (`tracks.rows`), making an in-place jump/scroll meaningful.
     nonisolated static func destinationRendersSharedTrackList(_ destination: SidebarDestination) -> Bool {
         switch destination {
-        case .songs, .album, .artist, .genre, .composer,
+        case .songs, .musicFolder, .album, .artist, .genre, .composer,
              .recentlyAdded, .recentlyPlayed, .mostPlayed, .search:
             true
 
@@ -1423,27 +1433,25 @@ public final class LibraryViewModel: ObservableObject { // swiftlint:disable:thi
     ///
     /// No-op when nothing is playing or when the currently-playing track isn't
     /// in the view's current track list — sorting an unrelated browse view
-    /// should not silently replace the playback queue.  The heavy QueueItem
-    /// construction runs off the main actor so large libraries don't stall the UI.
+    /// should not silently replace the playback queue. Existing queue identities
+    /// are retained, including when shuffle has hidden excluded source items.
     public func reorderQueue() async {
         guard let qp = engine as? QueuePlayer else { return }
         let contextTracks = self.tracks.tracks
         guard !contextTracks.isEmpty else { return }
 
-        // Only reorder when the currently-playing track is actually in the
-        // view's list; otherwise the user is sorting an unrelated context.
-        let currentTrackID = self.nowPlaying.nowPlayingTrackID
-        guard let currentTrackID,
-              contextTracks.contains(where: { $0.id == currentTrackID }) else { return }
-
-        let names = self.tracks.artistNames
-        // Build QueueItems off the main actor so 20k-track libraries don't stall the UI.
+        let snapshot = await qp.queue.persistenceSnapshot()
+        guard let currentIndex = snapshot.currentIndex,
+              snapshot.items.indices.contains(currentIndex) else { return }
+        let currentID = snapshot.items[currentIndex].id
+        let sourceItems = snapshot.sourceItems ?? snapshot.items
+        let activeIDs = Set(snapshot.items.map(\.id))
+        // Match each occurrence to an existing QueueItem rather than assigning
+        // new UUIDs. Shuffle-off needs the exact playing UUID in its source order.
         let items = await Task.detached(priority: .userInitiated) {
-            contextTracks.map { t -> QueueItem in
-                let name = t.artistID.flatMap { names[$0] }
-                return QueueItem.make(from: t, artistName: name)
-            }
+            Self.queueItemsInDisplayOrder(tracks: contextTracks, sourceItems: sourceItems, activeIDs: activeIDs)
         }.value
+        guard let items, items.contains(where: { $0.id == currentID }) else { return }
         await qp.queue.reorder(to: items)
     }
 
@@ -1610,6 +1618,14 @@ public final class LibraryViewModel: ObservableObject { // swiftlint:disable:thi
             if let id = savedDestID, self.playlistSidebar.findNode(id: id) == nil {
                 self.log.warning("ui.restoreState.destinationGone", ["id": id])
                 self.selectedDestination = .songs
+            }
+            if case let .musicFolder(id) = self.selectedDestination {
+                do {
+                    _ = try await LibraryRootRepository(database: self.database).fetch(id: id)
+                } catch PersistenceError.notFound(entity: "library_roots", id: _) {
+                    self.log.warning("ui.restoreState.musicFolderGone", ["id": id])
+                    self.selectedDestination = .songs
+                }
             }
             self.tracks.setSort(column: state.sortColumn, ascending: state.sortAscending)
             self.sidebarWidth = state.sidebarWidth

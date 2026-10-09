@@ -26,8 +26,24 @@ public actor PlaybackQueue {
     public private(set) var shuffleState: ShuffleState = .off
     public private(set) var stopAfterCurrent = false
 
+    /// Read the rows and playhead in one actor turn so a queue mutation
+    /// cannot leave the UI with a position from a different item array.
+    public func snapshot() -> (items: [QueueItem], currentIndex: Int?) {
+        (self.items, self.currentIndex)
+    }
+
     /// The original (un-shuffled) source order, used to restore on shuffle-off.
     private var sourceOrder: [QueueItem] = []
+    public private(set) var hasKnownSourceOrder = true
+
+    /// Capture all persisted queue state together, including a known original order.
+    public func persistenceSnapshot() -> (
+        items: [QueueItem], currentIndex: Int?, repeatMode: RepeatMode,
+        shuffleState: ShuffleState, sourceItems: [QueueItem]?
+    ) {
+        (self.items, self.currentIndex, self.repeatMode, self.shuffleState,
+         self.hasKnownSourceOrder ? self.sourceOrder : nil)
+    }
 
     // MARK: - Change stream
 
@@ -73,21 +89,27 @@ public actor PlaybackQueue {
     public func appendNext(_ newItems: [QueueItem]) {
         guard !newItems.isEmpty else { return }
         let insertIdx = (currentIndex ?? -1) + 1
+        let sourceIdx = self.currentItem.flatMap { current in
+            self.sourceOrder.firstIndex { $0.id == current.id }
+        }.map { $0 + 1 } ?? 0
         self.items.insert(contentsOf: newItems, at: insertIdx)
-        // Rebuild sourceOrder from items (since insertions at arbitrary positions are valid)
-        self.sourceOrder = self.items
+        self.sourceOrder.insert(contentsOf: newItems, at: sourceIdx)
         self.emit(.insertedNext(items: newItems))
         self.log.debug("queue.appendNext", ["count": newItems.count])
     }
 
     /// Insert items at a specific index.
     public func insert(_ newItems: [QueueItem], at index: Int) {
+        guard !newItems.isEmpty else { return }
         let clampedIdx = max(0, min(index, items.count))
+        let sourceIdx = self.items.indices.contains(clampedIdx)
+            ? self.sourceOrder.firstIndex { $0.id == self.items[clampedIdx].id } ?? self.sourceOrder.count
+            : self.sourceOrder.count
         self.items.insert(contentsOf: newItems, at: clampedIdx)
         if let ci = currentIndex, clampedIdx <= ci {
             self.currentIndex = ci + newItems.count
         }
-        self.sourceOrder = self.items
+        self.sourceOrder.insert(contentsOf: newItems, at: sourceIdx)
         self.emit(.appended(items: newItems))
     }
 
@@ -142,7 +164,9 @@ public actor PlaybackQueue {
               self.items.indices.contains(toIndex) else { return }
         let item = self.items.remove(at: fromIndex)
         self.items.insert(item, at: toIndex)
-        self.sourceOrder = self.items
+        if self.shuffleState == .off {
+            self.sourceOrder = self.items
+        }
 
         // Adjust currentIndex after the move
         if let ci = currentIndex {
@@ -161,6 +185,7 @@ public actor PlaybackQueue {
     public func clear() {
         self.items.removeAll()
         self.sourceOrder.removeAll()
+        self.hasKnownSourceOrder = true
         let previous = self.currentIndex
         self.currentIndex = nil
         self.emit(.cleared)
@@ -174,6 +199,7 @@ public actor PlaybackQueue {
     public func replace(with newItems: [QueueItem], startAt index: Int = 0) {
         self.items = newItems
         self.sourceOrder = newItems
+        self.hasKnownSourceOrder = true
         let newIndex: Int? = newItems.isEmpty ? nil : max(0, min(index, newItems.count - 1))
         self.currentIndex = newIndex
         self.emit(.reset(items: self.items, currentIndex: self.currentIndex))
@@ -185,17 +211,57 @@ public actor PlaybackQueue {
     /// currentIndex is set to 0.  Does nothing if the queue is empty.
     public func reorder(to newItems: [QueueItem]) {
         guard !newItems.isEmpty else { return }
-        let currentTrackID = self.currentItem?.trackID
+        let current = self.currentItem
         self.items = newItems
-        self.sourceOrder = newItems
-        if let trackID = currentTrackID,
-           let idx = newItems.firstIndex(where: { $0.trackID == trackID }) {
+        if self.shuffleState == .off {
+            self.sourceOrder = newItems
+        }
+        if let current,
+           let idx = newItems.firstIndex(where: { $0.id == current.id }) {
             self.currentIndex = idx
         } else {
             self.currentIndex = 0
         }
         self.emit(.reset(items: self.items, currentIndex: self.currentIndex))
         self.log.debug("queue.reorder", ["count": newItems.count])
+    }
+
+    /// Restore an already ordered queue without running shuffle a second time.
+    public func restore(
+        items: [QueueItem], currentIndex: Int?, repeatMode: RepeatMode,
+        shuffleState: ShuffleState, sourceItems: [QueueItem]?
+    ) {
+        self.items = items
+        self.currentIndex = currentIndex.flatMap { items.indices.contains($0) ? $0 : nil }
+        self.repeatMode = repeatMode
+        self.shuffleState = shuffleState
+        if let sourceItems,
+           Set(sourceItems.map(\.id)).count == sourceItems.count,
+           Set(items.map(\.id)).isSubset(of: Set(sourceItems.map(\.id))) {
+            self.sourceOrder = sourceItems
+            self.hasKnownSourceOrder = true
+        } else {
+            self.sourceOrder = items
+            self.hasKnownSourceOrder = false
+        }
+        self.emit(.repeatChanged(repeatMode))
+        self.emit(.shuffleChanged(shuffleState))
+        self.emit(.reset(items: self.items, currentIndex: self.currentIndex))
+    }
+
+    /// Recover a legacy baseline only by reordering the exact existing queue IDs.
+    /// The current shuffled play order and playing item remain untouched.
+    @discardableResult
+    public func rebaseSourceOrder(_ orderedIDs: [QueueItem.ID]) -> Bool {
+        guard !self.hasKnownSourceOrder,
+              orderedIDs.count == self.sourceOrder.count,
+              Set(orderedIDs).count == orderedIDs.count,
+              Set(orderedIDs) == Set(self.sourceOrder.map(\.id)) else { return false }
+        let byID = Dictionary(uniqueKeysWithValues: self.sourceOrder.map { ($0.id, $0) })
+        self.sourceOrder = orderedIDs.compactMap { byID[$0] }
+        self.hasKnownSourceOrder = true
+        self.emit(.reset(items: self.items, currentIndex: self.currentIndex))
+        return true
     }
 
     // MARK: - Navigation
@@ -234,6 +300,21 @@ public actor PlaybackQueue {
             }
             return self.advance(to: next)
         }
+    }
+
+    /// Follow the item the engine has already made audible. A shuffle toggle
+    /// can reorder the queue after a handover has passed its cancellation point.
+    public func advanceToItem(id: QueueItem.ID) -> QueueItem? {
+        if let index = self.items.firstIndex(where: { $0.id == id }) {
+            return self.advance(to: index)
+        }
+        // A shuffle toggle may hide an excluded item whose boundary already
+        // started. Keep that audible item while retaining the original baseline.
+        guard let item = self.sourceOrder.first(where: { $0.id == id }) else { return nil }
+        let index = (self.currentIndex ?? -1) + 1
+        self.items.insert(item, at: index)
+        self.emit(.insertedNext(items: [item]))
+        return self.advance(to: index)
     }
 
     /// Advance as if the user pressed Next manually.
@@ -334,14 +415,21 @@ public actor PlaybackQueue {
     /// Enable or disable shuffle.
     /// When enabling: shuffles using `seed`, preserving current item at front.
     /// When disabling: restores the original source order starting from the current item.
-    public func setShuffle(_ on: Bool, seed: UInt64 = UInt64.random(in: .min ... .max)) {
+    public func setShuffle(
+        _ on: Bool, seed: UInt64 = UInt64.random(in: .min ... .max),
+        preservingCurrent: Bool = true
+    ) {
         if on {
             self.shuffleState = .on(seed: seed)
             let strategy = FisherYatesShuffle()
-            let current = self.currentItem
+            let current = preservingCurrent ? self.currentItem : nil
 
             // Exclude excluded tracks and shuffle the rest; current item stays first
-            var toShuffle = self.items.filter { !$0.excludedFromShuffle }
+            var toShuffle = self.sourceOrder.filter { !$0.excludedFromShuffle }
+            // Explicit album/artist playback still works when all tracks are excluded.
+            if !preservingCurrent, toShuffle.isEmpty {
+                toShuffle = self.sourceOrder
+            }
             if let cur = current {
                 toShuffle.removeAll { $0.id == cur.id }
             }
@@ -359,6 +447,8 @@ public actor PlaybackQueue {
             self.items = self.sourceOrder
             if let cur = current, let idx = items.firstIndex(where: { $0.id == cur.id }) {
                 self.currentIndex = idx
+            } else {
+                self.currentIndex = nil
             }
         }
         self.emit(.shuffleChanged(self.shuffleState))

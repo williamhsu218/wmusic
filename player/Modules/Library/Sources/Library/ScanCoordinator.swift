@@ -130,12 +130,12 @@ actor ScanCoordinator {
         // `URL.resolvingSymlinksInPath()` only normalizes when the target
         // file actually exists, which is unreliable for tracks whose files
         // have been removed since import.
-        let rootPaths: [String] = roots.compactMap { Self.canonicalPath($0.url.path) }
+        let rootPaths = roots.map { Self.canonicalPath($0.url.path) ?? $0.url.path }
         let scopedEnabledTracks = allTracks.filter { track in
             guard !track.disabled else { return false }
             guard let trackURL = URL(string: track.fileURL) else { return false }
             let trackPath = Self.canonicalPath(trackURL.path) ?? trackURL.path
-            return rootPaths.contains { trackPath.hasPrefix($0) }
+            return rootPaths.contains { LibrarySourcePath.contains(filePath: trackPath, rootPath: $0) }
         }
         await self.changeDetector.seed(scopedEnabledTracks.map {
             (url: $0.fileURL, mtime: $0.fileMtime, size: $0.fileSize)
@@ -162,6 +162,7 @@ actor ScanCoordinator {
         // rather than O(library size). Previously every discovered (URL,
         // rootID) pair was buffered into an array before a single import
         // started (~10k pairs at once on a large library). See #267.
+        var completeRoots: [(url: URL, rootID: Int64)] = []
         let results: [ImportResult] = await withTaskGroup(
             of: (url: URL, result: ImportResult).self,
             returning: [ImportResult].self
@@ -171,10 +172,12 @@ actor ScanCoordinator {
             var walked = 0
 
             rootLoop: for root in roots {
+                let walkFailures = WalkFailures()
                 for await fileURL in FileWalker.walk(
                     root.url,
                     supportedExtensions: supported,
-                    iCloudDownload: iCloudDownload
+                    iCloudDownload: iCloudDownload,
+                    onError: { url, error in walkFailures.append(url: url, error: error) }
                 ) {
                     if Task.isCancelled {
                         break rootLoop
@@ -206,6 +209,26 @@ actor ScanCoordinator {
                 if Task.isCancelled {
                     break
                 }
+                // An empty or partial walk must not mean "all files deleted".
+                // A server can also disconnect immediately after enumeration.
+                do {
+                    guard try root.url.checkResourceIsReachable() else {
+                        throw LibraryError.sourceUnavailable(root.url)
+                    }
+                } catch {
+                    walkFailures.append(url: root.url, error: error)
+                }
+                let failures = walkFailures.values
+                if failures.isEmpty {
+                    completeRoots.append(root)
+                } else {
+                    errors += failures.count
+                    for failure in failures {
+                        emit(.error(url: failure.url, error: failure.error))
+                    }
+                    self.log.warning("scan.source_incomplete", ["path": root.url.path, "errors": failures.count])
+                }
+                await self.markRoot(id: root.rootID, inaccessible: !failures.isEmpty)
             }
             // Drain remaining
             for await r in group {
@@ -229,8 +252,25 @@ actor ScanCoordinator {
 
         // Mark removed tracks
         if !Task.isCancelled {
+            // Recheck after tag imports, which can take minutes for a NAS.
+            var removalPaths: [String] = []
+            for root in completeRoots {
+                do {
+                    guard try root.url.checkResourceIsReachable() else {
+                        throw LibraryError.sourceUnavailable(root.url)
+                    }
+                    removalPaths.append(Self.canonicalPath(root.url.path) ?? root.url.path)
+                } catch {
+                    errors += 1
+                    emit(.error(url: root.url, error: error))
+                    await self.markRoot(id: root.rootID, inaccessible: true)
+                }
+            }
             let removedURLs = await changeDetector.removedURLs()
             for urlString in removedURLs {
+                guard let fileURL = URL(string: urlString) else { continue }
+                let filePath = Self.canonicalPath(fileURL.path) ?? fileURL.path
+                guard removalPaths.contains(where: { LibrarySourcePath.contains(filePath: filePath, rootPath: $0) }) else { continue }
                 do {
                     guard let track = try await trackRepo.fetchOne(fileURL: urlString),
                           let id = track.id else { continue }
@@ -273,7 +313,7 @@ actor ScanCoordinator {
                 markerRepo: TrackMarkerRepository(database: self.database)
             )
             var cueFolders: Set<URL> = []
-            for root in roots {
+            for root in completeRoots where !Task.isCancelled {
                 cueFolders.formUnion(Self.cueFolders(under: root.url))
             }
             for folder in cueFolders where !Task.isCancelled {
@@ -297,6 +337,14 @@ actor ScanCoordinator {
     }
 
     // MARK: - Private
+
+    private func markRoot(id: Int64, inaccessible: Bool) async {
+        do {
+            try await self.libraryRootRepo.markInaccessible(id: id, inaccessible)
+        } catch {
+            self.log.warning("scan.source_status.failed", ["id": id, "error": String(reflecting: error)])
+        }
+    }
 
     private func importOne(
         url: URL,
@@ -485,28 +533,23 @@ actor ScanCoordinator {
     /// The distinct folders under `root` that contain `.cue` files, hidden
     /// paths skipped (ADR-087's per-folder marker pass).
     static func cueFolders(under root: URL) -> Set<URL> {
+        guard !Task.isCancelled else { return [] }
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else { return [] }
         var folders: Set<URL> = []
-        for case let url as URL in enumerator where url.pathExtension.lowercased() == "cue" {
+        for case let url as URL in enumerator {
+            guard !Task.isCancelled else { break }
+            guard url.pathExtension.lowercased() == "cue" else { continue }
             folders.insert(url.deletingLastPathComponent())
         }
         return folders
     }
 
     private static func canonicalPath(_ path: String) -> String? {
-        var buffer = [UInt8](repeating: 0, count: Int(PATH_MAX))
-        let resolved = buffer.withUnsafeMutableBufferPointer { ptr -> UnsafeMutablePointer<CChar>? in
-            ptr.baseAddress!.withMemoryRebound(to: CChar.self, capacity: ptr.count) { cPtr in
-                realpath(path, cPtr)
-            }
-        }
-        guard resolved != nil else { return nil }
-        let length = buffer.firstIndex(of: 0) ?? buffer.count
-        return String(decoding: buffer[..<length], as: UTF8.self)
+        LibrarySourcePath.canonical(path)
     }
 }
 
@@ -516,4 +559,24 @@ public enum ScanMode: Sendable {
     case quick
     /// Re-read every file regardless of stored state.
     case full
+}
+
+/// FileWalker runs on a detached utility task; retain its failures under a
+/// lock and process them on the coordinator after the stream finishes.
+private final class WalkFailures: @unchecked Sendable {
+    struct Failure {
+        let url: URL
+        let error: Error
+    }
+
+    private let lock = NSLock()
+    private var failures: [Failure] = []
+
+    var values: [Failure] {
+        self.lock.withLock { self.failures }
+    }
+
+    func append(url: URL, error: Error) {
+        self.lock.withLock { self.failures.append(Failure(url: url, error: error)) }
+    }
 }

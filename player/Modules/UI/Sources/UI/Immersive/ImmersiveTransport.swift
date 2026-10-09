@@ -10,6 +10,8 @@ import SwiftUI
 struct ImmersiveTransport: View {
     /// `@Observable`, so a plain property is the correct binding.
     var np: NowPlayingViewModel
+    var library: LibraryViewModel
+    var prominent = false
 
     /// While dragging the scrubber the fraction is held locally so the
     /// slider does not fight the engine's position ticks.
@@ -17,9 +19,9 @@ struct ImmersiveTransport: View {
     @AppStorage("appearance.accentColor") private var accentColorKey = "system"
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: self.prominent ? 14 : 10) {
             self.scrubber
-            HStack(spacing: 12) {
+            HStack(spacing: self.prominent ? 18 : 12) {
                 MiniPlayerTransport(
                     np: self.np,
                     musicLayout: .navigation,
@@ -30,13 +32,13 @@ struct ImmersiveTransport: View {
                         next: A11y.Immersive.next,
                         shuffle: A11y.Immersive.shuffle,
                         repeatMode: A11y.Immersive.repeatMode,
-                        stopAfter: A11y.Immersive.stopAfter,
                         skipBack: A11y.Immersive.skipBack,
                         skipForward: A11y.Immersive.skipForward
                     ),
-                    spacing: 10,
-                    secondarySize: 16,
-                    primarySize: 24,
+                    radioLibrary: self.library,
+                    spacing: self.prominent ? 18 : 10,
+                    secondarySize: self.prominent ? 20 : 16,
+                    primarySize: self.prominent ? 30 : 24,
                     accentSize: 13
                 )
                 Spacer(minLength: 6)
@@ -108,7 +110,7 @@ struct ImmersiveTransport: View {
                 }
             }
             .controlSize(.mini)
-            .frame(width: 70)
+            .frame(width: self.prominent ? 100 : 70)
             .id(self.accentColorKey)
             .help(L10n.string("Volume: \(Int(self.np.volume * 100))%"))
             .accessibilityLabel(L10n.string("Volume"))

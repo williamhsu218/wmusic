@@ -26,6 +26,9 @@ public protocol Decoder: Sendable, AnyObject {
     /// `.m4a` carries AAC, ALAC and E-AC-3 alike (#529).
     var codec: String? { get }
 
+    /// The URL this decoder actually opened, retained through source promotion.
+    var sourceURL: URL? { get }
+
     /// Opens `url` for reading. Throws on any I/O or format error.
     init(url: URL) throws
 
@@ -51,6 +54,10 @@ public protocol Decoder: Sendable, AnyObject {
 public extension Decoder {
     /// By default a decoder cannot name its codec.
     var codec: String? {
+        nil
+    }
+
+    var sourceURL: URL? {
         nil
     }
 }

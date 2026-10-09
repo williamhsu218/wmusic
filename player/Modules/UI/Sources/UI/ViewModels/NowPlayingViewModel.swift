@@ -21,13 +21,21 @@ public final class NowPlayingViewModel {
     // MARK: - Observable state
 
     /// Cover art for the current track, or `nil` when nothing is playing.
-    public private(set) var artwork: NSImage?
+    public private(set) var artwork: NSImage? {
+        didSet { self.syncDisplay() }
+    }
     /// Track title of the current item, or empty string when idle.
-    public private(set) var title = ""
+    public private(set) var title = "" {
+        didSet { self.syncDisplay() }
+    }
     /// Primary artist of the current item.
-    public private(set) var artist = ""
+    public private(set) var artist = "" {
+        didSet { self.syncDisplay() }
+    }
     /// Album name of the current item.
-    public private(set) var album = ""
+    public private(set) var album = "" {
+        didSet { self.syncDisplay() }
+    }
     /// Total duration of the current track in seconds.
     public private(set) var duration: TimeInterval = 0
     /// Current playback position in seconds.
@@ -94,6 +102,10 @@ public final class NowPlayingViewModel {
     /// surface a toast. The transport has already stopped by the time this fires.
     public var onPlaybackError: (@MainActor () -> Void)?
 
+    /// Supplies a source order for a legacy queue only when the visible library
+    /// can account for every existing item. New queues already own their order.
+    public var onResolveLegacyQueueOrder: (@MainActor ([QueueItem], Int?) -> [QueueItem.ID]?)?
+
     // MARK: - Internal
 
     private let engine: any Transport
@@ -114,6 +126,7 @@ public final class NowPlayingViewModel {
     @ObservationIgnored private nonisolated(unsafe) var queueChangesTask: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var streamTitleTask: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var markerTask: Task<Void, Never>?
+    @ObservationIgnored private nonisolated(unsafe) var metadataTask: Task<Void, Never>?
 
     /// The current track's CUE markers (ADR-087), position-sorted; empty for
     /// tracks without them. Fed by `QueuePlayer.markerUpdates` per load.
@@ -131,7 +144,28 @@ public final class NowPlayingViewModel {
     /// Codec, bitrate, sample rate, bit depth and channels of what is
     /// playing, for the strip's badges (ADR-092). Nil when nothing plays, and
     /// when neither the track nor the decoder can say anything at all.
-    public private(set) var sourceFacts: NowPlayingSourceFacts?
+    public private(set) var sourceFacts: NowPlayingSourceFacts? {
+        didSet { self.syncDisplay() }
+    }
+
+    /// The title, subtitle, cover and badges the now-playing surfaces draw.
+    /// Follows the fields above, except while a local track change is being
+    /// resolved: then it keeps the previous track until the new one is
+    /// complete, so the change lands as one update (see `NowPlayingDisplay`).
+    public private(set) var display = NowPlayingDisplay()
+
+    /// The local track whose display is still being resolved, and which of
+    /// its two late parts (database metadata, decoder facts) have arrived.
+    @ObservationIgnored private var displayHold: DisplayHold?
+    @ObservationIgnored private nonisolated(unsafe) var displayHoldTimeoutTask: Task<Void, Never>?
+    /// Invalidates decoder reads that finish after a skip, source change or clear.
+    @ObservationIgnored private var sourceGeneration = 0
+    @ObservationIgnored private var sourceForFacts: FactsSource?
+
+    /// Upper bound on how long a track change may keep showing the previous
+    /// track. A gapless transition emits no `.ready`, and a slow volume can
+    /// delay the database or cover read; neither may leave the old title up.
+    static let displayHoldLimit: Duration = .milliseconds(350)
 
     /// The current item's own contribution to `sourceFacts`: the scanned
     /// columns of a local track, nothing for a stream. Kept aside so each
@@ -202,6 +236,8 @@ public final class NowPlayingViewModel {
         self.queueChangesTask?.cancel()
         self.streamTitleTask?.cancel()
         self.markerTask?.cancel()
+        self.metadataTask?.cancel()
+        self.displayHoldTimeoutTask?.cancel()
     }
 
     private func startObservingScrobbleStats(_ repo: ScrobbleQueueRepository) {
@@ -223,6 +259,11 @@ public final class NowPlayingViewModel {
 
     /// Set by the TracksView/AlbumsView when a track is selected and played.
     public func setCurrentTrack(_ track: Track) {
+        self.metadataTask?.cancel()
+        self.sourceGeneration &+= 1
+        let generation = self.sourceGeneration
+        self.sourceForFacts = .local(URL(string: track.fileURL))
+        self.beginDisplayHold(for: track)
         self.log.info("playback.track", ["id": track.id ?? -1, "title": track.title ?? "?"])
         if self.isPodcast {
             // Switching from podcast to local track -- restore music rate and reset remote commands.
@@ -262,8 +303,8 @@ public final class NowPlayingViewModel {
         self.duration = track.duration
         self.artwork = nil
 
-        Task {
-            await self.resolveMetadata(for: track)
+        self.metadataTask = Task { [weak self] in
+            await self?.resolveMetadata(for: track, generation: generation)
         }
     }
 
@@ -309,7 +350,13 @@ public final class NowPlayingViewModel {
 
     /// Populates the now-playing display from a queue item that has no local
     /// `Track` row (e.g. a Subsonic stream or podcast), using the item's snapshot metadata.
-    private func applyStreamItem(_ item: QueueItem) async {
+    @discardableResult
+    func applyStreamItem(_ item: QueueItem) async -> Int {
+        self.metadataTask?.cancel()
+        self.sourceGeneration &+= 1
+        let generation = self.sourceGeneration
+        self.sourceForFacts = .stream
+        self.releaseDisplayHold()
         self.nowPlayingTrackID = nil
         self.nowPlayingAlbumID = nil
         self.nowPlayingArtistID = nil
@@ -356,10 +403,15 @@ public final class NowPlayingViewModel {
             self.nowPlayingRadioStreamURL = nil
             self.nowPlayingRadioStationName = nil
         }
+        return generation
     }
 
     /// Resets every now-playing display field; called when the queue is empty.
-    private func clearNowPlayingDisplay() {
+    func clearNowPlayingDisplay() {
+        self.metadataTask?.cancel()
+        self.sourceGeneration &+= 1
+        self.sourceForFacts = nil
+        self.releaseDisplayHold()
         self.nowPlayingTrackID = nil
         self.nowPlayingAlbumID = nil
         self.nowPlayingArtistID = nil
@@ -441,7 +493,10 @@ public final class NowPlayingViewModel {
                     self.isPlaying = false
                     // The decoder is installed by the time `.ready` emits, so
                     // this is the first moment the codec can be read.
-                    await self.refreshSourceFacts()
+                    let generation = self.sourceGeneration
+                    if await self.refreshSourceFacts(for: generation) {
+                        self.noteDisplayDecoderReady(for: generation)
+                    }
 
                 case .loading:
                     break
@@ -484,8 +539,14 @@ public extension NowPlayingViewModel {
     /// Seek to an absolute position.
     func scrub(to time: TimeInterval) async {
         Haptics.positionCommit()
+        let trackID = self.nowPlayingTrackID
         do {
             try await self.engine.seek(to: time)
+            // Position polling stops while paused. Read the engine back so a
+            // lyric click updates both the scrubber and highlight immediately.
+            let position = await self.engine.currentTime
+            guard self.nowPlayingTrackID == trackID else { return }
+            self.position = position
         } catch {
             self.log.error("transport.seek.failed", ["error": String(reflecting: error)])
         }
@@ -560,6 +621,12 @@ public extension NowPlayingViewModel {
     /// Sets shuffle to an explicit value on the queue player.
     func setShuffle(_ on: Bool) async {
         guard let qp = engine as? QueuePlayer else { return }
+        if !(await qp.queue.hasKnownSourceOrder) {
+            let snapshot = await qp.queue.snapshot()
+            if let orderedIDs = self.onResolveLegacyQueueOrder?(snapshot.items, snapshot.currentIndex) {
+                await qp.queue.rebaseSourceOrder(orderedIDs)
+            }
+        }
         await qp.setShuffle(on)
         self.shuffleOn = on
     }
@@ -799,8 +866,12 @@ private extension NowPlayingViewModel {
         }
     }
 
-    func resolveMetadata(for track: Track) async {
+    func resolveMetadata(for track: Track, generation: Int) async {
+        guard !Task.isCancelled else { return }
         let trackID = track.id
+        var resolvedArtist = ""
+        var resolvedAlbum = ""
+        var resolvedArtwork: NSImage?
         var artworkPath: String?
         do {
             // Resolve artist name
@@ -808,7 +879,8 @@ private extension NowPlayingViewModel {
                 let artistRecord = try await database.read { db in
                     try Artist.fetchOne(db, key: artistID)
                 }
-                await MainActor.run { self.artist = artistRecord?.name ?? "" }
+                guard !Task.isCancelled else { return }
+                resolvedArtist = artistRecord?.name ?? ""
             }
 
             // Resolve album name
@@ -816,30 +888,43 @@ private extension NowPlayingViewModel {
                 let albumRecord = try await database.read { db in
                     try Album.fetchOne(db, key: albumID)
                 }
-                await MainActor.run { self.album = albumRecord?.title ?? "" }
+                guard !Task.isCancelled else { return }
+                resolvedAlbum = albumRecord?.title ?? ""
 
                 // Resolve cover art
                 if let hash = track.coverArtHash ?? albumRecord?.coverArtHash {
                     let artRecord = try await database.read { db in
                         try CoverArt.fetchOne(db, key: hash)
                     }
+                    guard !Task.isCancelled else { return }
                     if let path = artRecord?.path {
                         artworkPath = path
-                        let img = await ArtworkLoader.shared.image(at: path)
-                        await MainActor.run { self.artwork = img }
+                        resolvedArtwork = await ArtworkLoader.shared.image(at: path)
                     }
                 }
             }
 
-            // Post track-change notification if still on the same track.
-            guard self.nowPlayingTrackID == trackID else { return }
+            // A quick skip may finish an older database/artwork read after the
+            // next track starts. Publish related fields together, once, only
+            // for the task and track that still own the display.
+            guard !Task.isCancelled,
+                  generation == self.sourceGeneration,
+                  self.nowPlayingTrackID == trackID,
+                  self.currentTrack == track else { return }
+            self.artist = resolvedArtist
+            self.album = resolvedAlbum
+            self.artwork = resolvedArtwork
+            self.noteDisplayMetadataReady(for: track, generation: generation)
             await self.postTrackChangeNotification(
                 title: self.title,
-                artist: self.artist,
+                artist: resolvedArtist,
                 artworkPath: artworkPath
             )
         } catch {
-            self.log.error("nowplaying.resolve.failed", ["error": String(reflecting: error)])
+            if !Task.isCancelled {
+                self.log.error("nowplaying.resolve.failed", ["error": String(reflecting: error)])
+                self.noteDisplayMetadataReady(for: track, generation: generation)
+            }
         }
     }
 
@@ -907,10 +992,11 @@ private extension NowPlayingViewModel {
             for await track in qp.currentTrackChanges {
                 if let track {
                     self.setCurrentTrack(track)
-                    await self.refreshSourceFacts()
+                    let generation = self.sourceGeneration
+                    _ = await self.refreshSourceFacts(for: generation)
                 } else if let item = await qp.queue.currentItem {
-                    await self.applyStreamItem(item)
-                    await self.refreshSourceFacts()
+                    let generation = await self.applyStreamItem(item)
+                    _ = await self.refreshSourceFacts(for: generation)
                 } else {
                     // Stopping leaves the last decoder installed, so the
                     // cleared display must not ask it anything.
@@ -981,10 +1067,27 @@ private extension NowPlayingViewModel {
     ///
     /// The engine is asked rather than cached: it is the only place that
     /// knows which decoder is installed right now.
-    func refreshSourceFacts() async {
+    func refreshSourceFacts(for generation: Int) async -> Bool {
+        guard let source = self.sourceForFacts,
+              generation == self.sourceGeneration else { return false }
+        if let snapshot = await self.engine.currentSourceFactsSnapshot {
+            guard !Task.isCancelled, generation == self.sourceGeneration else { return false }
+            if case let .local(expectedURL) = source {
+                guard let expectedURL, let actualURL = snapshot.sourceURL,
+                      expectedURL.standardizedFileURL.resolvingSymlinksInPath()
+                      == actualURL.standardizedFileURL.resolvingSymlinksInPath() else { return false }
+            }
+            self.applySourceFacts(NowPlayingSourceFacts(details: snapshot.streamDetails, codec: snapshot.codec))
+            return true
+        }
+        // Simple transports without identity retain the generation-checked
+        // legacy path; a real engine's empty snapshot never falls through.
         let details = await self.engine.currentStreamDetails
+        guard !Task.isCancelled, generation == self.sourceGeneration else { return false }
         let codec = await self.engine.currentCodec
+        guard !Task.isCancelled, generation == self.sourceGeneration else { return false }
         self.applySourceFacts(NowPlayingSourceFacts(details: details, codec: codec))
+        return true
     }
 
     /// Merges live decoder facts over the current item's columns, and leaves
@@ -1020,5 +1123,93 @@ private extension NowPlayingViewModel {
                 self.markers = markers
             }
         }
+    }
+}
+
+// MARK: - Display snapshot
+
+/// Same-file extension so the private hold state stays reachable, and the
+/// class body stays inside the `type_body_length` limit.
+extension NowPlayingViewModel {
+    enum FactsSource {
+        case local(URL?)
+        case stream
+    }
+
+    struct DisplayHold {
+        let track: Track
+        let generation: Int
+        var metadataReady = false
+        var decoderReady = false
+    }
+
+    /// Copies the live fields into `display` unless a track change is still
+    /// being resolved. Skips identical values so observers are not woken.
+    func syncDisplay() {
+        guard self.displayHold == nil else { return }
+        let next = NowPlayingDisplay(
+            title: self.title,
+            artist: self.artist,
+            album: self.album,
+            artwork: self.artwork,
+            sourceFacts: self.sourceFacts
+        )
+        if next != self.display {
+            self.display = next
+        }
+    }
+
+    /// Keeps the previous track on screen while `track` resolves. The first
+    /// track after idle has nothing to keep, so it draws at once.
+    func beginDisplayHold(for track: Track) {
+        self.displayHoldTimeoutTask?.cancel()
+        self.displayHoldTimeoutTask = nil
+        guard !self.display.title.isEmpty else {
+            self.displayHold = nil
+            return
+        }
+        let generation = self.sourceGeneration
+        self.displayHold = DisplayHold(track: track, generation: generation)
+        self.displayHoldTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.displayHoldLimit)
+            guard !Task.isCancelled, self?.sourceGeneration == generation else { return }
+            self?.releaseDisplayHold()
+        }
+    }
+
+    func noteDisplayMetadataReady(for track: Track, generation: Int) {
+        guard var hold = self.displayHold,
+              hold.track == track,
+              hold.generation == generation,
+              self.sourceGeneration == generation else { return }
+        hold.metadataReady = true
+        self.advanceDisplayHold(hold)
+    }
+
+    /// `.ready` follows every engine load, after the new decoder is
+    /// installed; the facts refreshed at the track-change event may still
+    /// describe the outgoing decoder.
+    func noteDisplayDecoderReady(for generation: Int) {
+        guard var hold = self.displayHold,
+              hold.generation == generation,
+              self.sourceGeneration == generation else { return }
+        hold.decoderReady = true
+        self.advanceDisplayHold(hold)
+    }
+
+    private func advanceDisplayHold(_ hold: DisplayHold) {
+        if hold.metadataReady, hold.decoderReady {
+            self.releaseDisplayHold()
+        } else {
+            self.displayHold = hold
+        }
+    }
+
+    /// Ends any hold and publishes the live fields in one assignment.
+    func releaseDisplayHold() {
+        self.displayHoldTimeoutTask?.cancel()
+        self.displayHoldTimeoutTask = nil
+        self.displayHold = nil
+        self.syncDisplay()
     }
 }

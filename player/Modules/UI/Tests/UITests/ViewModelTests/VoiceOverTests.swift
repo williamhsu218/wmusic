@@ -91,6 +91,7 @@ struct VoiceOverTests {
             sortOrder: Binding(get: { sortStub }, set: { sortStub = $0 }),
             nowPlayingTrackID: nil,
             sortable: false,
+            emphasizesPlayCount: false,
             playlistNodes: [],
             actions: self.makeNoopActions(),
             scrollRequest: 0,
@@ -131,6 +132,7 @@ struct VoiceOverTests {
             sortOrder: Binding(get: { sortStub }, set: { sortStub = $0 }),
             nowPlayingTrackID: trackID,
             sortable: false,
+            emphasizesPlayCount: false,
             playlistNodes: [],
             actions: self.makeNoopActions(),
             scrollRequest: 0,
@@ -160,6 +162,7 @@ struct VoiceOverTests {
             sortOrder: Binding(get: { sortStub }, set: { sortStub = $0 }),
             nowPlayingTrackID: nil,
             sortable: false,
+            emphasizesPlayCount: false,
             playlistNodes: [],
             actions: self.makeNoopActions(),
             scrollRequest: 0,
@@ -274,7 +277,7 @@ struct VoiceOverTests {
         let source = try self.sourceContents(at: "Transport/MusicTransportControls.swift")
         #expect(
             source.contains("activeToggleIndicator"),
-            "Shuffle/repeat/stop-after toggles must apply .activeToggleIndicator so on/off isn't colour-only"
+            "Shuffle/repeat toggles must apply .activeToggleIndicator so on/off isn't colour-only"
         )
     }
 

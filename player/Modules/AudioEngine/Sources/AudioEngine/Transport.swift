@@ -1,5 +1,19 @@
 import Foundation
 
+/// Facts from one installed decoder. A nil URL means no identified decoder;
+/// a nil snapshot means the transport does not expose decoder identity.
+public struct TransportSourceFacts: Sendable {
+    public let sourceURL: URL?
+    public let streamDetails: StreamDetails?
+    public let codec: String?
+
+    public init(sourceURL: URL? = nil, streamDetails: StreamDetails? = nil, codec: String? = nil) {
+        self.sourceURL = sourceURL
+        self.streamDetails = streamDetails
+        self.codec = codec
+    }
+}
+
 /// Public transport interface for controlling audio playback.
 ///
 /// Conformers must be `Sendable` (e.g. actors or `@unchecked Sendable` with
@@ -44,6 +58,11 @@ public protocol Transport: Sendable {
     /// decoder route; nil when nothing is loaded or the decoder cannot say
     /// (ADR-092). Defaulted for the same reason as `currentStreamDetails`.
     var currentCodec: String? { get async }
+
+    /// Source identity and facts captured from the same installed decoder.
+    /// Real engines return an empty snapshot while no decoder is installed.
+    /// Default nil keeps simple transports compatible with the legacy getters.
+    var currentSourceFactsSnapshot: TransportSourceFacts? { get async }
 }
 
 /// Default so conformers without an FFmpeg decoder (tests, simple mocks)
@@ -56,6 +75,10 @@ public extension Transport {
 
     /// By default a transport cannot name the codec it is playing.
     var currentCodec: String? {
+        get async { nil }
+    }
+
+    var currentSourceFactsSnapshot: TransportSourceFacts? {
         get async { nil }
     }
 }

@@ -48,6 +48,7 @@ struct TrackTableDragTests {
             sortOrder: Binding(get: { sort }, set: { sort = $0 }),
             nowPlayingTrackID: nil,
             sortable: false,
+            emphasizesPlayCount: false,
             playlistNodes: [],
             actions: actions,
             scrollRequest: 0,

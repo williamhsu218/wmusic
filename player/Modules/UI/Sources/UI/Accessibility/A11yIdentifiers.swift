@@ -155,7 +155,6 @@ public enum A11y {
         public static let next = "miniPlayer.transport.next"
         public static let shuffle = "miniPlayer.transport.shuffle"
         public static let repeatMode = "miniPlayer.transport.repeat"
-        public static let stopAfter = "miniPlayer.transport.stopAfterCurrent"
         public static let skipBack = "miniPlayer.transport.skipBack"
         public static let skipForward = "miniPlayer.transport.skipForward"
     }
@@ -191,6 +190,7 @@ public enum A11y {
     // MARK: - Settings panes
 
     public enum SettingsIDs {
+        public static let manageSources = "settings.library.manageSources"
         public static let deepDive = "settings.library.deepDive"
         /// Sidebar navigation rows, keyed by `SettingsPage.rawValue`. Tag-
         /// selected `List(selection:)` rows are otherwise absent from the AX
@@ -300,6 +300,12 @@ public enum A11y {
         public static let recentScrobbles = "settings.scrobble.recent"
 
         // Sources
+        public static let sourceType = "settings.sources.type"
+        public static let nasAddress = "settings.sources.nas.address"
+        public static let nasConnect = "settings.sources.nas.connect"
+        public static let nasChooseFolder = "settings.sources.nas.chooseFolder"
+        public static let nasRescan = "settings.sources.nas.rescan"
+        public static let nasReconnect = "settings.sources.nas.reconnect"
         public static let addServer = "settings.sources.addServer"
         public static let addServerEmpty = "settings.sources.addServer.empty"
 
@@ -333,13 +339,18 @@ public enum A11y {
         public static let volumeSlider = "nowPlayingStrip.volume"
         public static let muteButton = "nowPlayingStrip.mute"
         public static let artworkButton = "nowPlayingStrip.artwork.button"
+        public static let expandedRoot = "nowPlaying.expanded.root"
+        public static let expandedClose = "nowPlaying.expanded.close"
+        public static let expandedQueueTitle = "nowPlaying.expanded.queueTitle"
+        public static let expandedPanelPicker = "nowPlaying.expanded.panelPicker"
+        public static let expandedLyrics = "nowPlaying.expanded.lyrics"
+        public static let expandedLyricsFollow = "nowPlaying.expanded.lyrics.follow"
         public static let titleButton = "nowPlayingStrip.title.button"
         public static let subtitleButton = "nowPlayingStrip.subtitle.button"
         public static let infoButton = "nowPlayingStrip.info"
         public static let loveButton = "nowPlayingStrip.love"
         public static let shuffleButton = "nowPlayingStrip.shuffle"
         public static let repeatButton = "nowPlayingStrip.repeat"
-        public static let stopAfterCurrentButton = "nowPlayingStrip.stopAfterCurrent"
         public static let speedPicker = "nowPlayingStrip.speedPicker"
         public static let sleepTimer = "nowPlayingStrip.sleepTimer"
         public static let dspButton = "nowPlayingStrip.dsp"
@@ -485,7 +496,6 @@ public enum A11y {
         public static let next = "immersive.transport.next"
         public static let shuffle = "immersive.transport.shuffle"
         public static let repeatMode = "immersive.transport.repeat"
-        public static let stopAfter = "immersive.transport.stopAfterCurrent"
         public static let skipBack = "immersive.transport.skipBack"
         public static let skipForward = "immersive.transport.skipForward"
         public static let mute = "immersive.transport.mute"

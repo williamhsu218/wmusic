@@ -59,6 +59,59 @@ struct LibraryScannerTests {
         #expect(remaining.isEmpty)
     }
 
+    @Test("removing a source disables only its tracks, including underscore paths")
+    func removeRootPreservesSiblingSource() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let source = base.appendingPathComponent("music_library", isDirectory: true)
+        let sibling = base.appendingPathComponent("musicXlibrary", isDirectory: true)
+        for folder in [source, sibling] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(
+                at: sampleLibraryURL.appendingPathComponent("Artist A/Album One/01 - First Track.mp3"),
+                to: folder.appendingPathComponent("track.mp3")
+            )
+            try await scanner.addRoot(folder)
+        }
+        defer { try? FileManager.default.removeItem(at: base) }
+        for await _ in await scanner.scan(mode: .full) {}
+        let sourceID = try #require(try await scanner.roots().first { $0.path == source.path }?.id)
+
+        try await scanner.removeRoot(id: sourceID)
+        // An already queued watcher event from the removed root must not
+        // re-import its still-present file after source removal.
+        await scanner.handleFSChange(urls: [source.appendingPathComponent("track.mp3")])
+
+        let tracks = try await TrackRepository(database: db).fetchAllIncludingDisabled()
+        #expect(tracks.count == 2)
+        #expect(tracks.first { $0.fileURL.contains("music_library/") }?.disabled == true)
+        #expect(tracks.first { $0.fileURL.contains("musicXlibrary/") }?.disabled == false)
+        #expect(try await scanner.roots().count == 1)
+    }
+
+    @Test("removing a single-file source disables its indexed track")
+    func removeFileRootDisablesTrack() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let audio = folder.appendingPathComponent("track.mp3")
+        try FileManager.default.copyItem(
+            at: sampleLibraryURL.appendingPathComponent("Artist A/Album One/01 - First Track.mp3"), to: audio
+        )
+        try await scanner.addRoot(audio)
+        for await _ in await scanner.scan(mode: .full) {}
+        let id = try #require(try await scanner.roots().first?.id)
+
+        try await scanner.removeRoot(id: id)
+
+        let tracks = try await TrackRepository(database: db).fetchAllIncludingDisabled()
+        #expect(tracks.count == 1)
+        #expect(tracks.first?.disabled == true)
+    }
+
     @Test("roots returns empty array when no roots added")
     func rootsIsInitiallyEmpty() async throws {
         let db = try await makeDB()
@@ -78,6 +131,29 @@ struct LibraryScannerTests {
 
         let roots = try await scanner.roots()
         #expect(roots.count == 1)
+    }
+
+    @Test("choosing an existing source again renews its bookmark without replacing the root")
+    func addRootRenewsExistingBookmark() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let dir = try sampleLibraryURL
+        let old = try await LibraryRootRepository(database: db).upsert(LibraryRoot(
+            path: dir.path,
+            bookmark: Data([0x01, 0x02, 0x03]),
+            addedAt: 123,
+            isInaccessible: true
+        ))
+
+        try await scanner.addRoot(dir)
+
+        let roots = try await scanner.roots()
+        let renewed = try #require(roots.first)
+        #expect(renewed.id == old.id)
+        #expect(renewed.addedAt == old.addedAt)
+        #expect(!renewed.isInaccessible)
+        #expect(renewed.bookmark != old.bookmark)
+        #expect(try LibraryLocation.resolve(renewed.bookmark).url.path == dir.path)
     }
 
     // MARK: - Scanning
@@ -283,6 +359,63 @@ struct LibraryScannerTests {
         )
     }
 
+    @Test("source removal waits for the scan producer to finish")
+    func rootRemovalGuardAndScanWaiter() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        try await scanner.addRoot(sampleLibraryURL)
+        let rootID = try #require(try await scanner.roots().first?.id)
+        let stream = await scanner.scan(mode: .full)
+        var iterator = stream.makeAsyncIterator()
+        while let event = await iterator.next() {
+            if case .started = event { break }
+        }
+
+        do {
+            try await scanner.removeRoot(id: rootID)
+            Issue.record("a running scan must prevent source removal")
+        } catch let error as LibraryError {
+            if case .scanAlreadyInProgress = error {} else { throw error }
+        }
+        await scanner.waitForScanToFinish()
+        try await scanner.removeRoot(id: rootID)
+        #expect(try await scanner.roots().isEmpty)
+        while await iterator.next() != nil {}
+    }
+
+    @Test("a bookmark resolving to a different mount path preserves the old library")
+    func movedSourceFailsClosed() async throws {
+        let db = try await makeDB()
+        // The bookmark resolves to a local fixture; inject its NAS identity so
+        // this exercises the full scanner without contacting a real server.
+        let scanner = LibraryScanner(database: db, networkRootClassifier: { _ in true })
+        let root = try sampleLibraryURL
+        let bookmark = try LibraryLocation.bookmark(for: root)
+        let registered = try await LibraryRootRepository(database: db).upsert(LibraryRoot(
+            path: root.path + "-original-mount", bookmark: bookmark, addedAt: 1
+        ))
+        let id = try #require(registered.id)
+        let trackRepo = TrackRepository(database: db)
+        let knownTrackID = try await trackRepo.upsert(Track(
+            fileURL: URL(fileURLWithPath: registered.path).appendingPathComponent("known.mp3").absoluteString,
+            title: "Saved NAS song", playCount: 7, rating: 70, loved: true, addedAt: 1, updatedAt: 1
+        ))
+        let before = try await trackRepo.fetch(id: knownTrackID)
+        var summary: ScanProgress.Summary?
+        var sourceMoved = false
+        for await event in await scanner.scan(mode: .full) {
+            if case let .error(_, error as LibraryError) = event,
+               case .sourceMoved = error { sourceMoved = true }
+            if case let .finished(value) = event { summary = value }
+        }
+        #expect(sourceMoved)
+        #expect(try await trackRepo.count() == 1)
+        #expect(try await trackRepo.fetch(id: knownTrackID) == before)
+        #expect(try await LibraryRootRepository(database: db).fetch(id: id).isInaccessible)
+        #expect(try #require(summary).errors == 1)
+        #expect(try await PendingMaintenanceRepository(database: db).hasRequest(task: PendingMaintenance.Task.fullRescan))
+    }
+
     // MARK: - scanSingleFile
 
     @Test("scanSingleFile inserts a single audio file into the database")
@@ -314,6 +447,56 @@ struct LibraryScannerTests {
 
         let summary = try await scanner.scanSingleFile(url: url)
         #expect(summary.errors >= 1)
+    }
+
+    @Test("unmount events keep indexed tracks while marking the source offline")
+    func offlineSourceEventsKeepTracks() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = root.appendingPathComponent("track.mp3")
+        try FileManager.default.copyItem(
+            at: sampleLibraryURL.appendingPathComponent("Artist A/Album One/01 - First Track.mp3"), to: audio
+        )
+        try await scanner.addRoot(root)
+        for await _ in await scanner.scan(mode: .full) {}
+        #expect(try await TrackRepository(database: db).count() == 1)
+
+        try FileManager.default.removeItem(at: root)
+        await scanner.handleFSChange(urls: [audio, root])
+
+        let tracks = try await TrackRepository(database: db).fetchAllIncludingDisabled()
+        #expect(tracks.count == 1)
+        #expect(tracks.allSatisfy { !$0.disabled })
+        #expect(try await scanner.roots().first?.isInaccessible == true)
+    }
+
+    @Test("a deletion event still disables a track while its source is connected")
+    func connectedSourceDeletionDisablesTrack() async throws {
+        let db = try await makeDB()
+        let scanner = LibraryScanner(database: db)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = root.appendingPathComponent("track.mp3")
+        try FileManager.default.copyItem(
+            at: sampleLibraryURL.appendingPathComponent("Artist A/Album One/01 - First Track.mp3"), to: audio
+        )
+        try await scanner.addRoot(root)
+        for await _ in await scanner.scan(mode: .full) {}
+        try FileManager.default.removeItem(at: audio)
+
+        await scanner.handleFSChange(urls: [audio])
+        let tracks = try await TrackRepository(database: db).fetchAllIncludingDisabled()
+        #expect(tracks.count == 1)
+        #expect(tracks.allSatisfy { $0.disabled })
+        #expect(try await scanner.roots().first?.isInaccessible == false)
     }
 
     // MARK: - audioFiles(under:)

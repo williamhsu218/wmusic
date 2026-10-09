@@ -127,9 +127,12 @@ private struct QueuePayloadV2: Codable {
     var currentIndex: Int?
     var repeatMode: RepeatMode
     var shuffleState: ShuffleState
+    /// The original order before shuffling, including items excluded from shuffle.
+    /// Absent in older blobs: nil means the original order is unknown.
+    var sourceItems: [PersistedQueueItemV2]?
 
     private enum CodingKeys: String, CodingKey {
-        case version, items, currentIndex, repeatMode, shuffleState
+        case version, items, currentIndex, repeatMode, shuffleState, sourceItems
     }
 
     /// Forward-compatible decoder: `version` defaults to `2` so blobs written
@@ -141,6 +144,7 @@ private struct QueuePayloadV2: Codable {
         self.currentIndex = try c.decodeIfPresent(Int.self, forKey: .currentIndex)
         self.repeatMode = try c.decode(RepeatMode.self, forKey: .repeatMode)
         self.shuffleState = try c.decode(ShuffleState.self, forKey: .shuffleState)
+        self.sourceItems = try c.decodeIfPresent([PersistedQueueItemV2].self, forKey: .sourceItems)
     }
 
     init(
@@ -148,13 +152,15 @@ private struct QueuePayloadV2: Codable {
         items: [PersistedQueueItemV2],
         currentIndex: Int?,
         repeatMode: RepeatMode,
-        shuffleState: ShuffleState
+        shuffleState: ShuffleState,
+        sourceItems: [PersistedQueueItemV2]? = nil
     ) {
         self.version = version
         self.items = items
         self.currentIndex = currentIndex
         self.repeatMode = repeatMode
         self.shuffleState = shuffleState
+        self.sourceItems = sourceItems
     }
 }
 
@@ -201,7 +207,8 @@ public actor QueuePersistence {
         items: [QueueItem],
         currentIndex: Int?,
         repeatMode: RepeatMode,
-        shuffleState: ShuffleState
+        shuffleState: ShuffleState,
+        sourceItems: [QueueItem]? = nil
     ) {
         self.pendingSave?.cancel()
         let debounce = self.debounce
@@ -213,9 +220,34 @@ public actor QueuePersistence {
                 items: items,
                 currentIndex: currentIndex,
                 repeatMode: repeatMode,
-                shuffleState: shuffleState
+                shuffleState: shuffleState,
+                sourceItems: sourceItems
             )
         }
+    }
+
+    /// Writes a complete snapshot without waiting for the debounce, replacing any
+    /// pending save so a previous shuffle order cannot overwrite this snapshot.
+    public func saveImmediately(
+        items: [QueueItem],
+        currentIndex: Int?,
+        repeatMode: RepeatMode,
+        shuffleState: ShuffleState,
+        sourceItems: [QueueItem]? = nil
+    ) async {
+        let previousSave = self.pendingSave
+        previousSave?.cancel()
+        self.pendingSave = nil
+        // A save already flushing may not observe cancellation. Let it finish
+        // before writing the replacement snapshot.
+        await previousSave?.value
+        await self.flush(
+            items: items,
+            currentIndex: currentIndex,
+            repeatMode: repeatMode,
+            shuffleState: shuffleState,
+            sourceItems: sourceItems
+        )
     }
 
     #if DEBUG
@@ -242,7 +274,8 @@ public actor QueuePersistence {
         currentIndex: Int?,
         repeatMode: RepeatMode,
         shuffleState: ShuffleState,
-        schemaWarning: String?
+        schemaWarning: String?,
+        sourceItems: [QueueItem]?
     )? {
         do {
             if let payload: QueuePayloadV2 = try await repo.get(QueuePayloadV2.self, for: Self.settingsKeyV2) {
@@ -267,12 +300,16 @@ public actor QueuePersistence {
                         currentIndex: nil,
                         repeatMode: .off,
                         shuffleState: .off,
-                        schemaWarning: "Saved queue is from a newer version of WMusic — starting fresh."
+                        schemaWarning: "Saved queue is from a newer version of WMusic — starting fresh.",
+                        sourceItems: nil
                     )
                 }
                 let items = payload.items.map { $0.toQueueItem() }
                 self.log.debug("queue.restore", ["count": items.count, "schema": payload.version])
-                return (items, payload.currentIndex, payload.repeatMode, payload.shuffleState, nil)
+                return (
+                    items, payload.currentIndex, payload.repeatMode, payload.shuffleState, nil,
+                    payload.sourceItems?.map { $0.toQueueItem() }
+                )
             }
             if let legacy: QueuePayloadV1 = try await repo.get(QueuePayloadV1.self, for: Self.settingsKeyV1) {
                 let items = legacy.items.map { $0.toQueueItem() }
@@ -292,7 +329,7 @@ public actor QueuePersistence {
                         "error": String(reflecting: error),
                     ])
                 }
-                return (items, legacy.currentIndex, legacy.repeatMode, legacy.shuffleState, nil)
+                return (items, legacy.currentIndex, legacy.repeatMode, legacy.shuffleState, nil, nil)
             }
             return nil
         } catch {
@@ -307,7 +344,8 @@ public actor QueuePersistence {
         items: [QueueItem],
         currentIndex: Int?,
         repeatMode: RepeatMode,
-        shuffleState: ShuffleState
+        shuffleState: ShuffleState,
+        sourceItems: [QueueItem]? = nil
     ) async {
         // Strip the BookmarkBlob before encoding — each bookmark is 2–8 KB of binary
         // data, so 14k items can produce 100+ MB of Base64 JSON. That allocation spike
@@ -319,7 +357,8 @@ public actor QueuePersistence {
             items: slimItems,
             currentIndex: currentIndex,
             repeatMode: repeatMode,
-            shuffleState: shuffleState
+            shuffleState: shuffleState,
+            sourceItems: sourceItems?.map { PersistedQueueItemV2(from: $0) }
         )
         let repo = self.repo
         let log = self.log

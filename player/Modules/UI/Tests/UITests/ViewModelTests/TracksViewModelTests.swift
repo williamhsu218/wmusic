@@ -185,4 +185,31 @@ struct TracksViewModelTests {
         #expect(vm.artistNames[artistID] == "The Beatles")
         #expect(vm.albumNames[albumID] == "Abbey Road")
     }
+
+    @Test("Smart folder first load has display names and keeps play ranking through filtering")
+    func smartFolderPreparesRows() async throws {
+        let db = try await makeDatabase()
+        let artistID = try await ArtistRepository(database: db).insert(Artist(name: "An Artist"))
+        let albumID = try await AlbumRepository(database: db).insert(
+            Album(title: "An Album", albumArtistID: artistID)
+        )
+        var frequent = makeTrack(id: 1, title: "Zed Song", playCount: 7)
+        frequent.artistID = artistID
+        frequent.albumID = albumID
+        var occasional = makeTrack(id: 2, title: "Alpha Song", playCount: 2)
+        occasional.artistID = artistID
+        occasional.albumID = albumID
+
+        let vm = self.makeVM(db: db)
+        vm.beginSmartFolderLoading()
+        await vm.prepareSmartFolderRows()
+        vm.finishSmartFolderRows([frequent, occasional])
+
+        #expect(!vm.isLoading)
+        #expect(vm.rows.map(\.title) == ["Zed Song", "Alpha Song"])
+        #expect(vm.rows.allSatisfy { $0.artistName == "An Artist" && $0.albumName == "An Album" })
+        vm.filterText = "Song"
+        vm.setTracks([frequent, occasional], preserveOrder: true)
+        #expect(vm.rows.map(\.title) == ["Zed Song", "Alpha Song"])
+    }
 }

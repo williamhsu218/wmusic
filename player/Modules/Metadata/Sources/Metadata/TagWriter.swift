@@ -129,7 +129,10 @@ public struct TagWriter: Sendable {
         guard !fm.isWritableFile(atPath: folder.path(percentEncoded: false)) else {
             return "Replace failed: \(error.localizedDescription)"
         }
-        return "Replace failed: the folder \(folder.lastPathComponent) is not writable "
+        return "Replace failed: WMusic cannot write in the folder \(folder.lastPathComponent). "
+            + "In Settings > Library, choose Add Folder… and select the folder containing these tracks "
+            + "to grant editing access. This keeps the existing library entries. "
+            + "If that still fails, check the folder's permissions or whether its volume is read-only. "
             + "(\(error.localizedDescription))"
     }
 

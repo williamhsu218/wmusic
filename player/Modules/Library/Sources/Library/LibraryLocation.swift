@@ -32,6 +32,12 @@ public enum LibraryLocation: Sendable {
 
     // MARK: - Bookmark helpers
 
+    /// Stored with root bookmarks so Sources can identify and reconnect a NAS
+    /// without accessing an offline mount to discover its connection address.
+    public static let rootBookmarkResourceKeys: Set<URLResourceKey> = [
+        .volumeURLForRemountingKey, .volumeIsLocalKey, .isDirectoryKey,
+    ]
+
     /// Creates a security-scoped, app-scoped bookmark for `url`.
     ///
     /// - Throws: If the bookmark cannot be created (e.g. the URL is inaccessible).
@@ -51,7 +57,7 @@ public enum LibraryLocation: Sendable {
         var stale = false
         let url = try URL(
             resolvingBookmarkData: bookmark,
-            options: .withSecurityScope,
+            options: [.withSecurityScope, .withoutUI, .withoutMounting],
             relativeTo: nil,
             bookmarkDataIsStale: &stale
         )

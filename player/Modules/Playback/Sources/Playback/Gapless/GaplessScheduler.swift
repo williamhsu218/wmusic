@@ -152,8 +152,12 @@ public actor GaplessScheduler {
 
     /// Cancel the polling loop and any active gapless preload.
     public func stop() async {
-        self.task?.cancel()
+        let pollingTask = self.task
+        pollingTask?.cancel()
         self.task = nil
+        // An in-flight prefetch may still be opening a decoder. Join it before
+        // cancelling the engine preload so it cannot re-arm after this stop.
+        await pollingTask?.value
         self.armedForItemID = nil
         self.incompatibleLoggedForItemID = nil
         await self.engine.cancelGaplessNext()
@@ -171,7 +175,11 @@ public actor GaplessScheduler {
     private func pollLoop() async {
         while !Task.isCancelled {
             await self.checkAndArm()
-            try? await Task.sleep(nanoseconds: 500_000_000) // 500 ms
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return
+            }
         }
     }
 

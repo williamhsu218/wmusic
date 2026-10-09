@@ -80,4 +80,26 @@ struct LyricsViewModelOffsetTests {
         vm.positionDidChange(10.5)
         #expect(vm.currentLineIndex == 0)
     }
+
+    @Test("clicking a lyric seeks to its adjusted audio time, including an unsaved offset")
+    func seekUsesEffectiveOffset() async throws {
+        let db = try await Database(location: .inMemory)
+        let trackID = try await self.seed(db: db, offsetMS: 1000)
+        let vm = LyricsViewModel(service: LyricsService(database: db, fetcher: nil))
+        vm.trackDidChange(trackID: trackID)
+        await self.waitUntil { vm.userOffsetMS == 1000 && vm.document != nil }
+        guard case let .synced(lines, _) = vm.document else {
+            Issue.record("Expected synced lyrics")
+            return
+        }
+        #expect(vm.playbackPosition(for: lines[0]) == 11)
+        vm.positionDidChange(vm.playbackPosition(for: lines[1]))
+        #expect(vm.currentLineIndex == 1)
+
+        vm.userOffsetMS = -500
+        #expect(vm.playbackPosition(for: lines[0]) == 9.5)
+        vm.positionDidChange(vm.playbackPosition(for: lines[0]))
+        #expect(vm.currentLineIndex == 0)
+        #expect(vm.playbackPosition(for: .init(start: 0.1, text: "Intro")) == 0)
+    }
 }

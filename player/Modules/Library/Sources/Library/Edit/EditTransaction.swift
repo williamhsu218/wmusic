@@ -663,10 +663,14 @@ actor EditTransaction {
             return nil
         }
         guard let filePath = URL(string: fileURLString)?.path else { return nil }
-        guard let root = roots.first(where: {
+        // Nested sources may overlap (for example, a renewed FLAC subfolder
+        // inside an older read-only music root). Use the closest authorised
+        // folder so its write scope wins regardless of database row order.
+        let matchingRoots = roots.filter {
             let prefix = $0.path == "/" ? "/" : $0.path + "/"
             return filePath.hasPrefix(prefix)
-        }) else { return nil }
+        }
+        guard let root = matchingRoots.max(by: { $0.path.count < $1.path.count }) else { return nil }
         var isStale = false
         let rootURL: URL
         do {

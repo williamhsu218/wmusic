@@ -95,6 +95,10 @@ public actor FFmpegDecoder: Decoder {
         self.streamDetails.codec
     }
 
+    public nonisolated var sourceURL: URL? {
+        self.url
+    }
+
     /// ICY now-playing titles (ADR-078 slice 5), de-interleaved by FFmpeg's http
     /// protocol and surfaced from the packet-read loop. Local files never
     /// emit. Finishes when the decoder closes. The backing members are

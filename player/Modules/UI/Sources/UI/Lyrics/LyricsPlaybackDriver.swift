@@ -15,16 +15,21 @@ import SwiftUI
 /// chain and not `BocanRootView.body` (#450); keep position reads out of
 /// the root body itself.
 struct LyricsPlaybackDriver: ViewModifier {
-    let lyricsVM: LyricsViewModel
+    @ObservedObject var lyricsVM: LyricsViewModel
     let nowPlaying: NowPlayingViewModel
 
     func body(content: Content) -> some View {
         content
-            .onChange(of: self.nowPlaying.nowPlayingTrackID) { _, trackID in
+            .onChange(of: self.nowPlaying.nowPlayingTrackID, initial: true) { _, trackID in
                 self.lyricsVM.trackDidChange(trackID: trackID)
             }
-            .onChange(of: self.nowPlaying.position) { _, position in
+            .onChange(of: self.nowPlaying.position, initial: true) { _, position in
                 self.lyricsVM.positionDidChange(position)
+            }
+            .onChange(of: self.lyricsVM.document) { _, _ in
+                // Lyrics can finish loading while paused; no position tick is
+                // guaranteed before the listener opens the expanded player.
+                self.lyricsVM.positionDidChange(self.nowPlaying.position)
             }
     }
 }

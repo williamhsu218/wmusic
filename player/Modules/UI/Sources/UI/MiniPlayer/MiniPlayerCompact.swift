@@ -22,14 +22,14 @@ struct MiniPlayerCompact: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 MarqueeText(
-                    self.np.title.isEmpty ? L10n.string("Not playing") : self.np.title,
+                    self.np.display.title.isEmpty ? L10n.string("Not playing") : self.np.display.title,
                     font: .system(size: 12, weight: .semibold),
-                    foregroundStyle: self.np.title.isEmpty ? Color.textSecondary : Color.textPrimary
+                    foregroundStyle: self.np.display.title.isEmpty ? Color.textSecondary : Color.textPrimary
                 )
 
-                if !self.np.artist.isEmpty {
+                if !self.np.display.artist.isEmpty {
                     MarqueeText(
-                        self.np.artist,
+                        self.np.display.artist,
                         font: .system(size: 11),
                         foregroundStyle: Color.textSecondary
                     )
@@ -65,7 +65,7 @@ struct MiniPlayerCompact: View {
 
     private var artworkThumbnail: some View {
         Group {
-            if let img = self.np.artwork {
+            if let img = self.np.display.artwork {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFill()

@@ -9,9 +9,11 @@ import SwiftUI
 /// plain `let` so the helper never re-renders on view-model churn.
 struct NavigationInputBackground: View {
     let vm: LibraryViewModel
+    var isSuspended = false
 
     var body: some View {
         NavigationInputMonitor(
+            isSuspended: self.isSuspended,
             onHistory: { direction in
                 let vm = self.vm
                 Task {
@@ -55,6 +57,7 @@ struct NavigationInputMonitor: NSViewRepresentable {
         case forward
     }
 
+    var isSuspended = false
     /// Called on the main actor with the history direction for a side button.
     let onHistory: (HistoryDirection) -> Void
     /// Called on the main actor for Esc; returns whether a drill-out actually
@@ -63,11 +66,14 @@ struct NavigationInputMonitor: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
+        context.coordinator.isSuspended = self.isSuspended
         context.coordinator.install(for: view, onHistory: self.onHistory, onDrillOut: self.onDrillOut)
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isSuspended = self.isSuspended
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -106,6 +112,7 @@ struct NavigationInputMonitor: NSViewRepresentable {
     @MainActor
     final class Coordinator {
         private var monitor: Any?
+        var isSuspended = false
 
         func install(
             for view: NSView,
@@ -115,9 +122,10 @@ struct NavigationInputMonitor: NSViewRepresentable {
             guard self.monitor == nil else { return }
             self.monitor = NSEvent.addLocalMonitorForEvents(
                 matching: [.otherMouseUp, .keyDown]
-            ) { [weak view] event in
+            ) { [weak self, weak view] event in
                 let handled = MainActor.assumeIsolated { () -> Bool in
-                    guard let window = view?.window,
+                    guard let self, !self.isSuspended,
+                          let window = view?.window,
                           event.window === window,
                           window.attachedSheet == nil else {
                         return false

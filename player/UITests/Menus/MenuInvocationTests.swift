@@ -370,12 +370,10 @@ final class MenuInvocationTests: XCTestCase {
         self.run(["Playback", "Cycle Repeat"], inv)
         inv.waitFor("repeat completes the cycle") { repeatValue() == repeatStart }
 
-        let stopAfterLabel = { inv.element("nowPlayingStrip.stopAfterCurrent").label }
-        let stopAfterStart = stopAfterLabel()
+        // This advanced playback option lives in the menu, not the compact
+        // transport strip. QueuePlayerTests verify its state transition.
         self.run(["Playback", "Toggle Stop After Current"], inv)
-        inv.waitFor("stop-after arms") { stopAfterLabel() != stopAfterStart }
         self.run(["Playback", "Toggle Stop After Current"], inv)
-        inv.waitFor("stop-after disarms") { stopAfterLabel() == stopAfterStart }
 
         // Speed surfaces on the strip's speed control, labelled
         // "Speed: <rate>" (read directly, not via a whole-window snapshot

@@ -42,6 +42,10 @@ public actor AVFoundationDecoder: Decoder {
         self.file.processingFormat
     }
 
+    public nonisolated var sourceURL: URL? {
+        self.file.url
+    }
+
     /// FFmpeg's short codec name for the file, from the format ID
     /// `AVAudioFile` reports (ADR-092). Measured on macOS 26: the ID is
     /// 'lpcm' for WAV and AIFF, 'flac', '.mp3', 'aac ', 'alac' and 'ec-3'
@@ -144,8 +148,8 @@ public actor AVFoundationDecoder: Decoder {
     /// packet, and a negligible cost per open.
     private static let probeFrames: AVAudioFrameCount = 4096
 
-    /// Decodes the first frames and rewinds. An exact-EOF `noErr` (OSStatus 0),
-    /// which `AVAudioFile` throws for an empty file, is not a refusal.
+    /// Decodes the first frames and rewinds. An EOF reported by `AVAudioFile`
+    /// for an empty file is not a format refusal.
     ///
     /// The rewind happens only after a successful read: setting `framePosition`
     /// on a file whose read just failed raises an Objective-C exception with
@@ -158,12 +162,22 @@ public actor AVFoundationDecoder: Decoder {
         do {
             try file.read(into: buffer)
         } catch {
-            if (error as NSError).code != 0 {
+            if !Self.isEndOfFile(error) {
                 throw error
             }
             return
         }
         file.framePosition = 0
+    }
+
+    /// `AVAudioFile` can report EOF as either an Objective-C error with code
+    /// zero or AudioToolbox's standard `kAudioFileEndOfFileError` (-39). The
+    /// latter must not turn a completed song into a decoder failure, because
+    /// only a normal EOF advances the playback queue and applies repeat mode.
+    static func isEndOfFile(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.code == 0 ||
+            (nsError.domain == NSOSStatusErrorDomain && nsError.code == Int(kAudioFileEndOfFileError))
     }
 
     /// Whether an `AVAudioFile` open error is a permissions failure rather
@@ -191,17 +205,13 @@ public actor AVFoundationDecoder: Decoder {
         // Guard: nothing left to read. FLACs without a STREAMINFO sample
         // count report length 0 even though the audio decodes fine (the same
         // quirk ReplayGainAnalyzer works around), so zero must not read as
-        // instant EOF; fall through and let read(into:) find the real end,
-        // which surfaces as the zero-frame/noErr case handled below.
+        // instant EOF; fall through and let read(into:) find the real end.
         guard self.file.length == 0 || self.file.framePosition < self.file.length else { return 0 }
         let before = self.file.framePosition
         do {
             try self.file.read(into: buffer)
         } catch {
-            // AVAudioFile occasionally throws OSStatus 0 (noErr) at exact EOF —
-            // treat that as end-of-stream rather than a real failure.
-            let nsError = error as NSError
-            if nsError.code == 0 {
+            if Self.isEndOfFile(error) {
                 return 0
             }
             self.recordReadFailure(error)

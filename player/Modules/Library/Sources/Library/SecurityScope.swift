@@ -24,7 +24,7 @@ public enum SecurityScope {
         do {
             url = try URL(
                 resolvingBookmarkData: bookmark,
-                options: .withSecurityScope,
+                options: [.withSecurityScope, .withoutUI, .withoutMounting],
                 relativeTo: nil,
                 bookmarkDataIsStale: &isStale
             )

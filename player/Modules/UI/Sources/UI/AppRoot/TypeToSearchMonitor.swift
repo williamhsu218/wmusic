@@ -9,9 +9,10 @@ import SwiftUI
 /// view-model churn.
 struct TypeToSearchBackground: View {
     let vm: LibraryViewModel
+    var isSuspended = false
 
     var body: some View {
-        TypeToSearchMonitor { char in
+        TypeToSearchMonitor(isSuspended: self.isSuspended) { char in
             // Through the routed accessor, so a keystroke on History seeds
             // that page's own query (ADR-094 slice 2).
             self.vm.searchText = String(char)
@@ -41,16 +42,20 @@ struct TypeToSearchBackground: View {
 ///   whitespace, function, and navigation keys pass through to the grids' and
 ///   tables' existing handlers.
 struct TypeToSearchMonitor: NSViewRepresentable {
+    var isSuspended = false
     /// Called on the main actor with the character that should seed the search.
     let begin: (Character) -> Void
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
+        context.coordinator.isSuspended = self.isSuspended
         context.coordinator.install(for: view, begin: self.begin)
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isSuspended = self.isSuspended
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -96,15 +101,17 @@ struct TypeToSearchMonitor: NSViewRepresentable {
     @MainActor
     final class Coordinator {
         private var monitor: Any?
+        var isSuspended = false
 
         func install(for view: NSView, begin: @escaping (Character) -> Void) {
             guard self.monitor == nil else { return }
-            self.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak view] event in
+            self.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak view] event in
                 // The monitor fires on the main thread, but the handler is not
                 // @MainActor in the SDK; assume isolation for the AppKit reads
                 // and return a Sendable verdict (NSEvent itself is not).
                 let handled = MainActor.assumeIsolated { () -> Bool in
-                    guard let window = view?.window,
+                    guard let self, !self.isSuspended,
+                          let window = view?.window,
                           event.window === window,
                           window.attachedSheet == nil,
                           !(window.firstResponder is NSText),

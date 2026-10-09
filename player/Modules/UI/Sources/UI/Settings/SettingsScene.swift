@@ -14,6 +14,7 @@ import SwiftUI
 /// appears — so opening Settings directly to a page is reliable on first open.
 public struct SettingsScene: View {
     @State private var selection: SettingsPage = .general
+    @State private var sourceKind: MusicSourceKind = .nasFolders
     private let router: SettingsRouter
     private let scrobbleViewModel: ScrobbleSettingsViewModel?
     private let backupViewModel: BackupSettingsViewModel
@@ -74,7 +75,10 @@ public struct SettingsScene: View {
         guard let page = self.router.pendingPage else { return }
         self.selection = page
         if page == .sources, let id = self.router.pendingServerID, let vm = self.subsonicViewModel {
+            self.sourceKind = .musicServers
             Task { await vm.selectServer(id) }
+        } else if page == .sources {
+            self.sourceKind = .nasFolders
         }
         self.router.pendingPage = nil
         self.router.pendingServerID = nil
@@ -90,15 +94,7 @@ public struct SettingsScene: View {
             LibrarySettingsView()
 
         case .sources:
-            if let subsonicViewModel = self.subsonicViewModel {
-                SubsonicSettingsView(viewModel: subsonicViewModel)
-            } else {
-                ContentUnavailableView(
-                    L10n.string("Sources Unavailable"),
-                    systemImage: "server.rack",
-                    description: Text(localized: "Music server sources can't be configured right now.")
-                )
-            }
+            SourcesSettingsView(kind: self.$sourceKind, subsonicViewModel: self.subsonicViewModel)
 
         case .playback:
             PlaybackSettingsView()

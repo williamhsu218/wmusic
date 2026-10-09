@@ -21,8 +21,12 @@ public actor LibraryScanner {
     private let rootRepo: LibraryRootRepository
     private let maintenanceRepo: PendingMaintenanceRepository
     private let coordinator: ScanCoordinator
+    private let networkRootClassifier: @Sendable (Data) -> Bool
     private var fsWatcher: FSWatcher?
     private var isScanning = false
+    private var isRemovingRoot = false
+    private var activeFileImports = 0
+    private var scanWaiters: [CheckedContinuation<Void, Never>] = []
     private let log = AppLogger.make(.library)
 
     /// Called on the caller's context after FSEvents imports one or more files.
@@ -41,35 +45,56 @@ public actor LibraryScanner {
         self.rootRepo = LibraryRootRepository(database: database)
         self.coordinator = ScanCoordinator(database: database)
         self.maintenanceRepo = PendingMaintenanceRepository(database: database)
+        self.networkRootClassifier = Self.isNetworkRoot
+    }
+
+    /// Internal injection supports deterministic offline NAS tests without a
+    /// real mounted network volume. Public callers use cached bookmark values.
+    init(database: Database, networkRootClassifier: @escaping @Sendable (Data) -> Bool) {
+        self.database = database
+        self.rootRepo = LibraryRootRepository(database: database)
+        self.coordinator = ScanCoordinator(database: database)
+        self.maintenanceRepo = PendingMaintenanceRepository(database: database)
+        self.networkRootClassifier = networkRootClassifier
     }
 
     // MARK: - Root management
 
     /// Adds a new library root from a user-chosen URL.
     ///
-    /// Creates a security-scoped bookmark and persists it to the DB.
-    /// If a root with the same path already exists this is a no-op.
+    /// Creates a read-write security-scoped bookmark and persists it to the DB.
+    /// Choosing an existing root again refreshes its bookmark in place. This
+    /// lets users grant editing access to roots saved with older read-only
+    /// bookmarks without removing their library entries or history.
     public func addRoot(_ url: URL) async throws {
         let existing = try await self.rootRepo.fetchAll()
-        guard !existing.contains(where: { $0.path == url.path }) else { return }
+        let matchingRoot = existing.first(where: { $0.path == url.path })
 
-        // Read-only scope: scanning + FSEvents watching never write to the root.
-        // Per-file write scope is requested separately via the per-file bookmark
-        // created by `ScanCoordinator` (see ADR-010 / EditTransaction).
+        // TagWriter stages a sibling beside the audio file before replacing it
+        // atomically. A read-only root bookmark allows scanning and playback
+        // but denies that sibling even with the app's user-selected read-write
+        // entitlement. The selected folder must therefore retain write access.
         let bookmark = try url.bookmarkData(
-            options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
-            includingResourceValuesForKeys: nil,
+            options: .withSecurityScope,
+            includingResourceValuesForKeys: LibraryLocation.rootBookmarkResourceKeys,
             relativeTo: nil
         )
-        let now = Int64(Date.now.timeIntervalSince1970)
         let root = LibraryRoot(
-            id: nil,
+            id: matchingRoot?.id,
             path: url.path,
             bookmark: bookmark,
-            addedAt: now,
+            addedAt: matchingRoot?.addedAt ?? Int64(Date.now.timeIntervalSince1970),
             isInaccessible: false
         )
         try await self.rootRepo.upsert(root)
+        if matchingRoot != nil {
+            self.log.info("library.root.reauthorized", ["path": url.path])
+            if self.fsWatcher != nil {
+                await self.stopWatching()
+                await self.startWatching()
+            }
+            return
+        }
         self.log.info("library.root.added", ["path": url.path])
         // If a watcher is already running, begin watching the new root immediately.
         await self.watchNewRoot(path: url.path)
@@ -77,15 +102,30 @@ public actor LibraryScanner {
 
     /// Removes a root by its database ID and soft-deletes all tracks under it.
     public func removeRoot(id: Int64) async throws {
+        guard !self.isScanning, !self.isRemovingRoot, self.activeFileImports == 0 else {
+            throw LibraryError.scanAlreadyInProgress
+        }
+        self.isRemovingRoot = true
+        defer { self.isRemovingRoot = false }
         // Fetch the root path before deleting so we can disable its tracks.
         let roots = try await self.rootRepo.fetchAll()
         guard let root = roots.first(where: { $0.id == id }) else {
             try await self.rootRepo.delete(id: id)
             return
         }
-        try await self.rootRepo.delete(id: id)
         let trackRepo = TrackRepository(database: self.database)
-        try await trackRepo.disableAll(underPath: root.path)
+        // Use registered-root membership rather than LIKE on a plain path:
+        // tracks store file URLs, and underscores in NAS folder names are
+        // literal characters. Fetch before deleting the root that defines it.
+        let tracks = try await trackRepo.fetchAll(libraryRootID: id)
+        for track in tracks {
+            if let trackID = track.id { try await trackRepo.disable(id: trackID) }
+        }
+        try await self.rootRepo.delete(id: id)
+        if self.fsWatcher != nil {
+            await self.stopWatching()
+            await self.startWatching()
+        }
         self.log.info("library.root.removed", ["id": id, "path": root.path])
     }
 
@@ -109,13 +149,19 @@ public actor LibraryScanner {
             // ScanCoordinator's cooperative `Task.isCancelled` checks never
             // tripped because nothing ever cancelled this task. See #266.
             let task = Task {
-                guard !self.isScanning else {
+                guard !Task.isCancelled else { continuation.finish(); return }
+                guard !self.isScanning, !self.isRemovingRoot else {
                     continuation.yield(.error(url: nil, error: LibraryError.scanAlreadyInProgress))
                     continuation.finish()
                     return
                 }
                 self.isScanning = true
-                defer { isScanning = false }
+                defer {
+                    self.isScanning = false
+                    let waiters = self.scanWaiters
+                    self.scanWaiters.removeAll()
+                    for waiter in waiters { waiter.resume() }
+                }
 
                 let allRoots: [LibraryRoot]
                 do {
@@ -132,18 +178,28 @@ public actor LibraryScanner {
                 // Instead, start each scope manually and stop them all via defer once
                 // the coordinator finishes.
                 var resolved: [(url: URL, rootID: Int64)] = []
+                var resolutionErrors = 0
                 for root in allRoots {
                     guard let rootID = root.id else { continue }
                     var isStale = false
                     do {
                         let url = try URL(
                             resolvingBookmarkData: root.bookmark,
-                            options: .withSecurityScope,
+                            options: [.withSecurityScope, .withoutUI, .withoutMounting],
                             relativeTo: nil,
                             bookmarkDataIsStale: &isStale
                         )
                         guard url.startAccessingSecurityScopedResource() else {
                             throw LibraryError.bookmarkStale(url)
+                        }
+                        // A remounted NAS can gain a suffix such as "Music-1".
+                        // Importing it as a new path would duplicate the old
+                        // source and detach its queue/history associations.
+                        if self.networkRootClassifier(root.bookmark),
+                           LibrarySourcePath.canonical(url.path).precomposedStringWithCanonicalMapping !=
+                           LibrarySourcePath.canonical(root.path).precomposedStringWithCanonicalMapping {
+                            url.stopAccessingSecurityScopedResource()
+                            throw LibraryError.sourceMoved(expected: URL(fileURLWithPath: root.path), resolved: url)
                         }
                         if isStale {
                             self.log.warning("security_scope.stale", ["url": url.path])
@@ -152,7 +208,7 @@ public actor LibraryScanner {
                             do {
                                 let fresh = try url.bookmarkData(
                                     options: .withSecurityScope,
-                                    includingResourceValuesForKeys: nil,
+                                    includingResourceValuesForKeys: LibraryLocation.rootBookmarkResourceKeys,
                                     relativeTo: nil
                                 )
                                 var updated = root
@@ -168,6 +224,7 @@ public actor LibraryScanner {
                         }
                         resolved.append((url, rootID))
                     } catch {
+                        resolutionErrors += 1
                         self.log.warning("library.root.inaccessible", ["id": rootID, "path": root.path])
                         do {
                             try await self.rootRepo.markInaccessible(id: rootID, true)
@@ -192,7 +249,7 @@ public actor LibraryScanner {
                 guard !resolved.isEmpty else {
                     continuation.yield(.finished(ScanProgress.Summary(
                         inserted: 0, updated: 0, removed: 0,
-                        skipped: 0, errors: 0, duration: .zero
+                        skipped: 0, errors: resolutionErrors, duration: .zero
                     )))
                     continuation.finish()
                     return
@@ -203,19 +260,38 @@ public actor LibraryScanner {
                 // full scan finishes, so a cancelled or crashed scan runs again.
                 let effectiveMode = await self.effectiveScanMode(requested: mode)
                 let finished = FinishedFlag()
+                let scanFailed = FinishedFlag()
+                if resolved.count != allRoots.count { scanFailed.mark() }
+                let rootErrorCount = resolutionErrors
                 await self.coordinator.scan(roots: resolved, mode: effectiveMode) { event in
                     if case .finished = event {
                         finished.mark()
                     }
-                    continuation.yield(event)
+                    if case .error = event { scanFailed.mark() }
+                    if case let .finished(summary) = event, rootErrorCount > 0 {
+                        continuation.yield(.finished(ScanProgress.Summary(
+                            inserted: summary.inserted, updated: summary.updated, removed: summary.removed,
+                            skipped: summary.skipped, errors: summary.errors + rootErrorCount,
+                            duration: summary.duration
+                        )))
+                    } else {
+                        continuation.yield(event)
+                    }
                 }
-                if effectiveMode == .full, finished.isSet, !Task.isCancelled {
+                if effectiveMode == .full, finished.isSet, !scanFailed.isSet, !Task.isCancelled {
                     await self.clearFullRescanRequest()
                 }
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Waits for the scan producer to release its scopes and stop importing.
+    /// A cancelled UI consumer can finish before that producer has unwound.
+    public func waitForScanToFinish() async {
+        guard self.isScanning else { return }
+        await withCheckedContinuation { self.scanWaiters.append($0) }
     }
 
     // MARK: - Pending maintenance (#425)
@@ -248,11 +324,21 @@ public actor LibraryScanner {
     /// then delegates to the coordinator.  Returns a `ScanProgress.Summary`
     /// describing the outcome.
     public func scanSingleFile(url: URL) async throws -> ScanProgress.Summary {
+        try await self.scanSingleFile(url: url, expectedRootID: nil)
+    }
+
+    private func scanSingleFile(url: URL, expectedRootID: Int64?) async throws -> ScanProgress.Summary {
+        guard !self.isRemovingRoot else { throw LibraryError.scanAlreadyInProgress }
+        self.activeFileImports += 1
+        defer { self.activeFileImports -= 1 }
         let roots = try await self.rootRepo.fetchAll()
-        let filePath = url.path
+        if let expectedRootID, !roots.contains(where: { $0.id == expectedRootID }) {
+            throw LibraryError.rootNotFound(expectedRootID)
+        }
+        let filePath = LibrarySourcePath.canonical(url.path)
         // Find the root whose path is a prefix of the file path so we can
         // activate its security scope before reading tags / creating a bookmark.
-        if let root = roots.first(where: { filePath.hasPrefix($0.path) }) {
+        if let root = roots.first(where: { LibrarySourcePath.contains(filePath: filePath, rootPath: LibrarySourcePath.canonical($0.path)) }) {
             let coordinator = self.coordinator
             return try await SecurityScope.withAccess(root.bookmark) { _ in
                 try await coordinator.scanSingleFile(url: url)
@@ -357,18 +443,34 @@ public actor LibraryScanner {
     /// into a watched root) the event carries only the directory path — not one
     /// event per file inside it.  We recursively enumerate such directories so
     /// every audio file they contain is picked up automatically.
-    private func handleFSChange(urls: [URL]) async {
+    func handleFSChange(urls: [URL]) async {
+        guard !self.isRemovingRoot else { return }
+        let roots: [LibraryRoot]
+        do {
+            roots = try await self.rootRepo.fetchAll()
+        } catch {
+            self.log.warning("fsevents.change.rootsUnavailable", ["error": String(reflecting: error)])
+            return
+        }
         var didChange = false
         let trackRepo = TrackRepository(database: self.database)
         for raw in urls {
+            guard !self.isRemovingRoot else { break }
             // NFC-normalise — APFS may deliver decomposed UTF-8.
-            let url = URL(fileURLWithPath: raw.path.precomposedStringWithCanonicalMapping)
+            let url = URL(fileURLWithPath: LibrarySourcePath.canonical(raw.path.precomposedStringWithCanonicalMapping))
             guard !url.lastPathComponent.hasPrefix(".") else { continue }
+            guard let root = roots.first(where: {
+                LibrarySourcePath.contains(filePath: url.path, rootPath: LibrarySourcePath.canonical($0.path))
+            }) else { continue }
 
             var isDir: ObjCBool = false
             let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
 
             if !exists {
+                guard await self.sourceAvailable(root) else {
+                    if !root.isInaccessible { didChange = true }
+                    continue
+                }
                 // File or directory was deleted — disable matching tracks.
                 if TagReader.isSupported(url) {
                     // Single audio file: look it up by URL and mark disabled.
@@ -410,7 +512,7 @@ public actor LibraryScanner {
                 for fileURL in audioFiles {
                     guard await self.contentChanged(url: fileURL, trackRepo: trackRepo) else { continue }
                     do {
-                        _ = try await self.scanSingleFile(url: fileURL)
+                        _ = try await self.scanSingleFile(url: fileURL, expectedRootID: root.id)
                         self.log.debug("fsevents.file_rescanned", ["path": fileURL.lastPathComponent])
                         didChange = true
                     } catch {
@@ -454,7 +556,7 @@ public actor LibraryScanner {
                     // fallback links the art to the folder's album (#388).
                     if let sibling = self.audioFiles(under: url.deletingLastPathComponent()).first {
                         do {
-                            _ = try await self.scanSingleFile(url: sibling)
+                            _ = try await self.scanSingleFile(url: sibling, expectedRootID: root.id)
                             self.log.debug("fsevents.sidecar_art", ["path": url.lastPathComponent])
                             didChange = true
                         } catch {
@@ -466,7 +568,7 @@ public actor LibraryScanner {
                 guard TagReader.isSupported(url) else { continue }
                 guard await self.contentChanged(url: url, trackRepo: trackRepo) else { continue }
                 do {
-                    _ = try await self.scanSingleFile(url: url)
+                    _ = try await self.scanSingleFile(url: url, expectedRootID: root.id)
                     self.log.debug("fsevents.file_rescanned", ["path": url.lastPathComponent])
                     didChange = true
                 } catch {
@@ -476,6 +578,37 @@ public actor LibraryScanner {
         }
         if didChange, let callback = self.onFileImported {
             await callback()
+        }
+    }
+
+    private static func isNetworkRoot(bookmark: Data) -> Bool {
+        guard let values = URL.resourceValues(
+            forKeys: [.volumeIsLocalKey, .volumeURLForRemountingKey], fromBookmarkData: bookmark
+        ) else { return false }
+        return values.volumeIsLocal == false || values.volumeURLForRemounting?.scheme?.lowercased() == "smb"
+    }
+
+    /// A missing child is only a deletion while its source remains accessible.
+    /// Unmounting SMB produces the same missing paths as deleting files.
+    private func sourceAvailable(_ root: LibraryRoot) async -> Bool {
+        do {
+            let available = try await SecurityScope.withAccess(root.bookmark) { sourceURL in
+                try sourceURL.checkResourceIsReachable()
+            }
+            guard available else { throw LibraryError.sourceUnavailable(URL(fileURLWithPath: root.path)) }
+            return true
+        } catch {
+            if let id = root.id {
+                do {
+                    try await self.rootRepo.markInaccessible(id: id, true)
+                } catch {
+                    self.log.warning("library.root.markInaccessibleFailed", [
+                        "id": id, "error": String(reflecting: error),
+                    ])
+                }
+            }
+            self.log.warning("fsevents.source_offline", ["path": root.path])
+            return false
         }
     }
 

@@ -53,4 +53,11 @@ struct QueueReorderGripTests {
             "The now-playing row must be visually highlighted"
         )
     }
+
+    @Test("drag reorder retains the source order needed by shuffle-off")
+    func dragUsesReorderInsteadOfReplace() throws {
+        let source = try self.queueSource()
+        #expect(source.contains("await queue.reorder(to: newItems)"))
+        #expect(!source.contains("await queue.replace(with: newItems"))
+    }
 }

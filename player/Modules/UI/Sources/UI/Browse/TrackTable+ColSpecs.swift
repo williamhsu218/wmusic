@@ -3,6 +3,8 @@ import AppKit
 // MARK: - Column spec
 
 extension TrackTable {
+    static let mostPlayedAutosaveName = "wmusic.tracksTable.mostPlayed.v1"
+
     /// Describes a single table column's identity, sizing, and sort binding.
     struct ColSpec {
         /// The `NSUserInterfaceItemIdentifier` used for the column.
@@ -39,7 +41,9 @@ extension TrackTable {
             idealWidth: 52,
             maxWidth: 72,
             sortKey: "databaseID",
-            hidden: false
+            // A SQLite row key is useful for diagnostics, but it is not a
+            // track number or a dependable indication of import order.
+            hidden: true
         ),
         ColSpec(
             id: .title,
@@ -303,4 +307,15 @@ extension TrackTable {
             hidden: true
         ),
     ]
+
+    /// Give the ranking's defining value a visible position without changing
+    /// column order saved by users for the general Songs table.
+    static var mostPlayedColumnSpecs: [ColSpec] {
+        var specs = self.columnSpecs
+        guard let playsIndex = specs.firstIndex(where: { $0.id == .playCount }),
+              let titleIndex = specs.firstIndex(where: { $0.id == .title }) else { return specs }
+        let plays = specs.remove(at: playsIndex)
+        specs.insert(plays, at: titleIndex + 1)
+        return specs
+    }
 }

@@ -101,6 +101,13 @@ public final class LyricsViewModel: ObservableObject {
 
     // MARK: - Public API
 
+    /// Inverse of the highlight calculation, including saved and pending timing
+    /// adjustments. A lyric timestamp alone is not always the audio timestamp.
+    public func playbackPosition(for line: LyricsDocument.LyricsLine) -> TimeInterval {
+        let offset = (self.document?.offsetMS ?? 0) + self.userOffsetMS - self.persistedOffsetMS
+        return max(0, line.start + TimeInterval(offset) / 1000)
+    }
+
     /// Human-readable label for ``documentSource``, suitable for a badge in the UI.
     ///
     /// Returns `nil` when no lyrics are loaded.

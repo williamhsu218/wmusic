@@ -33,6 +33,39 @@ FFMPEG_VERSION=$(brew list --versions ffmpeg 2>/dev/null | awk '{print $2}' || e
 CHROMAPRINT_VERSION=$(brew list --versions chromaprint 2>/dev/null | awk '{print $2}' || echo "unknown")
 TAGLIB_VERSION=$(brew list --versions taglib 2>/dev/null | awk '{print $2}' || echo "unknown")
 
+# The Homebrew FFmpeg formula can be built with GPL codecs. A hard-coded LGPL
+# notice misstates the licence of that binary, so derive this paragraph from
+# the exact FFmpeg installation that the local app build bundles.
+FFMPEG_PREFIX=$(brew --prefix ffmpeg)
+FFMPEG_BUILD_CONFIG=$("${FFMPEG_PREFIX}/bin/ffmpeg" -buildconf 2>/dev/null)
+if [[ "${FFMPEG_BUILD_CONFIG}" == *--enable-nonfree* ]]; then
+    echo "error: bundled FFmpeg enables non-free components; review its terms before generating notices" >&2
+    exit 1
+fi
+if [[ "${FFMPEG_BUILD_CONFIG}" == *--enable-gpl* ]]; then
+    if [[ "${FFMPEG_BUILD_CONFIG}" == *--enable-version3* ]]; then
+        FFMPEG_LICENSE_NAME="GNU General Public Licence, version 3 or later (GPL 3+)"
+        FFMPEG_LICENSE_FILE="COPYING.GPLv3"
+        FFMPEG_LICENSE_URL="https://www.gnu.org/licenses/gpl-3.0.html"
+    else
+        FFMPEG_LICENSE_NAME="GNU General Public Licence, version 2 or later (GPL 2+)"
+        FFMPEG_LICENSE_FILE="COPYING.GPLv2"
+        FFMPEG_LICENSE_URL="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"
+    fi
+elif [[ "${FFMPEG_BUILD_CONFIG}" == *--enable-version3* ]]; then
+    FFMPEG_LICENSE_NAME="GNU Lesser General Public Licence, version 3 or later (LGPL 3+)"
+    FFMPEG_LICENSE_FILE="COPYING.LGPLv3"
+    FFMPEG_LICENSE_URL="https://www.gnu.org/licenses/lgpl-3.0.html"
+else
+    FFMPEG_LICENSE_NAME="GNU Lesser General Public Licence, version 2.1 or later (LGPL 2.1+)"
+    FFMPEG_LICENSE_FILE="COPYING.LGPLv2.1"
+    FFMPEG_LICENSE_URL="https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html"
+fi
+[[ -f "${FFMPEG_PREFIX}/${FFMPEG_LICENSE_FILE}" ]] || {
+    echo "error: missing FFmpeg licence ${FFMPEG_PREFIX}/${FFMPEG_LICENSE_FILE}" >&2
+    exit 1
+}
+
 echo "📌 Dependency versions:"
 echo "  - FFmpeg: ${FFMPEG_VERSION}"
 echo "  - Chromaprint: ${CHROMAPRINT_VERSION}"
@@ -64,7 +97,6 @@ CUSTOM_DUMP_VERSION=$(extract_spm_version "swift-custom-dump")
 # Point-Free renamed xctest-dynamic-overlay to swift-issue-reporting. Xcode 27
 # follows the rename when it resolves; 26.6 still writes the old identity.
 ISSUE_REPORTING_VERSION=$(extract_spm_version "swift-issue-reporting" "xctest-dynamic-overlay")
-SPARKLE_VERSION=$(extract_spm_version "sparkle")
 SWIFTSONIC_VERSION=$(extract_spm_version "swiftsonic")
 FEEDKIT_VERSION=$(extract_spm_version "feedkit")
 CRYPTO_VERSION=$(extract_spm_version "swift-crypto")
@@ -75,7 +107,6 @@ echo "  - GRDB: ${GRDB_VERSION}"
 echo "  - swift-snapshot-testing: ${SNAPSHOT_VERSION}"
 echo "  - swift-custom-dump: ${CUSTOM_DUMP_VERSION}"
 echo "  - swift-issue-reporting: ${ISSUE_REPORTING_VERSION}"
-echo "  - Sparkle: ${SPARKLE_VERSION}"
 echo "  - SwiftSonic: ${SWIFTSONIC_VERSION}"
 echo "  - FeedKit: ${FEEDKIT_VERSION}"
 echo "  - swift-crypto: ${CRYPTO_VERSION}"
@@ -86,8 +117,14 @@ echo "  - swift-asn1: ${ASN1_VERSION}"
 cat > "${NOTICES_PATH}" << EOF
 # Third-Party Notices
 
-Bòcan incorporates the following open-source components. Full licence texts are
-reproduced below as required by each project's terms.
+WMusic is a local adaptation of [Bòcan](https://github.com/bocan/bocan-music)
+by Chris Funderburg (Copyright 2026), licensed under the Apache License,
+Version 2.0. The original copyright notice and full Apache 2.0 licence are
+included in WMusic's bundled \`LICENSE\` file.
+
+The following components retain their own authorship and licences. Their
+notices and source links are listed here; applicable licence files for bundled
+native libraries are also included in \`ThirdPartyLicenses\` in the app bundle.
 
 ---
 
@@ -95,12 +132,14 @@ reproduced below as required by each project's terms.
 
 <https://ffmpeg.org>
 
-Bòcan links against FFmpeg libraries built **without any GPL or non-free
-components**, making them available under the GNU Lesser General Public Licence,
-version 2.1 or later (LGPL 2.1+).
+WMusic bundles FFmpeg libraries from Homebrew's FFmpeg build. The selected
+configuration makes this FFmpeg build subject to the **${FFMPEG_LICENSE_NAME}**.
+This designation applies to the FFmpeg build; separately bundled libraries
+retain their own licences.
 
-The LGPL 2.1 full text is available at:
-<https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html>
+The applicable FFmpeg licence text is included as
+\`ThirdPartyLicenses/ffmpeg-${FFMPEG_LICENSE_FILE}\` and is available at
+<${FFMPEG_LICENSE_URL}>.
 
 FFmpeg source code is available at <https://ffmpeg.org/download.html>.
 The Homebrew formula used to build the bundled dylibs is
@@ -141,6 +180,58 @@ The LGPL 2.1 full text is available at:
 
 Chromaprint source code is available at
 <https://github.com/acoustid/chromaprint>.
+
+---
+
+## Other bundled native libraries
+
+These are dynamic libraries included with FFmpeg or fpcalc in this local build.
+Each component keeps its own licence; its licence text is included in
+\`ThirdPartyLicenses\` in the app bundle.
+
+### SVT-AV1
+
+<https://gitlab.com/AOMediaCodec/SVT-AV1> — Clear BSD 3-Clause and BSD 2-Clause
+terms (\`svt-av1-LICENSE.md\`, \`svt-av1-LICENSE-BSD2.md\`).
+
+### dav1d
+
+<https://code.videolan.org/videolan/dav1d> — BSD 2-Clause
+(\`dav1d-COPYING\`).
+
+### XZ Utils / liblzma
+
+<https://tukaani.org/xz/> — liblzma uses the BSD Zero Clause licence
+(\`xz-COPYING\`, \`xz-COPYING.0BSD\`).
+
+### LAME
+
+<https://lame.sourceforge.io/> — GNU Library General Public Licence,
+version 2 or later (\`lame-LICENSE\`, \`lame-COPYING\`).
+
+### mpg123
+
+<https://www.mpg123.de/> — GNU Lesser General Public Licence,
+version 2.1 (\`mpg123-COPYING\`).
+
+### Opus
+
+<https://www.opus-codec.org/> — BSD 3-Clause (\`opus-COPYING\`).
+
+### libvpx
+
+<https://www.webmproject.org/code/> — BSD 3-Clause (\`libvpx-LICENSE\`).
+
+### x264 and x265
+
+<https://www.videolan.org/developers/x264.html> and
+<https://github.com/Multicorewareinc/x265> — GNU General Public Licence,
+version 2 or later (\`x264-COPYING\`, \`x265-COPYING\`).
+
+### OpenSSL
+
+<https://openssl-library.org> — Apache License, Version 2.0
+(\`openssl@3-LICENSE.txt\`).
 
 ---
 
@@ -237,36 +328,6 @@ SOFTWARE.
 MIT License
 
 Copyright © 2021 Point-Free, Inc.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
----
-
-## Sparkle ${SPARKLE_VERSION}
-
-<https://sparkle-project.org>
-
-MIT License
-
-Copyright (c) 2006–2013 Andy Matuschak
-Copyright (c) 2009–2013 Sparkle Project Contributors
-All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -394,8 +455,9 @@ This product uses the Apple iTunes Search API. Use of the Apple iTunes Search AP
 
 ---
 
-*This file was generated for Bòcan ${APP_VERSION}. Dependency versions are pinned in
-the workspace \`Package.resolved\`.*
+*This file was generated for WMusic ${APP_VERSION}. Swift package versions are
+pinned in the workspace \`Package.resolved\`; bundled native libraries come
+from the local Homebrew installation used to build the app.*
 EOF
 
 echo "✅ Generated ${NOTICES_PATH}"

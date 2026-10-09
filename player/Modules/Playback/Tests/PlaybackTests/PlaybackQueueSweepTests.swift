@@ -70,11 +70,12 @@ struct PlaybackQueueAdditionalTests {
         #expect(stored.count == 2)
     }
 
-    @Test("reorder reseats current item by trackID")
+    @Test("reorder reseats the exact current queue item")
     func reorderKeepsCurrent() async {
         let queue = PlaybackQueue()
-        await queue.replace(with: [item(1), item(2), item(3)], startAt: 1) // current=2
-        await queue.reorder(to: [item(3), item(2), item(1)])
+        let original = [item(1), item(2), item(3)]
+        await queue.replace(with: original, startAt: 1) // current=2
+        await queue.reorder(to: [original[2], original[1], original[0]])
         let ci = await queue.currentIndex
         #expect(ci == 1)
     }

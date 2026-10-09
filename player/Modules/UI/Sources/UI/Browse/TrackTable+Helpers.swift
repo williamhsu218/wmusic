@@ -44,7 +44,9 @@ extension TrackTable {
     /// the table's own `autosaveName` must stay unset until the columns exist
     /// (arming it earlier breaks order/width restore; see `makeNSView`).
     static func addColumns(to tableView: NSTableView, sortable: Bool, autosaveName: String) {
-        for spec in columnSpecs {
+        let specs = autosaveName == self.mostPlayedAutosaveName
+            ? self.mostPlayedColumnSpecs : self.columnSpecs
+        for spec in specs {
             let col = NSTableColumn(identifier: spec.id)
             col.title = spec.title
             col.headerCell.title = spec.title
@@ -60,12 +62,14 @@ extension TrackTable {
         }
     }
 
-    /// Re-asserts the persisted per-column hidden state on top of whatever
-    /// `NSTableView`'s autosave restore applied. The header-menu store is the
+    /// Re-asserts the user's visibility choice, or the current default, on top
+    /// of `NSTableView`'s autosave restore. The header-menu store is the
     /// authority for visibility; autosave owns only order and width.
     static func applySavedVisibility(to tableView: NSTableView, autosaveName: String) {
+        let defaultVisibility = Dictionary(uniqueKeysWithValues: columnSpecs.map { ($0.id, $0.hidden) })
         for col in tableView.tableColumns {
-            if let hidden = self.savedColumnVisibility(autosaveName: autosaveName, id: col.identifier) {
+            if let hidden = self.savedColumnVisibility(autosaveName: autosaveName, id: col.identifier)
+                ?? defaultVisibility[col.identifier] {
                 col.isHidden = hidden
             }
         }

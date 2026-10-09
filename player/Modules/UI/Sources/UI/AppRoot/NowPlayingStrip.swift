@@ -23,37 +23,34 @@ public struct NowPlayingStrip: View {
     /// When non-nil and `vm.pendingScrobbleCount > 0`, a pending-scrobbles
     /// indicator is shown in the panel-buttons area.
     var scrobbleSettingsVM: ScrobbleSettingsViewModel?
+    var openExpandedNowPlaying: () -> Void
+    var prewarmExpandedNowPlaying: () -> Void
 
-    public init(vm: NowPlayingViewModel, scrobbleSettingsVM: ScrobbleSettingsViewModel? = nil) {
+    public init(
+        vm: NowPlayingViewModel,
+        scrobbleSettingsVM: ScrobbleSettingsViewModel? = nil,
+        openExpandedNowPlaying: @escaping () -> Void = {},
+        prewarmExpandedNowPlaying: @escaping () -> Void = {}
+    ) {
         self.vm = vm
         self.scrobbleSettingsVM = scrobbleSettingsVM
+        self.openExpandedNowPlaying = openExpandedNowPlaying
+        self.prewarmExpandedNowPlaying = prewarmExpandedNowPlaying
     }
 
     public var body: some View {
-        HStack(spacing: 12) {
-            self.artwork
-                .id(self.vm.nowPlayingTrackID)
-                .transition(self.reduceMotion ? .opacity : .asymmetric(
-                    insertion: .move(edge: .trailing).combined(with: .opacity),
-                    removal: .move(edge: .leading).combined(with: .opacity)
-                ))
-            self.trackInfo
-                .id(self.vm.nowPlayingTrackID)
-                .transition(self.reduceMotion ? .opacity : .asymmetric(
-                    insertion: .move(edge: .trailing).combined(with: .opacity),
-                    removal: .move(edge: .leading).combined(with: .opacity)
-                ))
-            Spacer(minLength: 16)
+        HStack(spacing: 6) {
+            self.trackIdentity
+            Spacer(minLength: 0)
             self.transport
-            Spacer(minLength: 16)
+            Spacer(minLength: 0)
             self.volumeAndScrubber
-            Spacer(minLength: 16)
+            Spacer(minLength: 0)
             Divider()
                 .frame(height: 32)
                 .padding(.horizontal, 4)
             self.panelButtons
         }
-        .animation(.easeInOut(duration: 0.25), value: self.vm.nowPlayingTrackID)
         .frame(height: Theme.nowPlayingStripHeight)
         .padding(.horizontal, 16)
         .adaptiveMaterial()
@@ -71,53 +68,68 @@ public struct NowPlayingStrip: View {
 
     // MARK: - Sub-views
 
+    /// The drawn snapshot of the current item. It changes once per track,
+    /// after the title, subtitle, cover and badges are all known.
+    private var display: NowPlayingDisplay { self.vm.display }
+
+    /// The cover and text keep their view identity across track changes:
+    /// the text is replaced in place and only a different cover cross-fades.
+    /// Rebuilding the whole block per track (`.id` + an offset transition)
+    /// faded it out and in even when only the title changed.
+    private var trackIdentity: some View {
+        HStack(spacing: 12) {
+            self.artwork
+            self.trackInfo
+        }
+        // Fill the width offered by the outer frame so a short/long title
+        // cannot shift the controls beside this region on each track change.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: 220, maxWidth: 440, alignment: .leading)
+        .clipped()
+    }
+
     private var artwork: some View {
         Button {
-            if self.vm.isPodcast, let id = self.vm.podcastID {
-                Task { await self.library.selectDestination(.podcastShow(id)) }
-            } else {
-                Task { await self.library.goToCurrentAlbum() }
-            }
+            self.openExpandedNowPlaying()
         } label: {
-            Group {
-                if let img = vm.artwork {
-                    Image(nsImage: img)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 48, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.artworkCornerRadius, style: .continuous))
-                        .accessibilityHidden(true)
-                } else {
-                    GradientPlaceholder(seed: 0)
-                        .frame(width: 48, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.artworkCornerRadius, style: .continuous))
-                        .accessibilityHidden(true)
+            ZStack {
+                Group {
+                    if let img = self.display.artwork {
+                        Image(nsImage: img)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        GradientPlaceholder(seed: 0)
+                    }
                 }
+                .frame(width: 48, height: 48)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.artworkCornerRadius, style: .continuous))
+                // Keyed on the image object, not the track: the same album's
+                // next song reuses the cached cover and does not fade.
+                .id(self.display.artworkIdentity)
+                .transition(.opacity)
             }
+            .frame(width: 48, height: 48)
+            .animation(self.reduceMotion ? nil : .easeOut(duration: 0.15), value: self.display.artworkIdentity)
+            .accessibilityHidden(true)
         }
         .buttonStyle(.plain)
-        .disabled(self.vm.isPodcast ? self.vm.podcastID == nil : self.vm.nowPlayingAlbumID == nil)
-        .help(self.vm.isPodcast
-            ? (self.vm.podcastID != nil ? L10n.string("Go to podcast show") : L10n.string("No album"))
-            : (self.vm.nowPlayingAlbumID != nil ? L10n.string("Go to album: \(self.vm.album)") : L10n.string("No album")))
-        .keyboardShortcut(KeyBindings.goToCurrentAlbum)
-        .accessibilityLabel(
-            self.vm.isPodcast
-                ? (self.vm.podcastID != nil ? L10n.string("Go to podcast show") : L10n.string("No artwork"))
-                : (self.vm.nowPlayingAlbumID != nil
-                    ? L10n.string("Go to album \(self.vm.album) by \(self.vm.artist)")
-                    : L10n.string("No artwork"))
-        )
+        .disabled(self.display.title.isEmpty)
+        .help(L10n.string("Now Playing"))
+        .accessibilityLabel(L10n.string("Now Playing"))
         .accessibilityIdentifier(A11y.NowPlaying.artworkButton)
+        .onHover { isHovering in
+            if isHovering { self.prewarmExpandedNowPlaying() }
+        }
     }
 
     /// The title line, shared by the jump-button and plain-text renderings so
     /// both stay pixel-identical: full-strength while something plays, dimmed
     /// only for the idle "Not playing" placeholder.
     private var titleText: some View {
-        Text(self.vm.title.isEmpty ? L10n.string("Not playing") : self.vm.title)
+        Text(self.display.title.isEmpty ? L10n.string("Not playing") : self.display.title)
             .font(Typography.body)
-            .foregroundStyle(self.vm.title.isEmpty ? Color.textSecondary : Color.textPrimary)
+            .foregroundStyle(self.display.title.isEmpty ? Color.textSecondary : Color.textPrimary)
             .lineLimit(1)
     }
 
@@ -135,20 +147,20 @@ public struct NowPlayingStrip: View {
                         .accessibilityHidden(true)
                 }
                 .buttonStyle(.plain)
-                .help(L10n.string("Jump to \"\(self.vm.title)\" in track list"))
+                .help(L10n.string("Jump to \"\(self.display.title)\" in track list"))
                 .keyboardShortcut(KeyBindings.jumpToCurrentTrack)
-                .accessibilityLabel(L10n.string("Jump to \(self.vm.title) in track list"))
+                .accessibilityLabel(L10n.string("Jump to \(self.display.title) in track list"))
                 .accessibilityAddTraits(.updatesFrequently)
                 .accessibilityIdentifier(A11y.NowPlaying.titleButton)
             } else {
                 self.titleText
-                    .accessibilityLabel(self.vm.title.isEmpty ? L10n.string("Not playing") : self.vm.title)
+                    .accessibilityLabel(self.display.title.isEmpty ? L10n.string("Not playing") : self.display.title)
                     .accessibilityAddTraits(.updatesFrequently)
                     .accessibilityIdentifier(A11y.NowPlaying.titleButton)
             }
 
             // Artist/show — click to navigate to the artist or podcast show.
-            if !self.vm.artist.isEmpty {
+            if !self.display.artist.isEmpty {
                 Button {
                     if self.vm.isPodcast, let id = self.vm.podcastID {
                         Task { await self.library.selectDestination(.podcastShow(id)) }
@@ -156,7 +168,7 @@ public struct NowPlayingStrip: View {
                         Task { await self.library.goToCurrentArtist() }
                     }
                 } label: {
-                    Text(self.vm.isPodcast ? self.vm.artist : (self.trackSubtitle ?? self.vm.artist))
+                    Text(self.vm.isPodcast ? self.display.artist : (self.trackSubtitle ?? self.display.artist))
                         .font(Typography.subheadline)
                         .foregroundStyle(Color.textSecondary)
                         .lineLimit(1)
@@ -165,13 +177,19 @@ public struct NowPlayingStrip: View {
                 .buttonStyle(.plain)
                 .disabled(self.vm.isPodcast ? self.vm.podcastID == nil : self.vm.nowPlayingArtistID == nil)
                 .help(self.vm.isPodcast
-                    ? (self.vm.podcastID != nil ? L10n.string("Go to podcast show") : self.vm.artist)
-                    : (self.vm.nowPlayingArtistID != nil ? L10n.string("Go to artist: \(self.vm.artist)") : self.vm.artist))
+                    ? (self.vm.podcastID != nil ? L10n.string("Go to podcast show") : self.display.artist)
+                    : (self.vm.nowPlayingArtistID != nil ? L10n.string("Go to artist: \(self.display.artist)") : self.display.artist))
                 .keyboardShortcut(KeyBindings.goToCurrentArtist)
                 .accessibilityLabel(self.vm.isPodcast
                     ? L10n.string("Go to podcast show")
-                    : L10n.string("Go to artist \(self.vm.artist)"))
+                    : L10n.string("Go to artist \(self.display.artist)"))
                 .accessibilityIdentifier(A11y.NowPlaying.subtitleButton)
+            } else if !self.display.title.isEmpty {
+                // Keep the line's height so a track without an artist does
+                // not move the title and badges.
+                Text(verbatim: " ")
+                    .font(Typography.subheadline)
+                    .accessibilityHidden(true)
             }
 
             if let chapter = self.currentChapter {
@@ -191,9 +209,20 @@ public struct NowPlayingStrip: View {
             }
 
             // Codec, bitrate, sample rate, bit depth and channels (ADR-092).
-            if let facts = self.vm.sourceFacts {
-                SourceBadgesRow(facts: facts)
-                    .padding(.top, 2)
+            // The line is reserved while anything is loaded, so badges that
+            // are absent for one item cannot change the block's height.
+            if !self.display.title.isEmpty {
+                ZStack(alignment: .leading) {
+                    Text(verbatim: "0")
+                        .font(Typography.mini)
+                        .padding(.vertical, 1)
+                        .hidden()
+                        .accessibilityHidden(true)
+                    if let facts = self.display.sourceFacts {
+                        SourceBadgesRow(facts: facts)
+                    }
+                }
+                .padding(.top, 2)
             }
         }
         // Centred in the bar, and 160...380 rather than 120...300 (#536).
@@ -209,11 +238,12 @@ public struct NowPlayingStrip: View {
         // truncates there, and only a narrower transport or a minimum window
         // width would change that.
         .frame(minWidth: 160, maxWidth: 380, alignment: .leading)
-        .onChange(of: self.vm.nowPlayingTrackID) { _, trackID in
-            guard trackID != nil, !self.vm.title.isEmpty else { return }
-            let msg = self.vm.artist.isEmpty
-                ? self.vm.title
-                : L10n.string("\(self.vm.title) by \(self.vm.artist)")
+        // Announce the completed snapshot, so the artist is included.
+        .onChange(of: self.display.title) { _, title in
+            guard self.vm.nowPlayingTrackID != nil, !title.isEmpty else { return }
+            let msg = self.display.artist.isEmpty
+                ? self.display.title
+                : L10n.string("\(self.display.title) by \(self.display.artist)")
             NSAccessibility.post(
                 element: NSApplication.shared,
                 notification: .announcementRequested,
@@ -226,7 +256,7 @@ public struct NowPlayingStrip: View {
     }
 
     private var trackSubtitle: String? {
-        let parts = [self.vm.artist, self.vm.album]
+        let parts = [self.display.artist, self.display.album]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         return parts.isEmpty ? nil : parts.joined(separator: " - ")

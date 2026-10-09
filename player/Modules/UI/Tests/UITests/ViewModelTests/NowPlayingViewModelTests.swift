@@ -234,6 +234,23 @@ struct NowPlayingViewModelTests {
         #expect(engine.seekTarget == 42.5)
     }
 
+    @Test("a paused lyric seek publishes the actual engine position without resuming")
+    func pausedSeekRefreshesPosition() async throws {
+        let engine = MockTransport()
+        let vm = NowPlayingViewModel(engine: engine, database: try await makeDatabase())
+        engine.emit(.paused)
+        for _ in 0 ..< 100 where !vm.isPaused {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(vm.isPaused)
+        // Model a decoder snapping a requested seek to a nearby sample boundary.
+        engine.storedCurrentTime = 42.25
+        await vm.scrub(to: 42.5)
+        #expect(vm.position == 42.25)
+        #expect(vm.isPaused)
+        #expect(engine.playCallCount == 0)
+    }
+
     // MARK: - Previous / restart threshold
 
     @Test("previous within first 3 seconds does not restart (delegates to qp.previous)")

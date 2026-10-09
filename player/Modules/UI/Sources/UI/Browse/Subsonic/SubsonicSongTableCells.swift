@@ -9,9 +9,16 @@ import Subsonic
 /// First resolves the `coverArtURL` via `SubsonicCoverArtProvider`, then
 /// downloads and caches the `NSImage`.  Cancels in-flight work when reused.
 final class SubsonicCoverArtCell: NSTableCellView {
+    private struct CoverIdentity: Equatable {
+        let serverID: UUID
+        let entityID: String
+        let providerAvailable: Bool
+    }
+
     private let imageContainer = NSView()
     private let artImageView = NSImageView()
     private var loadTask: Task<Void, Never>?
+    private var currentIdentity: CoverIdentity?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -53,9 +60,17 @@ final class SubsonicCoverArtCell: NSTableCellView {
         seed: Int,
         title: String
     ) {
-        self.loadTask?.cancel()
-        self.artImageView.image = nil
         setAccessibilityLabel(entityID == nil ? L10n.string("No artwork") : L10n.string("\(title) artwork"))
+        let identity = entityID.map {
+            CoverIdentity(serverID: serverID, entityID: $0, providerAvailable: provider != nil)
+        }
+        // A star/rating refresh can reconfigure the same row. Do not blank an
+        // unchanged image or cancel its request merely for that state change.
+        guard self.currentIdentity != identity else { return }
+        self.currentIdentity = identity
+        self.loadTask?.cancel()
+        self.loadTask = nil
+        self.artImageView.image = nil
         guard let provider, let entityID else { return }
         self.loadTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -63,11 +78,21 @@ final class SubsonicCoverArtCell: NSTableCellView {
                 serverID: serverID,
                 entityID: entityID,
                 size: 64
-            ) else { return }
-            guard !Task.isCancelled else { return }
+            ) else {
+                if !Task.isCancelled, self.currentIdentity == identity {
+                    self.currentIdentity = nil
+                    self.loadTask = nil
+                }
+                return
+            }
+            guard !Task.isCancelled, self.currentIdentity == identity else { return }
             let img = await SubsonicImageCache.shared.image(url: url)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.currentIdentity == identity else { return }
             self.artImageView.image = img
+            if img == nil {
+                self.currentIdentity = nil
+            }
+            self.loadTask = nil
         }
     }
 }

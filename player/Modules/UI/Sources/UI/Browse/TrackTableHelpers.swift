@@ -149,9 +149,20 @@ final class LoveButtonCell: NSTableCellView {
 /// (minus 2 pt padding on each side).  When `artPath` changes the cell
 /// cancels any in-flight load and starts a fresh `Task` via `ArtworkLoader`.
 final class CoverArtImageCell: NSTableCellView {
+    /// A small synchronous front cache for reused/new table cells. The shared
+    /// ArtworkLoader is actor-isolated, so even one of its cache hits resumes
+    /// asynchronously; that leaves a newly created image view empty for a frame.
+    private static let visibleThumbnailCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 512
+        cache.totalCostLimit = 16 * 1024 * 1024
+        return cache
+    }()
+
     private let imageContainer = NSView()
     private let artImageView = NSImageView()
     private var loadTask: Task<Void, Never>?
+    private var currentArtPath: String?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -190,17 +201,33 @@ final class CoverArtImageCell: NSTableCellView {
     }
 
     func configure(artPath: String?, trackTitle: String) {
-        self.loadTask?.cancel()
-        self.artImageView.image = nil
         setAccessibilityLabel(artPath == nil ? L10n.string("No artwork") : L10n.string("\(trackTitle) artwork"))
+        // NSTableView may ask for the same cell again when only its row's
+        // playing/selection state changes. Keep the already rendered image (or
+        // its in-flight request) when the underlying cover has not changed.
+        guard self.currentArtPath != artPath else { return }
+        self.currentArtPath = artPath
+        self.loadTask?.cancel()
+        self.loadTask = nil
+        self.artImageView.image = artPath.flatMap { Self.visibleThumbnailCache.object(forKey: $0 as NSString) }
         guard let path = artPath else { return }
+        guard self.artImageView.image == nil else { return }
         self.loadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             // Track rows show art at roughly row height (~36 pt); request a
             // matching thumbnail rather than decoding the full-resolution cover.
             let img = await ArtworkLoader.shared.image(at: path, maxDimensionPoints: 40)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.currentArtPath == path else { return }
             self.artImageView.image = img
+            if let img {
+                let pixels = max(Int(img.size.width * img.size.height), 1)
+                Self.visibleThumbnailCache.setObject(img, forKey: path as NSString, cost: pixels * 4)
+            } else {
+                // An unavailable file may appear later; allow a future row
+                // configuration to retry instead of pinning this miss forever.
+                self.currentArtPath = nil
+            }
+            self.loadTask = nil
         }
     }
 }

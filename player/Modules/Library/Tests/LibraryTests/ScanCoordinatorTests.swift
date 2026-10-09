@@ -329,6 +329,87 @@ struct ScanCoordinatorTests {
         #expect(disabledTrack != nil, "Expected the removed track to be marked disabled in the DB")
     }
 
+    @Test("an offline source keeps indexed tracks and reports an incomplete scan")
+    func offlineRootKeepsTracks() async throws {
+        let db = try await makeDB()
+        let coordinator = ScanCoordinator(database: db)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = root.appendingPathComponent("track.mp3")
+        try FileManager.default.copyItem(
+            at: sampleLibraryURL.appendingPathComponent("Artist A/Album One/01 - First Track.mp3"), to: audio
+        )
+        let registered = try await LibraryRootRepository(database: db).upsert(LibraryRoot(
+            path: root.path, bookmark: LibraryLocation.bookmark(for: root), addedAt: 1
+        ))
+        let rootID = try #require(registered.id)
+        await coordinator.scan(roots: [(root, rootID)], mode: .full) { _ in }
+        let before = try await TrackRepository(database: db).fetchAllIncludingDisabled()
+        #expect(before.count == 1)
+
+        try FileManager.default.removeItem(at: root)
+        let box = EventBox()
+        await coordinator.scan(roots: [(root, rootID)], mode: .quick) { box.append($0) }
+
+        let after = try await TrackRepository(database: db).fetchAllIncludingDisabled()
+        #expect(after.first?.id == before.first?.id)
+        #expect(after.allSatisfy { !$0.disabled })
+        #expect(try await LibraryRootRepository(database: db).fetch(id: rootID).isInaccessible)
+        if case let .finished(summary) = box.events.last {
+            #expect(summary.removed == 0)
+            #expect(summary.errors > 0)
+        } else {
+            Issue.record("offline scan must finish with a summary")
+        }
+    }
+
+    @Test("a source disconnecting during enumeration preserves all existing tracks")
+    func rootDisconnectDuringWalkKeepsTracks() async throws {
+        let db = try await makeDB()
+        let coordinator = ScanCoordinator(database: db)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for name in ["one.mp3", "two.mp3"] {
+            try FileManager.default.copyItem(
+                at: sampleLibraryURL.appendingPathComponent("Artist A/Album One/01 - First Track.mp3"),
+                to: root.appendingPathComponent(name)
+            )
+        }
+        await coordinator.scan(roots: [(root, 1)], mode: .full) { _ in }
+        let box = EventBox()
+        await coordinator.scan(roots: [(root, 1)], mode: .quick) { event in
+            box.append(event)
+            if case .walking = event {
+                try? FileManager.default.removeItem(at: root)
+            }
+        }
+
+        let tracks = try await TrackRepository(database: db).fetchAllIncludingDisabled()
+        #expect(tracks.count == 2)
+        #expect(tracks.allSatisfy { !$0.disabled })
+        #expect(box.events.contains { if case .error = $0 { true } else { false } })
+        #expect(!box.events.contains { if case .removed = $0 { true } else { false } })
+    }
+
+    @Test("a successful scan clears a source's offline status")
+    func reachableRootRecoversStatus() async throws {
+        let db = try await makeDB()
+        let coordinator = ScanCoordinator(database: db)
+        let root = try sampleLibraryURL
+        let registered = try await LibraryRootRepository(database: db).upsert(LibraryRoot(
+            path: root.path, bookmark: LibraryLocation.bookmark(for: root), addedAt: 1, isInaccessible: true
+        ))
+        let id = try #require(registered.id)
+        await coordinator.scan(roots: [(root, id)], mode: .quick) { _ in }
+        #expect(try await LibraryRootRepository(database: db).fetch(id: id).isInaccessible == false)
+    }
+
     // MARK: - Error handling
 
     @Test("corrupt/zero-byte file does not crash scan; valid files still import")

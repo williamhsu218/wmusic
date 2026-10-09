@@ -15,7 +15,7 @@ struct MiniPlayerSquare: View {
     }
 
     private var trackSubtitle: String? {
-        let parts = [self.np.artist, self.np.album]
+        let parts = [self.np.display.artist, self.np.display.album]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         return parts.isEmpty ? nil : parts.joined(separator: " – ")
@@ -50,7 +50,7 @@ struct MiniPlayerSquare: View {
 
     private var artworkBackground: some View {
         Group {
-            if let img = self.np.artwork {
+            if let img = self.np.display.artwork {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFill()
@@ -67,7 +67,7 @@ struct MiniPlayerSquare: View {
             // Title + artist – album (white text on dark gradient)
             VStack(spacing: 2) {
                 MarqueeText(
-                    self.np.title.isEmpty ? L10n.string("Not playing") : self.np.title,
+                    self.np.display.title.isEmpty ? L10n.string("Not playing") : self.np.display.title,
                     font: .system(size: 13, weight: .semibold),
                     foregroundStyle: Color.white
                 )

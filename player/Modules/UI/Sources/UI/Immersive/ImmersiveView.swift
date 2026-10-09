@@ -89,7 +89,7 @@ public struct ImmersiveView: View {
                 ))
 
             HStack(spacing: self.gutter) {
-                ImmersiveNowPlayingColumn(vm: self.library.nowPlaying)
+                ImmersiveNowPlayingColumn(vm: self.library.nowPlaying, library: self.library)
                     .immersivePanel()
                     .frame(width: self.nowPlayingWidth)
                     .accessibilityIdentifier(A11y.Immersive.nowPlayingColumn)

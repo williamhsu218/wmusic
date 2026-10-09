@@ -10,14 +10,37 @@ public struct QueueView: View {
     /// Immersive Mode (ADR-089) drops the genre column so the narrower card
     /// keeps the title and artist readable.
     public var showsGenre: Bool
+    /// Larger rows and clearer current/next labels for the full-window player.
+    /// The library and Immersive queue keep their existing compact rows.
+    public var prominentRows: Bool
+    /// The expanded Now Playing view closes before opening the editor.
+    /// Other queue surfaces use the root window's normal editor presenter.
+    public var onGetInfo: ((Int64) -> Void)?
+    /// Called before a context-menu action navigates away from the queue.
+    public var onNavigate: (() -> Void)?
 
-    public init(vm: LibraryViewModel, showsGenre: Bool = true) {
+    public init(
+        vm: LibraryViewModel,
+        showsGenre: Bool = true,
+        prominentRows: Bool = false,
+        onGetInfo: ((Int64) -> Void)? = nil,
+        onNavigate: (() -> Void)? = nil
+    ) {
         self.vm = vm
         self.showsGenre = showsGenre
+        self.prominentRows = prominentRows
+        self.onGetInfo = onGetInfo
+        self.onNavigate = onNavigate
     }
 
     public var body: some View {
-        QueueContentView(vm: self.vm, showsGenre: self.showsGenre)
+        QueueContentView(
+            vm: self.vm,
+            showsGenre: self.showsGenre,
+            prominentRows: self.prominentRows,
+            onGetInfo: self.onGetInfo,
+            onNavigate: self.onNavigate
+        )
     }
 }
 
@@ -25,18 +48,41 @@ public struct QueueView: View {
 
 /// Inner view that observes queue state via the `QueuePlayer`.
 private struct QueueContentView: View {
+    private struct QueueSnapshot {
+        var items: [QueueItem] = []
+        var currentIndex: Int?
+        var unavailableIDs: Set<QueueItem.ID> = []
+        var hasLoadedQueue = false
+    }
+
     @ObservedObject var vm: LibraryViewModel
     /// Observed separately so the animated row indicator pauses when playback pauses.
     var nowPlaying: NowPlayingViewModel
     var showsGenre = true
-    @State private var items: [QueueItem] = []
-    @State private var currentIndex: Int?
-    @State private var unavailableIDs: Set<QueueItem.ID> = []
+    var prominentRows = false
+    var onGetInfo: ((Int64) -> Void)?
+    var onNavigate: (() -> Void)?
+    @State private var queueSnapshot = QueueSnapshot()
+    @State private var refreshGeneration = 0
 
-    init(vm: LibraryViewModel, showsGenre: Bool = true) {
+    private var items: [QueueItem] { self.queueSnapshot.items }
+    private var currentIndex: Int? { self.queueSnapshot.currentIndex }
+    private var unavailableIDs: Set<QueueItem.ID> { self.queueSnapshot.unavailableIDs }
+    private var hasLoadedQueue: Bool { self.queueSnapshot.hasLoadedQueue }
+
+    init(
+        vm: LibraryViewModel,
+        showsGenre: Bool = true,
+        prominentRows: Bool = false,
+        onGetInfo: ((Int64) -> Void)? = nil,
+        onNavigate: (() -> Void)? = nil
+    ) {
         self.vm = vm
         self.nowPlaying = vm.nowPlaying
         self.showsGenre = showsGenre
+        self.prominentRows = prominentRows
+        self.onGetInfo = onGetInfo
+        self.onNavigate = onNavigate
     }
 
     /// The slice of the queue shown in Up Next: the now-playing track followed by
@@ -63,27 +109,13 @@ private struct QueueContentView: View {
 
     var body: some View {
         Group {
-            if self.items.isEmpty {
-                if self.vm.libraryRoots.isEmpty {
-                    // Fresh install / no music folders configured: mirror the
-                    // Albums and Artists empty states with an Add-Music-Folder CTA
-                    // so this view doesn't dead-end users.
-                    EmptyState(
-                        symbol: "list.bullet.indent",
-                        title: L10n.string("Queue is Empty"),
-                        message: L10n.string("Add a music folder to start building your library."),
-                        actionLabel: L10n.string("Add Music Folder")
-                    ) {
-                        Task { await self.vm.addFolderByPicker() }
-                    }
-                } else {
-                    EmptyState(
-                        symbol: "list.bullet.indent",
-                        title: L10n.string("Queue is Empty"),
-                        message: L10n.string("Double-click a track, or right-click to add to queue.")
-                    )
-                }
+            if !self.prominentRows, self.items.isEmpty {
+                self.emptyQueueState
             } else {
+                // The expanded player keeps this List mounted as the queue loads
+                // or becomes empty. Replacing a List while a window is being
+                // resized can make SwiftUI dismantle its backing outline view
+                // during AppKit's live-resize row update.
                 List {
                     ForEach(self.upcoming) { entry in
                         QueueRow(
@@ -92,8 +124,10 @@ private struct QueueContentView: View {
                             isCurrent: entry.isCurrent,
                             isPlaying: self.nowPlaying.isPlaying,
                             isUnavailable: entry.isUnavailable,
+                            isAlreadyNext: entry.isAlreadyNext,
                             position: entry.index,
-                            showsGenre: self.showsGenre
+                            showsGenre: self.showsGenre,
+                            prominentRows: self.prominentRows
                         )
                         .listRowBackground(entry.isCurrent ? Color.accentColor.opacity(0.15) : Color.clear)
                         .contextMenu {
@@ -132,18 +166,26 @@ private struct QueueContentView: View {
                             }
                             .disabled(entry.isUnavailable)
 
-                            Button(L10n.string("Get Info")) {
-                                self.vm.tagEditorTrackIDs = [entry.item.trackID]
+                            if entry.item.trackID >= 0 {
+                                Button(L10n.string("Get Info")) {
+                                    if let onGetInfo = self.onGetInfo {
+                                        onGetInfo(entry.item.trackID)
+                                    } else {
+                                        self.vm.tagEditorTrackIDs = [entry.item.trackID]
+                                    }
+                                }
                             }
 
                             if let albumID = entry.item.albumID {
                                 Button(L10n.string("Go to Album")) {
+                                    self.onNavigate?()
                                     Task { await self.vm.selectDestination(.album(albumID)) }
                                 }
                             }
 
                             if let artistID = entry.item.artistID {
                                 Button(L10n.string("Go to Artist")) {
+                                    self.onNavigate?()
                                     Task { await self.vm.selectDestination(.artist(artistID)) }
                                 }
                             }
@@ -174,6 +216,34 @@ private struct QueueContentView: View {
                     }
                 }
                 .listStyle(.inset)
+                .overlay {
+                    if self.prominentRows, self.hasLoadedQueue, self.items.isEmpty {
+                        self.emptyQueueState
+                    } else if self.prominentRows, self.hasLoadedQueue,
+                       self.upcoming.count == 1,
+                       self.upcoming.first?.isCurrent == true {
+                        VStack(spacing: 9) {
+                            Image(systemName: "list.bullet.indent")
+                                .font(.title2)
+                            Text(L10n.string("Nothing else in the queue"))
+                                .font(.headline)
+                            Text(L10n.string("Choose another song to keep listening."))
+                                .font(.subheadline)
+                        }
+                        .foregroundStyle(Color.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 70)
+                        .accessibilityElement(children: .combine)
+                        .allowsHitTesting(false)
+                    }
+                }
+                // Keep the backing List mounted while loading; reveal the
+                // finished queue snapshot without a spinner-to-list swap.
+                .opacity(self.prominentRows && !self.hasLoadedQueue ? 0 : 1)
+                .animation(
+                    self.prominentRows ? .easeOut(duration: 0.2) : nil,
+                    value: self.hasLoadedQueue
+                )
             }
         }
         .navigationTitle(L10n.string("Up Next"))
@@ -184,21 +254,62 @@ private struct QueueContentView: View {
                 await self.refreshQueue()
             }
         })
-        .task { await self.refreshQueue() }
         .task { await self.observeQueueChanges() }
         .task { await self.observeUnavailableChanges() }
     }
 
+    @ViewBuilder
+    private var emptyQueueState: some View {
+        if self.prominentRows, !self.nowPlaying.title.isEmpty {
+            EmptyState(
+                symbol: "list.bullet.indent",
+                title: L10n.string("Nothing else in the queue"),
+                message: L10n.string("Choose another song to keep listening.")
+            )
+        } else if self.vm.libraryRoots.isEmpty {
+            // Fresh install / no music folders configured: mirror the Albums
+            // and Artists empty states with an Add-Music-Folder CTA.
+            EmptyState(
+                symbol: "list.bullet.indent",
+                title: L10n.string("Queue is Empty"),
+                message: L10n.string("Add a music folder to start building your library."),
+                actionLabel: L10n.string("Add Music Folder")
+            ) {
+                Task { await self.vm.addFolderByPicker() }
+            }
+        } else {
+            EmptyState(
+                symbol: "list.bullet.indent",
+                title: L10n.string("Queue is Empty"),
+                message: L10n.string("Double-click a track, or right-click to add to queue.")
+            )
+        }
+    }
+
     private func refreshQueue() async {
-        guard let qp = vm.queuePlayer else { return }
-        self.items = await qp.queue.items
-        self.currentIndex = await qp.queue.currentIndex
-        self.unavailableIDs = await qp.unavailableItemIDs()
+        self.refreshGeneration &+= 1
+        let generation = self.refreshGeneration
+        guard let qp = vm.queuePlayer else {
+            self.queueSnapshot.hasLoadedQueue = true
+            return
+        }
+        let queue = await qp.queue.snapshot()
+        guard generation == self.refreshGeneration else { return }
+        // The availability stream owns unavailableIDs. Publish the queue's
+        // rows and playhead together, preserving any newer availability event.
+        self.queueSnapshot = QueueSnapshot(
+            items: queue.items,
+            currentIndex: queue.currentIndex,
+            unavailableIDs: self.queueSnapshot.unavailableIDs,
+            hasLoadedQueue: true
+        )
     }
 
     private func observeQueueChanges() async {
         guard let queue = vm.queuePlayer?.queue else { return }
-        for await _ in await queue.changes() {
+        let changes = await queue.changes()
+        await self.refreshQueue()
+        for await _ in changes {
             await self.refreshQueue()
         }
     }
@@ -206,7 +317,7 @@ private struct QueueContentView: View {
     private func observeUnavailableChanges() async {
         guard let qp = vm.queuePlayer else { return }
         for await ids in await qp.unavailableItemUpdates() {
-            self.unavailableIDs = ids
+            self.queueSnapshot.unavailableIDs = ids
         }
     }
 
@@ -216,10 +327,11 @@ private struct QueueContentView: View {
         // slice-relative move offsets back onto absolute queue positions.
         let start = self.upcoming.first?.index ?? 0
         var newItems = self.items
+        guard source.allSatisfy({ newItems.indices.contains($0 + start) }),
+              (0...newItems.count).contains(destination + start) else { return }
         newItems.move(fromOffsets: IndexSet(source.map { $0 + start }), toOffset: destination + start)
-        // Keep the currently-playing track at its new position in the queue.
-        let currentID = self.currentIndex.map { self.items[$0].id }
-        await queue.replace(with: newItems, startAt: newItems.firstIndex { $0.id == currentID } ?? self.currentIndex ?? 0)
+        // Preserve the playing item and the source order held behind shuffle.
+        await queue.reorder(to: newItems)
         await self.refreshQueue()
     }
 }
@@ -250,8 +362,10 @@ private struct QueueRow: View {
     let isCurrent: Bool
     let isPlaying: Bool
     let isUnavailable: Bool
+    let isAlreadyNext: Bool
     let position: Int
     var showsGenre = true
+    var prominentRows = false
     @State private var isHovered = false
 
     /// Best-effort display title: metadata title → decoded filename stem → raw last path component.
@@ -294,16 +408,24 @@ private struct QueueRow: View {
             .accessibilityHidden(true)
 
             // Title + artist/album
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: self.prominentRows ? 4 : 1) {
+                if self.prominentRows, self.isCurrent || self.isAlreadyNext {
+                    Text(self.isCurrent ? L10n.string("Now Playing") : L10n.string("Up Next"))
+                        .font(.caption2.weight(.semibold))
+                        .textCase(.uppercase)
+                        .foregroundStyle(Color.textSecondary)
+                }
                 Text(self.titleWithSuffix)
-                    .font(self.isCurrent ? Typography.body.weight(.semibold) : Typography.body)
+                    .font(self.prominentRows
+                        ? .system(size: 16, weight: self.isCurrent ? .semibold : .medium)
+                        : (self.isCurrent ? Typography.body.weight(.semibold) : Typography.body))
                     .foregroundStyle(self.titleColor)
-                    .lineLimit(1)
+                    .lineLimit(self.prominentRows ? 2 : 1)
                 if let subtitle = self.displaySubtitle {
                     Text(subtitle)
-                        .font(Typography.caption)
+                        .font(self.prominentRows ? .subheadline : Typography.caption)
                         .foregroundStyle(Color.textSecondary)
-                        .lineLimit(1)
+                        .lineLimit(self.prominentRows ? 2 : 1)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -339,7 +461,8 @@ private struct QueueRow: View {
                 .opacity(self.isHovered ? 1 : 0)
                 .accessibilityHidden(true)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, self.prominentRows ? 10 : 3)
+        .padding(.horizontal, self.prominentRows ? 8 : 0)
         .opacity(self.isUnavailable ? 0.55 : 1.0)
         .help(self.isUnavailable ? L10n.string("File missing — original location no longer exists") : "")
         .onHover { self.isHovered = $0 }

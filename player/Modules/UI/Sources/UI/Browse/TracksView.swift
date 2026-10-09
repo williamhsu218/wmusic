@@ -22,6 +22,11 @@ public struct TracksView: View {
     public var library: LibraryViewModel
     public var title: String?
     public var sortable: Bool
+    /// Use the Most Played column layout, with Plays beside Title.
+    public var emphasizesPlayCount: Bool
+    /// A smart folder's own ranking, used for its initial sort indicator and
+    /// Clear Sort action instead of the general Songs order.
+    public var destinationSortOrder: [KeyPathComparator<TrackRow>]?
     /// When `true` this view has a caller-owned baseline order (a manual
     /// playlist's saved order). Column-header sorting becomes a *temporary*
     /// view sort: the baseline is preserved, drag-reorder is suspended while a
@@ -67,6 +72,8 @@ public struct TracksView: View {
         library: LibraryViewModel,
         title: String? = nil,
         sortable: Bool = true,
+        emphasizesPlayCount: Bool = false,
+        destinationSortOrder: [KeyPathComparator<TrackRow>]? = nil,
         supportsManualOrder: Bool = false,
         removeFromPlaylist: (([Track]) -> Void)? = nil,
         onMove: ((IndexSet, Int) -> Void)? = nil
@@ -76,12 +83,14 @@ public struct TracksView: View {
         self.nowPlaying = library.nowPlaying
         self.title = title
         self.sortable = sortable
+        self.emphasizesPlayCount = emphasizesPlayCount
+        self.destinationSortOrder = destinationSortOrder
         self.supportsManualOrder = supportsManualOrder
         self.removeFromPlaylist = removeFromPlaylist
         self.onMove = onMove
         // A manual-order view starts in its baseline order (no column sort).
         self._sortOrder = State(
-            initialValue: supportsManualOrder ? [] : TracksViewModel.defaultSortOrder
+            initialValue: supportsManualOrder ? [] : (destinationSortOrder ?? TracksViewModel.defaultSortOrder)
         )
     }
 
@@ -105,6 +114,15 @@ public struct TracksView: View {
                         title: L10n.string("No Results"),
                         message: L10n.string("No songs match \u{201C}\(activeQuery)\u{201D}.")
                     )
+                } else if case .musicFolder = self.library.selectedDestination {
+                    EmptyState(
+                        symbol: "externaldrive.connected.to.line.below",
+                        title: L10n.string("No Songs"),
+                        message: L10n.string("No songs have been indexed from this folder yet. Reconnect the share if needed, then rescan."),
+                        actionLabel: L10n.string("Rescan")
+                    ) {
+                        self.library.rescanLibrary(mode: .quick)
+                    }
                 } else {
                     EmptyState(
                         symbol: "music.note",
@@ -129,10 +147,11 @@ public struct TracksView: View {
                         .keyboardShortcut("r", modifiers: [.command, .shift])
                     }
                 }
-            } else if self.sortable, self.sortOrder != TracksViewModel.defaultSortOrder {
+            } else if self.sortable,
+                      self.sortOrder != (self.destinationSortOrder ?? TracksViewModel.defaultSortOrder) {
                 ToolbarItem(placement: .primaryAction) {
                     Button(L10n.string("Clear Sort")) {
-                        self.sortOrder = TracksViewModel.defaultSortOrder
+                        self.sortOrder = self.destinationSortOrder ?? TracksViewModel.defaultSortOrder
                     }
                     .help(L10n.string("Reset to default sort order"))
                     .keyboardShortcut("r", modifiers: [.command, .shift])
@@ -151,6 +170,7 @@ public struct TracksView: View {
             // never for a manual-order view (it owns its baseline) and never
             // adopt an empty order another view left on the shared VM.
             if !self.supportsManualOrder,
+               self.destinationSortOrder == nil,
                !self.vm.sortOrder.isEmpty,
                self.sortOrder != self.vm.sortOrder {
                 self.sortOrder = self.vm.sortOrder

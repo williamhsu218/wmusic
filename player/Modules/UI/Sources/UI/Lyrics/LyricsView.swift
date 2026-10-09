@@ -141,7 +141,7 @@ public struct LyricsView: View {
                                 line: line,
                                 isCurrent: idx == self.vm.currentLineIndex,
                                 font: self.vm.fontSizeKey.font
-                            ) { self.onSeek(line.start) }
+                            ) { self.onSeek(self.vm.playbackPosition(for: line)) }
                                 .id(idx)
                         }
                     }

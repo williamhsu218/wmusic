@@ -87,6 +87,8 @@ public struct TrackTable: NSViewRepresentable {
     @Binding var sortOrder: [KeyPathComparator<TrackRow>]
     let nowPlayingTrackID: Track.ID?
     let sortable: Bool
+    /// Keeps the play count beside the title in the Most Played destination.
+    let emphasizesPlayCount: Bool
     let playlistNodes: [PlaylistNode]
     let actions: TrackContextMenuActions
     /// Each increment triggers a scroll-to-now-playing in `updateNSView`.
@@ -141,9 +143,9 @@ public struct TrackTable: NSViewRepresentable {
         tableView.target = coordinator
         self.configureCallbacks(for: tableView, coordinator: coordinator)
 
-        let autosaveName = self.sortable
-            ? "bocan.tracksTable.sortable.v4"
-            : "bocan.tracksTable.plain.v4"
+        let autosaveName = self.emphasizesPlayCount
+            ? Self.mostPlayedAutosaveName
+            : (self.sortable ? "bocan.tracksTable.sortable.v4" : "bocan.tracksTable.plain.v4")
         Self.addColumns(to: tableView, sortable: self.sortable, autosaveName: autosaveName)
         // Arm autosave only after the columns exist: setting `autosaveName` is
         // the trigger that restores saved order/width, and it restores onto
@@ -231,7 +233,12 @@ public struct TrackTable: NSViewRepresentable {
 
         case .unchanged:
             // Rows unchanged; only the highlight may have moved.
-            Self.reload(rows: plan.highlightReload, coordinator: coordinator, dataSource: dataSource)
+            Self.reload(
+                rows: plan.highlightReload,
+                coordinator: coordinator,
+                dataSource: dataSource,
+                columns: .nowPlayingText
+            )
         }
         coordinator.applied = plan.applied(
             after: coordinator.applied,
@@ -298,57 +305,80 @@ public struct TrackTable: NSViewRepresentable {
         coordinator.hasAppliedInitialSnapshot = true
     }
 
-    /// Reloads only the rows whose rendered content changed (or whose
-    /// now-playing highlight is gained/lost) while the set of track IDs is
-    /// unchanged.  `reloadItems` re-runs the cell provider for those identifiers
-    /// without disturbing the row order or scroll position; the selection needs
-    /// putting back by hand (see `applyPreservingSelection`).
+    /// Reloads only changed content and the text cells whose now-playing
+    /// highlight moved while the set of track IDs is unchanged.
     private func reconfigureChangedRows(
         coordinator: TrackTableCoordinator,
         dataSource: TrackDiffableDataSource
     ) {
         let oldRowsByID = coordinator.rowsByID
-        var changed: [Int64] = []
+        var contentChanged: [Int64] = []
         for row in self.rows {
             guard let id = row.id else { continue }
             if let old = oldRowsByID[id], !old.hasSameContent(as: row) {
-                changed.append(id)
+                contentChanged.append(id)
             }
         }
         // The now-playing highlight depends on `nowPlayingTrackID`, not on row
         // content, so the outgoing and incoming now-playing rows must refresh
         // too, even when their underlying values are identical.
         let nowPlayingID: Int64? = self.nowPlayingTrackID.flatMap(\.self)
+        var highlightChanged: [Int64] = []
         if coordinator.applied.nowPlayingID != nowPlayingID {
             if let oldID = coordinator.applied.nowPlayingID {
-                changed.append(oldID)
+                highlightChanged.append(oldID)
             }
             if let newID = nowPlayingID {
-                changed.append(newID)
+                highlightChanged.append(newID)
             }
         }
         coordinator.updateRows(self.rows)
-        Self.reload(rows: changed, coordinator: coordinator, dataSource: dataSource)
+        Self.reload(rows: contentChanged, coordinator: coordinator, dataSource: dataSource)
+        let contentIDs = Set(contentChanged)
+        Self.reload(
+            rows: highlightChanged.filter { !contentIDs.contains($0) },
+            coordinator: coordinator,
+            dataSource: dataSource,
+            columns: .nowPlayingText
+        )
     }
 
-    /// Reloads the given rows in place, ignoring IDs the snapshot does not hold
-    /// and duplicates. A no-op for an empty list.
+    private enum ReloadColumns {
+        case all
+        case nowPlayingText
+    }
+
+    /// Reloads only these cells through NSTableView. Applying a diffable
+    /// snapshot with `animatingDifferences: false` uses a full reload on
+    /// macOS, so a two-row highlight change can briefly blank every visible
+    /// async artwork cell. Snapshots remain for real structural changes.
     private static func reload(
         rows changed: [Int64],
         coordinator: TrackTableCoordinator,
-        dataSource: TrackDiffableDataSource
+        dataSource: TrackDiffableDataSource,
+        columns: ReloadColumns = .all
     ) {
-        guard !changed.isEmpty else { return }
-        var snapshot = dataSource.snapshot()
-        let existing = Set(snapshot.itemIdentifiers(inSection: 0))
-        var seen = Set<Int64>()
-        let valid = changed.filter { existing.contains($0) && seen.insert($0).inserted }
-        guard !valid.isEmpty else { return }
-        snapshot.reloadItems(valid)
-        applyPreservingSelection(snapshot, to: dataSource, in: coordinator.tableView) { syncing in
-            // The restored selection is the same set of IDs, so republishing it
-            // would only spend a SwiftUI pass.
-            coordinator.isSyncingSelection = syncing
+        guard !changed.isEmpty, let tableView = coordinator.tableView else { return }
+        var rowIndexes = IndexSet()
+        for id in changed {
+            if let row = dataSource.row(forItemIdentifier: id), row >= 0 {
+                rowIndexes.insert(row)
+            }
+        }
+        guard !rowIndexes.isEmpty else { return }
+
+        let columnIndexes = IndexSet(
+            tableView.tableColumns.enumerated().compactMap { index, column in
+                guard columns == .nowPlayingText else { return index }
+                // The artwork and toggle cells do not style their content for
+                // the current track, so no playback-only refresh is needed.
+                return column.identifier == .albumArt
+                    || column.identifier == .shuffleExclude
+                    || column.identifier == .loved ? nil : index
+            }
+        )
+        if !columnIndexes.isEmpty {
+            tableView.reloadData(forRowIndexes: rowIndexes, columnIndexes: columnIndexes)
         }
     }
 

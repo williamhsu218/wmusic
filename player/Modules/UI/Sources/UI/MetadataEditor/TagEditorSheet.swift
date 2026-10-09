@@ -74,15 +74,20 @@ public struct TagEditorSheet: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // A tab owns its own AppKit scroll/accessibility subtree. Reusing
+            // the same scroll view while fields are replaced can leave stale
+            // label relationships after a rapid tab switch.
+            .id(self.selectedTab)
 
             Divider()
             self.bottomBar
         }
-        // Wide enough for the Deep Dive report's release lists and the
-        // read-only identifier rows without truncation (#413).
-        .frame(minWidth: 600, idealWidth: 720, minHeight: 460)
+        // Keep the editor sheet the same size across tabs. The scroll view
+        // above handles long forms and Deep Dive reports within this viewport.
+        .frame(width: 720, height: 600)
         .task { await self.vm.load() }
         .onAppear { self.focusedField = .title }
+        .onChange(of: self.selectedTab) { _, _ in self.focusedField = nil }
         .alert(L10n.string("Error"), isPresented: Binding(
             get: { self.vm.lastError != nil },
             set: {

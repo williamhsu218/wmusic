@@ -5,6 +5,12 @@ public enum LibraryError: Error, Sendable, CustomStringConvertible {
     /// A security-scoped bookmark could not be resolved or accessed.
     case bookmarkStale(URL)
 
+    /// A bookmark now resolves to a different mount or folder path.
+    case sourceMoved(expected: URL, resolved: URL)
+
+    /// A source is offline or could not be fully enumerated.
+    case sourceUnavailable(URL)
+
     /// A root folder path could not be converted to a URL.
     case invalidPath(String)
 
@@ -33,6 +39,10 @@ public enum LibraryError: Error, Sendable, CustomStringConvertible {
         switch self {
         case let .bookmarkStale(url):
             "Library: bookmark stale for \(url.path)"
+        case let .sourceMoved(expected, resolved):
+            "Library: source moved from \(expected.path) to \(resolved.path). Reconnect it at the original location or choose the folder again."
+        case let .sourceUnavailable(url):
+            "Library: source unavailable at \(url.path). Reconnect the server or choose the folder again."
         case let .invalidPath(path):
             "Library: invalid path '\(path)'"
         case let .databaseUnavailable(reason):

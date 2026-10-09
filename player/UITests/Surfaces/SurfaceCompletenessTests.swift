@@ -25,7 +25,7 @@ final class SurfaceCompletenessTests: XCTestCase {
         "nowPlayingStrip.subtitle.button", "nowPlayingStrip.love",
         "nowPlayingStrip.info", "nowPlayingStrip.prev", "nowPlayingStrip.playPause",
         "nowPlayingStrip.next", "nowPlayingStrip.shuffle", "nowPlayingStrip.repeat",
-        "nowPlayingStrip.stopAfterCurrent", "nowPlayingStrip.mute",
+        "nowPlayingStrip.mute",
         "nowPlayingStrip.volume", "nowPlayingStrip.scrubber",
         "nowPlayingStrip.speedPicker", "nowPlayingStrip.sleepTimer",
         "nowPlayingStrip.dsp",

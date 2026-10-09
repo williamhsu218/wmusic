@@ -1,4 +1,5 @@
 import Library
+import Persistence
 import SwiftUI
 
 // MARK: - LibrarySettingsView
@@ -8,6 +9,7 @@ public struct LibrarySettingsView: View {
     @AppStorage("library.watchForChanges") private var watchForChanges = true
     @AppStorage("metadata.embedCoverArt") private var embedCoverArt = false
     @AppStorage(DeepDiveSetting.key) private var deepDiveEnabled = false
+    @State private var showingSources = false
 
     public init() {}
 
@@ -18,7 +20,7 @@ public struct LibrarySettingsView: View {
                     .accessibilityIdentifier(A11y.SettingsIDs.watchFolders)
                     .help(L10n.string("Imports files as soon as they appear in your library folders, without waiting for a rescan."))
                 // "Use quick scan by default" lived here and read nothing: the
-                // launch scan is always quick (RootView's triggerScan), and
+                // launch scan is always quick (once per app process), and
                 // Full Rescan is an explicit File-menu command. A switch that
                 // cannot change anything is worse than no switch (#502).
                 Text(localized: "Scans on launch read only the files that changed. Use Full Rescan in the File menu to re-read everything.")
@@ -58,35 +60,14 @@ public struct LibrarySettingsView: View {
                     Text(localized: "No folders or files added yet.")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(self.vm.libraryRoots, id: \.id) { root in
-                        let url = URL(fileURLWithPath: root.path)
-                        HStack {
-                            Image(systemName: url.hasDirectoryPath ? "folder" : "music.note")
-                                .foregroundStyle(.secondary)
-                                .frame(width: 16)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(url.lastPathComponent)
-                                Text(root.path)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer()
-                            Button(role: .destructive) {
-                                if let id = root.id {
-                                    Task { await self.vm.removeRoot(id: id) }
-                                }
-                            } label: {
-                                Image(systemName: "minus.circle.fill")
-                                    .foregroundStyle(.red)
-                            }
-                            .buttonStyle(.borderless)
-                            .help(L10n.string("Remove \(url.lastPathComponent) from library (does not delete files on disk)"))
-                            .accessibilityLabel(L10n.string("Remove \(url.lastPathComponent) from library"))
-                            .accessibilityIdentifier(A11y.SettingsIDs.removeRoot)
+                    HStack {
+                        Text("\(self.vm.libraryRoots.count) sources")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button(L10n.string("Manage Sources…")) {
+                            self.showingSources = true
                         }
-                        .help(root.path)
+                        .accessibilityIdentifier(A11y.SettingsIDs.manageSources)
                     }
                 }
 
@@ -94,8 +75,8 @@ public struct LibrarySettingsView: View {
                     Button(L10n.string("Add Folder…")) {
                         Task { await self.vm.addFolderByPicker() }
                     }
-                    .help(L10n.string("Choose a folder containing music to add to your library"))
-                    .accessibilityLabel(L10n.string("Add folder to library"))
+                    .help(L10n.string("Add a music folder or choose an existing folder again to allow tag editing"))
+                    .accessibilityLabel(L10n.string("Add folder or renew editing access"))
                     .accessibilityIdentifier(A11y.SettingsIDs.addFolder)
                     Button(L10n.string("Add Files…")) {
                         Task { await self.vm.addFilesByPicker() }
@@ -133,6 +114,9 @@ public struct LibrarySettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(L10n.string("Library"))
+        .sheet(isPresented: self.$showingSources) {
+            MusicSourcesSheet(vm: self.vm)
+        }
     }
 
     private var deepDiveDescription: String {
@@ -152,5 +136,68 @@ public struct LibrarySettingsView: View {
         L10n.string("When on, saving cover art rewrites the audio file to embed the image.")
             + " "
             + L10n.string("When off, art is stored only in WMusic's cache and won't appear in other apps.")
+    }
+}
+
+/// Keeps a large collection of individually imported files out of the
+/// Settings form. List virtualizes rows and the search narrows removal.
+private struct MusicSourcesSheet: View {
+    @ObservedObject var vm: LibraryViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+
+    private var matchingRoots: [LibraryRoot] {
+        guard !self.searchText.isEmpty else { return self.vm.libraryRoots }
+        return self.vm.libraryRoots.filter {
+            $0.path.localizedCaseInsensitiveContains(self.searchText)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text(L10n.string("Music Sources"))
+                    .font(.title2.bold())
+                Spacer()
+                Button(L10n.string("Done")) { self.dismiss() }
+            }
+
+            TextField(L10n.string("Search sources"), text: self.$searchText)
+                .textFieldStyle(.roundedBorder)
+
+            List(self.matchingRoots, id: \.id) { root in
+                let url = URL(fileURLWithPath: root.path)
+                HStack(spacing: 10) {
+                    Image(systemName: url.hasDirectoryPath ? "folder" : "music.note")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(url.lastPathComponent)
+                        Text(root.path)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    Button(role: .destructive) {
+                        if let id = root.id {
+                            Task { await self.vm.removeRoot(id: id) }
+                        }
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(L10n.string("Remove \(url.lastPathComponent) from library (does not delete files on disk)"))
+                    .accessibilityLabel(L10n.string("Remove \(url.lastPathComponent) from library"))
+                    .accessibilityIdentifier(A11y.SettingsIDs.removeRoot)
+                }
+                .help(root.path)
+            }
+            .listStyle(.inset)
+        }
+        .padding(20)
+        .frame(width: 680, height: 500)
     }
 }

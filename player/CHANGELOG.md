@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+WMusic 图标改为融合 W 字形的音符，播放器用途更直观。
+
+## WMusic 1.0.1 (2026-09-30)
+
+关闭随机播放后，从当前歌曲在原列表的位置继续顺序播放；再次开启时重新随机，重启后也保留正确的队列顺序。
+
 ## [2.19.0](https://github.com/bocan/bocan-music/compare/v2.18.0...v2.19.0) (2026-09-27)
 
 The library scan banner now floats at the bottom of the window instead of pushing the song list down, so the list no longer jumps when the banner goes away. Before, a double-click at that moment could play the song below the one you meant.

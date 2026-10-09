@@ -39,6 +39,13 @@ public struct BocanRootView: View {
     @State private var identifyVM: IdentifyTrackViewModel?
     @State private var batchCoverArtVM: BatchCoverArtViewModel?
     @State private var duplicateReviewVM: DuplicateReviewViewModel?
+    /// Per-window state: the main browser stays mounted behind its player.
+    @State private var showExpandedNowPlaying = false
+    @State private var expandedPrewarmed = false
+    @State private var expandedTransitionGeneration = 0
+    @State private var browserInputBlocked = false
+    @State private var pendingExpandedInfoTrackID: Int64?
+    @State private var pendingSearchFocus = false
     @AppStorage("appearance.colorScheme") private var colorSchemeKey = "system"
     @AppStorage("appearance.accentColor") private var accentColorKey = "system"
     /// Observed so the FSEvents watcher follows the Settings toggle live (M8).
@@ -122,7 +129,12 @@ public struct BocanRootView: View {
                     )
                 }
 
-                NowPlayingStrip(vm: self.vm.nowPlaying, scrobbleSettingsVM: self.scrobbleSettingsVM)
+                NowPlayingStrip(
+                    vm: self.vm.nowPlaying,
+                    scrobbleSettingsVM: self.scrobbleSettingsVM,
+                    openExpandedNowPlaying: { self.setExpandedNowPlaying(true) },
+                    prewarmExpandedNowPlaying: { self.prewarmExpandedNowPlaying() }
+                )
                     .environmentObject(self.visualizerVM)
             }
 
@@ -181,7 +193,8 @@ public struct BocanRootView: View {
             }
             await self.vm.refreshRoots()
             await self.vm.loadCurrentDestination()
-            self.vm.triggerScan()
+            self.prewarmExpandedNowPlaying()
+            self.vm.triggerStartupScanIfNeeded()
             await self.vm.startOrStopWatcher()
         }
         .onDisappear {
@@ -200,6 +213,7 @@ public struct BocanRootView: View {
             of: [UTType.fileURL, UTType.folder],
             isTargeted: self.$vm.isDragTargeted
         ) { providers in
+            guard !self.browserInputBlocked else { return false }
             Task { @MainActor in
                 var urls: [URL] = []
                 for provider in providers {
@@ -217,6 +231,36 @@ public struct BocanRootView: View {
 
     public var body: some View {
         self.windowContent
+            .overlay {
+            if self.expandedPrewarmed {
+                ZStack {
+                    // Block pointer input during the fade without changing any
+                    // modifier on NavigationSplitView or its toolbar. Its
+                    // layout stays identical on both sides of the transition.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {}
+                        .allowsHitTesting(self.browserInputBlocked)
+                        .accessibilityHidden(true)
+
+                    ExpandedNowPlayingView(
+                        library: self.vm,
+                        lyricsVM: self.lyricsVM,
+                        isPresented: self.showExpandedNowPlaying,
+                        onClose: { self.setExpandedNowPlaying(false) },
+                        onGetInfo: { trackID in
+                            self.pendingExpandedInfoTrackID = trackID
+                            self.setExpandedNowPlaying(false)
+                        },
+                        onNavigate: { self.setExpandedNowPlaying(false) }
+                    )
+                    .opacity(self.showExpandedNowPlaying ? 1 : 0)
+                    .allowsHitTesting(self.showExpandedNowPlaying)
+                    .disabled(!self.showExpandedNowPlaying)
+                    .accessibilityHidden(!self.showExpandedNowPlaying)
+                }
+            }
+        }
             .focused(self.$mainContentFocused)
             .frame(minWidth: 900, minHeight: 550)
             // No root .accessibilityIdentifier: an unused "BocanMainWindow" one masked a child's own identifier (ADR-084).
@@ -231,16 +275,29 @@ public struct BocanRootView: View {
             )
             // Type-to-search (#369): the first printable keypress anywhere in
             // the main window starts a fresh search seeded with it.
-            .background(TypeToSearchBackground(vm: self.vm))
-            .background(NavigationInputBackground(vm: self.vm))
+            .background(TypeToSearchBackground(vm: self.vm, isSuspended: self.browserInputBlocked))
+            .background(NavigationInputBackground(vm: self.vm, isSuspended: self.browserInputBlocked))
+            .onChange(of: self.vm.selectedDestination) { _, _ in
+                // Menu navigation should reveal the destination it just chose.
+                if self.browserInputBlocked {
+                    self.setExpandedNowPlaying(false)
+                }
+            }
             .onChange(of: self.vm.searchFocusRequestID) { _, _ in
                 // ADR-005 audit H5: ⌘F (Find) focuses the search field.
-                self.searchFocused = true
+                if self.browserInputBlocked {
+                    self.pendingSearchFocus = true
+                    self.setExpandedNowPlaying(false)
+                } else {
+                    self.searchFocused = true
+                }
             }
             .onChange(of: self.anySheetOpen) { _, isOpen in
                 // Keyboard focus phase: return focus to the main content area when
                 // any modal sheet closes so Tab / arrow keys remain reachable.
-                if !isOpen {
+                if isOpen {
+                    self.setExpandedNowPlaying(false)
+                } else {
                     self.mainContentFocused = true
                 }
             }
@@ -275,15 +332,19 @@ public struct BocanRootView: View {
                 // ADR-007 audit M2: lightweight toast surface for transient
                 // confirmations (e.g. "Re-scanned «Title»"). Auto-dismisses
                 // via LibraryViewModel.showToast after 2 seconds.
-                if let toast = self.vm.toast {
-                    ToastBanner(message: toast)
-                        .padding(.top, 12)
-                        .transition(self.reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
-                        .accessibilityAddTraits(.isStaticText)
-                        .accessibilityLabel(toast.text)
+                ZStack {
+                    if let toast = self.vm.toast {
+                        ToastBanner(message: toast)
+                            .padding(.top, 12)
+                            .transition(self.reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                            .accessibilityAddTraits(.isStaticText)
+                            .accessibilityLabel(toast.text)
+                    }
                 }
+                // Animate only the toast. Applying the transaction to the root
+                // also animated the browser and transport on unrelated updates.
+                .animation(self.reduceMotion ? nil : .easeInOut(duration: 0.18), value: self.vm.toast)
             }
-            .animation(self.reduceMotion ? nil : .easeInOut(duration: 0.18), value: self.vm.toast)
             .onChange(of: self.vm.tagEditorTrackIDs) { _, _ in
                 self.tagEditorVM = self.vm.makeTagEditorViewModel()
             }
@@ -395,6 +456,58 @@ public struct BocanRootView: View {
     }
 
     // MARK: - Helpers
+
+    /// Build the player and its queue before the artwork is clicked. Its
+    /// invisible view keeps its layout identity through every open and close.
+    private func prewarmExpandedNowPlaying() {
+        guard !self.expandedPrewarmed else { return }
+        withTransaction(Transaction(animation: nil)) {
+            self.expandedPrewarmed = true
+        }
+    }
+
+    /// Animate only opacity. Keeping the native toolbar in place avoids the
+    /// separate AppKit titlebar animation and browser safe-area relayout.
+    private func setExpandedNowPlaying(_ expanded: Bool) {
+        guard expanded != self.showExpandedNowPlaying else { return }
+        self.expandedTransitionGeneration &+= 1
+        let generation = self.expandedTransitionGeneration
+        let fade: Animation? = self.reduceMotion ? nil : .smooth(duration: 0.28)
+        if expanded {
+            self.prewarmExpandedNowPlaying()
+            withTransaction(Transaction(animation: nil)) {
+                // A focused toolbar search field consumes Escape before the
+                // player's cancel shortcut. Release it as the player opens.
+                self.searchFocused = false
+                self.browserInputBlocked = true
+            }
+            withAnimation(fade) {
+                self.showExpandedNowPlaying = true
+            }
+            return
+        }
+        withAnimation(fade, completionCriteria: .logicallyComplete) {
+            self.showExpandedNowPlaying = false
+        } completion: {
+            guard generation == self.expandedTransitionGeneration else { return }
+            guard !self.showExpandedNowPlaying else { return }
+            self.finishExpandedClose()
+        }
+    }
+
+    private func finishExpandedClose() {
+        withTransaction(Transaction(animation: nil)) {
+            self.browserInputBlocked = false
+        }
+        if self.pendingSearchFocus {
+            self.pendingSearchFocus = false
+            self.pendingExpandedInfoTrackID = nil
+            self.searchFocused = true
+        } else if let trackID = self.pendingExpandedInfoTrackID {
+            self.pendingExpandedInfoTrackID = nil
+            self.vm.tagEditorTrackIDs = [trackID]
+        }
+    }
 
     /// Sets `NSApp.appearance` so every window updates immediately, avoiding
     /// the half-repainted artefact `.preferredColorScheme` can leave when

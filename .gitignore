@@ -1,6 +1,8 @@
 .DS_Store
 .build-logs/
+dist/
 backups/
+Claude outputs/
 player/.build/
 player/build/
 player/DerivedData/

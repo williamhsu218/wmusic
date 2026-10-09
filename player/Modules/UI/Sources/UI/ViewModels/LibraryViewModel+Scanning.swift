@@ -17,11 +17,13 @@ public extension LibraryViewModel {
         guard let scanner else { return }
         do {
             self.libraryRoots = try await scanner.roots()
+            self.networkFolders = self.libraryRoots.compactMap { NetworkFolderSource(root: $0) }
         } catch {
             // An empty sidebar and a library with no folders look identical, so
             // the failure has to say so somewhere (#491).
             self.log.warning("library.roots.failed", ["error": String(reflecting: error)])
             self.libraryRoots = []
+            self.networkFolders = []
         }
     }
 
@@ -166,17 +168,23 @@ public extension LibraryViewModel {
             await self.albums.load()
             await self.artists.load()
             await self.loadCurrentDestination()
+            await self.refreshRoots()
         }
     }
 
     /// Cancels any in-progress scan.
     func cancelScan() {
-        self.scanTask?.cancel()
-        self.scanTask = nil
-        self.stopScanFlush()
-        self.isScanning = false
-        self.isInitialScan = false
-        self.scanCurrentPath = ""
+        guard let task = self.scanTask else {
+            self.stopScanFlush()
+            self.activeScanIsStartup = false
+            self.isScanning = false
+            self.isInitialScan = false
+            self.scanCurrentPath = ""
+            return
+        }
+        task.cancel()
+        // Keep mutation and restart actions disabled until the scanner's
+        // outstanding file reads have actually stopped, including slow NAS I/O.
     }
 
     // MARK: - Scan progress coalescing (ADR-007 audit L2)
@@ -252,19 +260,30 @@ public extension LibraryViewModel {
         self.triggerScan(mode: .quick)
     }
 
+    /// Reconciles changes made while the app was not running, once per app
+    /// process. The FSEvents watcher begins at "now" and cannot replay those
+    /// offline changes. WindowGroup can mount RootView again in the same
+    /// process, so its task must call this gate instead of triggerScan().
+    func triggerStartupScanIfNeeded() {
+        guard self.scanner != nil, !self.startupScanTriggered else { return }
+        self.startupScanTriggered = true
+        self.triggerScan(mode: .quick, isStartup: true)
+    }
+
     /// ADR-004 audit M2: re-scan all library roots in either Quick or Full mode.
     /// Exposed for the File-menu "Quick Rescan" / "Full Rescan" commands.
     func rescanLibrary(mode: ScanMode) {
         self.triggerScan(mode: mode)
     }
 
-    internal func triggerScan(mode: ScanMode) {
+    internal func triggerScan(mode: ScanMode, isStartup: Bool = false) {
         guard let scanner else { return }
         guard !self.isScanning else {
             self.log.debug("scan.trigger.skipped", ["mode": "\(mode)", "reason": "in-flight"])
             return
         }
         self.log.debug("scan.trigger", ["mode": "\(mode)"])
+        self.activeScanIsStartup = isStartup
         self.isScanning = true
         self.scanWalked = 0
         self.scanInserted = 0
@@ -303,10 +322,12 @@ public extension LibraryViewModel {
             for await event in stream {
                 self.handleScanEvent(event)
             }
+            await scanner.waitForScanToFinish()
             // Safety net: if the stream ends without a .finished event, reset state.
             if self.isScanning {
                 self.log.warning("scan.stream.ended_without_finished")
                 self.stopScanFlush()
+                self.activeScanIsStartup = false
                 self.isScanning = false
                 self.isInitialScan = false
                 self.scanCurrentPath = ""
@@ -344,7 +365,14 @@ public extension LibraryViewModel {
             // true final counts even if the last tick was mid-interval.
             self.log.debug("scan.finished.applied", ["inserted": summary.inserted])
             self.stopScanFlush()
-            self.scanSummary = summary
+            let changed = summary.inserted > 0 || summary.updated > 0 || summary.removed > 0
+            // A healthy launch may walk every known file only to confirm that
+            // all are unchanged. Keep the scan for offline-change detection,
+            // but do not announce a no-op on every app launch. Explicit scans
+            // still report their result, including an all-unchanged result.
+            self.scanSummary = self.activeScanIsStartup && !changed && summary.errors == 0
+                ? nil : summary
+            self.activeScanIsStartup = false
             self.isScanning = false
             self.scanCurrentPath = ""
             Task { [weak self] in
@@ -359,7 +387,6 @@ public extension LibraryViewModel {
                 // isLoading, tore the already-populated Songs list down to a
                 // spinner and rebuilt it -- a visible "vanish then reappear"
                 // flash for no benefit.
-                let changed = summary.inserted > 0 || summary.updated > 0 || summary.removed > 0
                 if changed {
                     // Refresh the Albums/Artists backing models so navigating to
                     // them after a background scan shows fresh data. They are

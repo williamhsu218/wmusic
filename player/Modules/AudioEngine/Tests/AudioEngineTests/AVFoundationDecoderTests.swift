@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import AudioToolbox
 import Foundation
 import Testing
 @testable import AudioEngine
@@ -41,6 +42,44 @@ struct AVFoundationDecoderTests {
         let url = try fixtureURL("sine-1s-44100-24-stereo.flac")
         let decoder = try AVFoundationDecoder(url: url)
         #expect(abs(decoder.duration - 1.0) < 0.05)
+    }
+
+    @Test("FLAC: reads all frames, then keeps returning EOF")
+    func flacReadsThroughEnd() async throws {
+        let url = try fixtureURL("sine-1s-44100-24-stereo.flac")
+        let decoder = try AVFoundationDecoder(url: url)
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: decoder.sourceFormat, frameCapacity: 4096))
+        var totalFrames = 0
+        var reachedEnd = false
+
+        // The fixture is one second long. Bound the loop so a decoder that
+        // never reports EOF fails the test instead of hanging indefinitely.
+        for _ in 0 ..< 100 {
+            let frames = try await decoder.read(into: buffer)
+            if frames == 0 {
+                reachedEnd = true
+                break
+            }
+            totalFrames += Int(frames)
+        }
+
+        #expect(reachedEnd)
+        #expect(totalFrames == 44_100)
+        #expect(try await decoder.read(into: buffer) == 0)
+        await decoder.close()
+    }
+
+    @Test("Only noErr or the AudioToolbox end-of-file status is EOF")
+    func endOfFileErrorClassification() {
+        // `AVAudioFile` reports code 0 in this Foundation domain for the
+        // short FLAC fixture on this macOS version.
+        #expect(AVFoundationDecoder.isEndOfFile(NSError(domain: "Foundation._GenericObjCError", code: 0)))
+        #expect(AVFoundationDecoder.isEndOfFile(NSError(
+            domain: NSOSStatusErrorDomain,
+            code: Int(kAudioFileEndOfFileError)
+        )))
+        #expect(!AVFoundationDecoder.isEndOfFile(NSError(domain: NSOSStatusErrorDomain, code: -50)))
+        #expect(!AVFoundationDecoder.isEndOfFile(NSError(domain: "unrelated", code: -39)))
     }
 
     @Test("MP3: opens and has positive duration")

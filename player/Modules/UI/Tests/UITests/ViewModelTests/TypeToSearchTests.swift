@@ -71,8 +71,8 @@ struct TypeToSearchConventionTests {
     func rootViewInstallsMonitor() throws {
         let root = try self.uiSource("AppRoot/RootView.swift")
         #expect(
-            root.contains(".background(TypeToSearchBackground(vm: self.vm))"),
-            "the main window must install the type-to-search background helper"
+            root.contains(".background(TypeToSearchBackground(vm: self.vm, isSuspended: self.browserInputBlocked))"),
+            "type-to-search must stay suspended until the player has finished fading out"
         )
         let helper = try self.uiSource("AppRoot/TypeToSearchMonitor.swift")
         #expect(

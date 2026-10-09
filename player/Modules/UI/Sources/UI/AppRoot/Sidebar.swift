@@ -69,6 +69,7 @@ public struct Sidebar: View {
                     set: { self.vm.sectionExpansion.expandedServers = $0 }
                 ),
                 servers: self.vm.subsonicServers,
+                networkFolders: self.vm.networkFolders,
                 hiddenServers: self.vm.hiddenSubsonicServers,
                 connectionStates: self.vm.subsonicConnectionStates,
                 onAddSource: self.openAddSource,

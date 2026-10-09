@@ -33,12 +33,17 @@ public struct AboutView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
 
-            Button(L10n.string("Check for Updates\u{2026}")) {
-                self.onCheckForUpdates()
+            Text(localized: "Based on Bòcan by Chris Funderburg (Apache 2.0).")
+                .font(.caption)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+
+            if self.canCheckForUpdates {
+                Button(L10n.string("Check for Updates\u{2026}")) {
+                    self.onCheckForUpdates()
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!self.canCheckForUpdates)
-            .help(L10n.string("Updates are unavailable in this local WMusic build."))
 
             Divider()
 

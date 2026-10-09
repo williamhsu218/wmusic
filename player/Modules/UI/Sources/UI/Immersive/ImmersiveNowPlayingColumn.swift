@@ -10,6 +10,7 @@ import SwiftUI
 struct ImmersiveNowPlayingColumn: View {
     /// `@Observable`, so a plain property is the correct binding.
     var vm: NowPlayingViewModel
+    var library: LibraryViewModel
 
     var body: some View {
         VStack(alignment: .center, spacing: 12) {
@@ -19,12 +20,12 @@ struct ImmersiveNowPlayingColumn: View {
                 Text(self.titleText)
                     .font(.title3)
                     .fontWeight(.semibold)
-                    .foregroundStyle(self.vm.title.isEmpty ? Color.textSecondary : Color.textPrimary)
+                    .foregroundStyle(self.vm.display.title.isEmpty ? Color.textSecondary : Color.textPrimary)
                     .lineLimit(1)
                     .accessibilityIdentifier(A11y.Immersive.title)
 
-                if !self.vm.artist.isEmpty {
-                    Text(self.vm.artist)
+                if !self.vm.display.artist.isEmpty {
+                    Text(self.vm.display.artist)
                         .font(.body)
                         .foregroundStyle(Color.textSecondary)
                         .lineLimit(1)
@@ -46,7 +47,7 @@ struct ImmersiveNowPlayingColumn: View {
 
             // The player controls sit under everything else in this column.
             // The strip is covered while Immersive Mode is on.
-            ImmersiveTransport(np: self.vm)
+            ImmersiveTransport(np: self.vm, library: self.library)
         }
         .padding(16)
     }
@@ -54,7 +55,7 @@ struct ImmersiveNowPlayingColumn: View {
     // MARK: - Text
 
     private var titleText: String {
-        self.vm.title.isEmpty ? L10n.string("Not playing") : self.vm.title
+        self.vm.display.title.isEmpty ? L10n.string("Not playing") : self.vm.display.title
     }
 
     /// The third line: the album for music, the station for radio. Podcasts
@@ -63,7 +64,7 @@ struct ImmersiveNowPlayingColumn: View {
         if let station = self.vm.nowPlayingRadioStationName, !station.isEmpty {
             return station
         }
-        return self.vm.album.isEmpty ? nil : self.vm.album
+        return self.vm.display.album.isEmpty ? nil : self.vm.display.album
     }
 
     // MARK: - Artwork
@@ -74,7 +75,7 @@ struct ImmersiveNowPlayingColumn: View {
         Color.clear
             .aspectRatio(1, contentMode: .fit)
             .overlay {
-                if let image = self.vm.artwork {
+                if let image = self.vm.display.artwork {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
@@ -86,7 +87,7 @@ struct ImmersiveNowPlayingColumn: View {
             // Lifts the cover off the visualizer now that no card frames it.
             .shadow(color: .black.opacity(0.45), radius: 18, y: 8)
             .accessibilityLabel(
-                self.vm.title.isEmpty ? L10n.string("No artwork") : L10n.string("Artwork for \(self.vm.title)")
+                self.vm.display.title.isEmpty ? L10n.string("No artwork") : L10n.string("Artwork for \(self.vm.display.title)")
             )
             .accessibilityIdentifier(A11y.Immersive.artwork)
     }

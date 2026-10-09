@@ -12,6 +12,7 @@ public struct SubsonicSidebarSection: View {
     @Binding public var sectionExpanded: Bool
     @Binding public var expandedServers: Set<UUID>
     public let servers: [SubsonicSidebarServer]
+    public let networkFolders: [NetworkFolderSource]
     public let hiddenServers: [SubsonicSidebarServer]
     public let connectionStates: [UUID: SubsonicSidebarConnectionState]
     public var onAddSource: (() -> Void)?
@@ -27,6 +28,7 @@ public struct SubsonicSidebarSection: View {
         sectionExpanded: Binding<Bool>,
         expandedServers: Binding<Set<UUID>>,
         servers: [SubsonicSidebarServer],
+        networkFolders: [NetworkFolderSource] = [],
         hiddenServers: [SubsonicSidebarServer] = [],
         connectionStates: [UUID: SubsonicSidebarConnectionState] = [:],
         onAddSource: (() -> Void)? = nil,
@@ -41,6 +43,7 @@ public struct SubsonicSidebarSection: View {
         self._sectionExpanded = sectionExpanded
         self._expandedServers = expandedServers
         self.servers = servers
+        self.networkFolders = networkFolders
         self.hiddenServers = hiddenServers
         self.connectionStates = connectionStates
         self.onAddSource = onAddSource
@@ -56,7 +59,22 @@ public struct SubsonicSidebarSection: View {
     public var body: some View {
         Section {
             if self.sectionExpanded {
-                if self.servers.isEmpty {
+                ForEach(self.networkFolders) { source in
+                    Label(source.name, systemImage: "externaldrive.connected.to.line.below")
+                        .font(Typography.body)
+                        .tag(SidebarDestination.musicFolder(source.id))
+                        .help(source.root.path)
+                        .accessibilityValue(
+                            source.root.isInaccessible ? L10n.string("Unavailable at last scan") : L10n.string("Available at last scan")
+                        )
+                        .contextMenu {
+                            if let onManageSources {
+                                Button(L10n.string("Manage Sources…")) { onManageSources() }
+                                    .help(L10n.string("Open Sources to reconnect or rescan this NAS folder"))
+                            }
+                        }
+                }
+                if self.servers.isEmpty && self.networkFolders.isEmpty {
                     // Tappable empty-state CTA so a first-time user can find server
                     // setup without discovering the header "+" (#309). Falls back to
                     // a plain label only if no add handler was injected.
@@ -66,7 +84,7 @@ public struct SubsonicSidebarSection: View {
                                 .font(Typography.body)
                         }
                         .buttonStyle(.plain)
-                        .help(L10n.string("Connect a Subsonic-compatible music server"))
+                        .help(L10n.string("Connect a NAS music folder or a Subsonic-compatible music server"))
                         .accessibilityIdentifier(A11y.SourcesSidebar.emptyStateAddButton)
                     } else {
                         Text(localized: "No sources yet")

@@ -76,7 +76,7 @@ public actor FSWatcher {
             do {
                 let resolved = try URL(
                     resolvingBookmarkData: bookmark,
-                    options: .withSecurityScope,
+                    options: [.withSecurityScope, .withoutUI, .withoutMounting],
                     relativeTo: nil,
                     bookmarkDataIsStale: &isStale
                 )

@@ -17,7 +17,9 @@ public final class BackupSettingsViewModel {
 
     /// Whether automatic launch-time backups are enabled.
     public var isEnabled = false {
-        didSet { self.persistEnabled() }
+        didSet {
+            if !self.isLoading, oldValue != self.isEnabled { self.persistEnabled() }
+        }
     }
 
     /// Timestamp of the most recent successful iCloud backup, or `nil` if never run.
@@ -36,12 +38,16 @@ public final class BackupSettingsViewModel {
 
     /// Whether automatic launch-time local backups are enabled. Defaults to `true`.
     public var isLocalEnabled = true {
-        didSet { self.persistLocalEnabled() }
+        didSet {
+            if !self.isLoading, oldValue != self.isLocalEnabled { self.persistLocalEnabled() }
+        }
     }
 
     /// Number of local backup files to retain (1–20).
     public var localKeepCount = 5 {
-        didSet { self.persistLocalKeepCount() }
+        didSet {
+            if !self.isLoading, oldValue != self.localKeepCount { self.persistLocalKeepCount() }
+        }
     }
 
     /// Timestamp of the most recent successful local backup, or `nil` if never run.
@@ -63,6 +69,9 @@ public final class BackupSettingsViewModel {
 
     private let database: Database
     private let log = AppLogger.make(.app)
+    private var isLoading = false
+    private var hasLoaded = false
+    private var loadTask: Task<Void, Never>?
 
     // MARK: - Init
 
@@ -73,9 +82,32 @@ public final class BackupSettingsViewModel {
 
     // MARK: - Load
 
-    /// Loads settings from the database.  Call from `.task {}` on the view.
+    /// Loads once per app session. Returning to this pane must not query iCloud
+    /// or write the values just read back to the database again.
     public func load() async {
-        self.iCloudAvailable = BackupService(database: self.database).iCloudBackupDirectory() != nil
+        guard !self.hasLoaded else { return }
+        if let loadTask = self.loadTask {
+            await loadTask.value
+            return
+        }
+        // The view's .task is cancelled when switching panes. Keep the first
+        // load independent of that cancellation so a quick return to Advanced
+        // cannot strand the pane with default values.
+        let loadTask = Task { await self.loadInitialValues() }
+        self.loadTask = loadTask
+        await loadTask.value
+        self.loadTask = nil
+    }
+
+    private func loadInitialValues() async {
+        self.isLoading = true
+        defer { self.isLoading = false }
+
+        let database = self.database
+        self.iCloudAvailable = await Task.detached(priority: .utility) {
+            BackupService(database: database).iCloudBackupDirectory() != nil
+        }.value
+
         let settings = SettingsRepository(database: self.database)
         do {
             self.isEnabled = try await (settings.get(Bool.self, for: "backup.enabled")) ?? false
@@ -87,6 +119,7 @@ public final class BackupSettingsViewModel {
             if let ts = try await settings.get(Double.self, for: "backup.local.lastDate") {
                 self.lastLocalBackupDate = Date(timeIntervalSince1970: ts)
             }
+            self.hasLoaded = true
         } catch {
             self.log.error("backup.load.failed", ["error": String(reflecting: error)])
         }

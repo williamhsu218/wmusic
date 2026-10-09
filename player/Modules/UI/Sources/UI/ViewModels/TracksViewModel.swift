@@ -104,6 +104,9 @@ public final class TracksViewModel {
     private let artistRepository: ArtistRepository
     private let albumRepository: AlbumRepository
     private var allRows: [TrackRow] = []
+    /// Smart folders and manual playlists own their source ranking. Keep it
+    /// when the user narrows the list with the text filter.
+    private var preservesSourceOrder = false
     private let log = AppLogger.make(.ui)
 
     // MARK: - Init
@@ -140,6 +143,7 @@ public final class TracksViewModel {
         do {
             let fetched = try await self.repository.fetchAll()
             await self.refreshNameLookups()
+            self.preservesSourceOrder = false
             self.rebuildAllRows(from: fetched)
             self.applyFilter()
             self.log.debug("tracks.load.end", ["count": fetched.count])
@@ -149,12 +153,25 @@ public final class TracksViewModel {
         self.isLoading = false
     }
 
+    /// Reloads one source without replacing it with the full library. The
+    /// caller handles a removed root so navigation can fall back to Songs.
+    public func load(libraryRootID: Int64, query: String = "") async throws {
+        self.isLoading = true
+        defer { self.isLoading = false }
+        let fetched = try await self.repository.fetchAll(libraryRootID: libraryRootID, query: query)
+        await self.refreshNameLookups()
+        self.preservesSourceOrder = false
+        self.rebuildAllRows(from: fetched)
+        self.applyFilter()
+    }
+
     /// Loads a specific album, preserving the database disc/track order.
     public func load(albumID: Int64) async {
         self.isLoading = true
         do {
             let fetched = try await self.repository.fetchAll(albumID: albumID)
             await self.refreshNameLookups()
+            self.preservesSourceOrder = true
             self.rebuildAllRows(from: fetched)
             // Preserve the disc/track ordering returned by the database.
             if self.filterText.isEmpty {
@@ -175,6 +192,7 @@ public final class TracksViewModel {
         do {
             let fetched = try await self.repository.fetchAll(artistID: artistID)
             await self.refreshNameLookups()
+            self.preservesSourceOrder = false
             self.rebuildAllRows(from: fetched)
             self.applyFilter()
         } catch {
@@ -189,6 +207,7 @@ public final class TracksViewModel {
         do {
             let fetched = try await self.repository.fetchAll(genre: genre)
             await self.refreshNameLookups()
+            self.preservesSourceOrder = false
             self.rebuildAllRows(from: fetched)
             self.applyFilter()
         } catch {
@@ -203,6 +222,7 @@ public final class TracksViewModel {
         do {
             let fetched = try await self.repository.fetchAll(composer: composer)
             await self.refreshNameLookups()
+            self.preservesSourceOrder = false
             self.rebuildAllRows(from: fetched)
             self.applyFilter()
         } catch {
@@ -262,11 +282,28 @@ public final class TracksViewModel {
         self.rows = []
     }
 
+    /// Keep the loading state visible while a smart-folder query is in flight.
+    public func beginSmartFolderLoading() {
+        self.isLoading = true
+    }
+
+    /// Smart folders fetch their own tracks, so prepare the display metadata
+    /// that a normal `load()` refreshes before turning those tracks into rows.
+    public func prepareSmartFolderRows() async {
+        await self.refreshNameLookups()
+    }
+
+    public func finishSmartFolderRows(_ items: [Track]) {
+        self.setTracks(items, preserveOrder: true)
+        self.isLoading = false
+    }
+
     /// Sets a pre-fetched track list directly (smart folders / search results).
     /// Pass `preserveOrder: true` when the caller owns the canonical ordering
     /// (e.g. a manual playlist): the list is not re-sorted by the current
     /// comparator, though the text filter still applies.
     public func setTracks(_ items: [Track], preserveOrder: Bool = false) {
+        self.preservesSourceOrder = preserveOrder
         self.rebuildAllRows(from: items)
         if preserveOrder {
             if self.filterText.isEmpty {
@@ -351,6 +388,7 @@ public final class TracksViewModel {
     /// Table's per-frame binding writes cannot trigger a SwiftUI update cycle.
     public func applySort(_ order: [KeyPathComparator<TrackRow>]) {
         guard order != self.sortOrder else { return }
+        self.preservesSourceOrder = false
         self.sortOrder = order
         self.rows.sort(using: order)
     }
@@ -424,7 +462,9 @@ public final class TracksViewModel {
             let lowered = self.filterText.lowercased()
             result = result.filter { $0.title.lowercased().contains(lowered) }
         }
-        result.sort(using: self.sortOrder)
+        if !self.preservesSourceOrder {
+            result.sort(using: self.sortOrder)
+        }
         self.rows = result
     }
 

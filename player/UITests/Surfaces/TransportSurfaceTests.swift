@@ -24,7 +24,7 @@ final class TransportSurfaceTests: XCTestCase {
         "nowPlayingStrip.subtitle.button", "nowPlayingStrip.love",
         "nowPlayingStrip.info", "nowPlayingStrip.prev", "nowPlayingStrip.playPause",
         "nowPlayingStrip.next", "nowPlayingStrip.shuffle", "nowPlayingStrip.repeat",
-        "nowPlayingStrip.stopAfterCurrent", "nowPlayingStrip.mute",
+        "nowPlayingStrip.mute",
         "nowPlayingStrip.volume", "nowPlayingStrip.scrubber",
         "nowPlayingStrip.speedPicker", "nowPlayingStrip.sleepTimer",
         "nowPlayingStrip.dsp",
@@ -52,12 +52,16 @@ final class TransportSurfaceTests: XCTestCase {
 
     static var controls: [SurfaceControl] {
         [
-            // Navigation buttons: each pushes a detail / switches destination;
-            // restore returns to Songs so the strip stays live for the rest.
+            // Artwork fills this window with the cover and live play queue.
             SurfaceControl(
-                "nowPlayingStrip.artwork.button", "Go to album",
-                restore: backToSongs
-            ) { app, _, _ in app.buttons["Shuffle Album"].exists },
+                "nowPlayingStrip.artwork.button", "Expanded Now Playing",
+                restore: { app, _ in app.buttons["nowPlaying.expanded.close"].click() }
+            ) { app, _, _ in
+                app.buttons["nowPlaying.expanded.close"].exists
+                    && app.staticTexts["nowPlaying.expanded.queueTitle"].exists
+                    && !app.sheets.firstMatch.exists
+            },
+            // The artist button still navigates and then returns to Songs.
             SurfaceControl(
                 "nowPlayingStrip.subtitle.button", "Go to artist",
                 restore: backToSongs
@@ -69,7 +73,6 @@ final class TransportSurfaceTests: XCTestCase {
             // Toggles: label/value flips, then restore flips back.
             toggleLabel("nowPlayingStrip.love", "Love"),
             toggleLabel("nowPlayingStrip.mute", "Mute"),
-            toggleLabel("nowPlayingStrip.stopAfterCurrent", "Stop after current"),
             SurfaceControl(
                 "nowPlayingStrip.shuffle", "Shuffle toggle",
                 restore: { _, inv in inv.element("nowPlayingStrip.shuffle").click()

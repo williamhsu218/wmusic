@@ -64,6 +64,7 @@ struct TrackTableSortChainTests {
             sortOrder: Binding(get: { box.order }, set: { box.order = $0 }),
             nowPlayingTrackID: nil,
             sortable: true,
+            emphasizesPlayCount: false,
             playlistNodes: [],
             actions: self.makeActions(),
             scrollRequest: 0,

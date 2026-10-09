@@ -75,6 +75,15 @@ public struct ContentPane: View {
                 sortable: true
             )
 
+        case let .musicFolder(id):
+            TracksView(
+                vm: self.vm.tracks,
+                library: self.vm,
+                title: self.vm.libraryRoots.first(where: { $0.id == id })
+                    .map { URL(fileURLWithPath: $0.path, isDirectory: false).lastPathComponent } ?? L10n.string("Music Folder"),
+                sortable: true
+            )
+
         case .albums:
             AlbumsGridView(vm: self.vm.albums, library: self.vm, searchQuery: self.vm.searchQuery)
 

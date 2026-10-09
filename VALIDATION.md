@@ -146,7 +146,7 @@ Sources 新增 NAS Folders，使用 macOS 的 SMB 连接与安全文件夹授权
 
 ## 2026-10-01：内网/Tailscale 服务器根地址修正与安装
 
-用户实际输入 `smb://nas.example` 被强制共享目录校验拦住。Connect 已改为接受服务器根、裸内网/Tailscale IP、MagicDNS 名称及可选共享路径；已挂载来源的严格 share 校验保持。占位和提示不再引用 nas.local，README、中英文文案及伪语言已同步。13 项地址测试（88 场景）、33 项 UI 定点测试与 Release 构建通过；独立 QA 实际点击用户地址后，Finder 明确显示连接同一服务器，不再出现应用内校验错误。本次系统连接随后取消，未登录或导入，因此不宣称用户 NAS 已连接成功。
+用户输入服务器根地址 被强制共享目录校验拦住。Connect 已改为接受服务器根、裸内网/Tailscale IP、MagicDNS 名称及可选共享路径；已挂载来源的严格 share 校验保持。占位和提示不再引用 nas.local，README、中英文文案及伪语言已同步。13 项地址测试（88 场景）、33 项 UI 定点测试与 Release 构建通过；独立 QA 实际点击服务器连接后，Finder 明确显示连接同一服务器，不再出现应用内校验错误。本次系统连接随后取消，未登录或导入，因此不宣称用户 NAS 已连接成功。
 
 按既有授权正常退出旧正式版，使用固定安装脚本更新 `/Applications/WMusic.app`，完整文件、签名、沙盒及唯一回滚应用/曲库读回通过。新进程与候选主程序摘要 `bef223c0…` 一致，Sources 页已打开并恢复用户地址。曲库、播放列表、历史、来源与队列内容保留，quick_check 和外键检查通过。启动扫描显示 1,286 项错误，原曲库及来源摘要未变；本次不据此宣称原文件全部可访问。详细证据见 [.build-logs/nas-server-address-20261001/acceptance.md](.build-logs/nas-server-address-20261001/acceptance.md)。
 

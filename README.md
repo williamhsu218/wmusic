@@ -49,7 +49,7 @@ open /Applications/WMusic.app
 
 在 Settings → Sources 中选择 **NAS Folders**，即可接入群晖等 NAS 的 SMB 音乐共享：
 
-1. 输入群晖的内网 IP、Tailscale IP 或设备名，例如 `nas.example`、`smb://nas.example`、`nas.example` 或 MagicDNS 名称。共享目录可选：既可直接填服务器地址、连接后选择共享，也可填 `smb://nas.example/music`。点击 **Connect in Finder…**，在 macOS 窗口中选择共享并登录。Tailscale 地址需要当前 Mac 与群晖之间的 Tailscale 网络已连通。WMusic 不保存 NAS 账户密码；是否记住登录由 macOS 钥匙串处理。
+1. 输入 NAS 服务器地址或设备名，也可以填写 `smb://nas.example` 或 `smb://nas.example/music`（此处是占位示例，请换成自己的地址）。共享目录可选：既可直接填服务器地址、连接后选择共享，也可填写完整共享路径。点击 **Connect in Finder…**，在 macOS 窗口中选择共享并登录。使用 Tailscale 时，需要当前 Mac 与 NAS 之间的网络已连通。WMusic 不保存 NAS 账户密码；是否记住登录由 macOS 钥匙串处理。
 2. 完成连接后回到 Sources，点击 **Choose NAS Folder…**，选取已挂载共享中的音乐文件夹，授予 WMusic 持续访问权限。已在 Finder 连接的共享可以直接选择文件夹。
 3. 导入的 NAS 文件夹会出现在侧栏 Sources 中，点击即可浏览该文件夹的歌曲；歌曲也会并入现有曲库。WMusic 直接读取共享文件，不复制音频到 Mac。
 

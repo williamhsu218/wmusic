@@ -2082,22 +2082,6 @@
         }
       }
     },
-    "NAS server address" : {
-      "localizations" : {
-        "en-XA" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "nas.example óŕ nas.example one two three"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "nas.example 或 nas.example"
-          }
-        }
-      }
-    },
     "2 hr" : {
       "localizations" : {
         "en" : {
@@ -14589,6 +14573,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已添加 NAS 文件夹，正在扫描并导入音乐。"
+          }
+        }
+      }
+    },
+    "NAS server address" : {
+      "localizations" : {
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ÑÁŠ šéŕvéŕ áđđŕéšš one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "NAS 服务器地址"
           }
         }
       }

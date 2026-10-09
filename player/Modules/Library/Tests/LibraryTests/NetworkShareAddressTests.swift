@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import Library
 
+// IPv4 fixtures use documentation-only TEST-NET ranges; never use a real NAS address.
 @Suite("NetworkShareAddress")
 struct NetworkShareAddressTests {
     @Test(arguments: [

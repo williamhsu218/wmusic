@@ -89,20 +89,25 @@ public actor LRClibClient: LRClibClientProtocol {
         self.log.debug("lrclib.get.start", ["artist": artist, "title": title])
 
         if let document = try await self.fetchWithRetry(url: url) { return document }
-        // Album tags, simplified/traditional names, and punctuation often differ
-        // between a local file and the catalog. Search by title, then verify the
-        // full title, artist identity, and duration locally.
-        let results = try await self.searchResults(artist: nil, title: title, album: nil)
-        return results.compactMap { result -> (LyricsDocument, Double)? in
-            guard let candidateTitle = result.trackName, let candidateArtist = result.artistName,
-                  let document = Self.toDocument(result),
-                  let score = LyricsMatch.score(
-                      title: candidateTitle, artists: [candidateArtist], duration: result.duration, album: result.albumName,
-                      queryTitle: title, queryArtist: artist, queryDuration: duration, queryAlbum: album
-                  ) else { return nil }
-            let syncedBonus = result.syncedLyrics?.isEmpty == false ? 10.0 : 0
-            return (document, score + syncedBonus)
-        }.max(by: { $0.1 < $1.1 })?.0
+        // A title-only search can fill its result limit with popular covers.
+        // First narrow by performer, then try title variants for catalog aliases.
+        let titles = LyricsMatch.searchTitles(title, artist: artist)
+        let queries: [(String?, String)] = [(artist, titles[0])] + titles.map { (nil, $0) }
+        for (searchArtist, searchTitle) in queries.prefix(4) {
+            let results = try await self.searchResults(artist: searchArtist, title: searchTitle, album: nil)
+            let best = results.compactMap { result -> (LyricsDocument, Double)? in
+                guard let candidateTitle = result.trackName, let candidateArtist = result.artistName,
+                      let document = Self.toDocument(result),
+                      let score = LyricsMatch.score(
+                          title: candidateTitle, artists: [candidateArtist], duration: result.duration, album: result.albumName,
+                          queryTitle: title, queryArtist: artist, queryDuration: duration, queryAlbum: album
+                      ) else { return nil }
+                let syncedBonus = result.syncedLyrics?.isEmpty == false ? 4.0 : 0
+                return (document, score + syncedBonus)
+            }.max(by: { $0.1 < $1.1 })?.0
+            if let best { return best }
+        }
+        return nil
     }
 
     public func search(

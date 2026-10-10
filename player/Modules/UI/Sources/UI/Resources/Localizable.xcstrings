@@ -9437,6 +9437,34 @@
         }
       }
     },
+    "Enabled sources are tried in order: LRClib, NetEase, then Kugou. Local files and your edits keep their existing priority." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enabled sources are tried in order: LRClib, NetEase, then Kugou. Local files and your edits keep their existing priority."
+          }
+        },
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Éñáƀĺéđ šóúŕçéš áŕé ţŕíéđ íñ óŕđéŕ: ĹŔÇĺíƀ, ÑéţÉášé, ţĥéñ Ķúĝóú. Ĺóçáĺ ƒíĺéš áñđ ýóúŕ éđíţš ķééƥ ţĥéíŕ éxíšţíñĝ ƥŕíóŕíţý. one two three four five six seven eight"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已启用的来源依次尝试：LRClib、网易云音乐、酷狗音乐。本地歌词和手动编辑保留现有优先级。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已啟用的來源依次嘗試：LRClib、網易雲音樂、酷狗音樂。本機歌詞和手動編輯保留現有優先順序。"
+          }
+        }
+      }
+    },
     "Ends this phone's access. It has to be paired again before it can sync." : {
       "localizations" : {
         "en-XA" : {
@@ -12848,6 +12876,34 @@
         }
       }
     },
+    "Kugou" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kugou"
+          }
+        },
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ķúĝóú one"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "酷狗音乐"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "酷狗音樂"
+          }
+        }
+      }
+    },
     "LRC timestamps detected — will be saved as synced lyrics" : {
       "localizations" : {
         "en-XA" : {
@@ -12890,34 +12946,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ĹŔÇĺíƀ íš á çóḿḿúñíţý-ḿáíñţáíñéđ đáţáƀášé. one two three"
-          }
-        }
-      }
-    },
-    "LRClib is tried first. NetEase is tried next when enabled. Local files and your edits keep their existing priority." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "LRClib is tried first. NetEase is tried next when enabled. Local files and your edits keep their existing priority."
-          }
-        },
-        "en-XA" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ĹŔÇĺíƀ íš ţŕíéđ ƒíŕšţ. ÑéţÉášé íš ţŕíéđ ñéxţ ŵĥéñ éñáƀĺéđ. Ĺóçáĺ ƒíĺéš áñđ ýóúŕ éđíţš ķééƥ ţĥéíŕ éxíšţíñĝ ƥŕíóŕíţý. one two three four five six seven eight"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "优先查询 LRClib；启用备用渠道后，再查询网易云音乐。本地文件和手动编辑的歌词保持原有优先级。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "優先查詢 LRClib；啟用備用管道後，再查詢網易雲音樂。本機檔案和手動編輯的歌詞維持原有優先順序。"
           }
         }
       }
@@ -21576,6 +21604,34 @@
         }
       }
     },
+    "Sends the song title, artist and duration to Kugou when other enabled sources have no matching lyrics." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sends the song title, artist and duration to Kugou when other enabled sources have no matching lyrics."
+          }
+        },
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Šéñđš ţĥé šóñĝ ţíţĺé, áŕţíšţ áñđ đúŕáţíóñ ţó Ķúĝóú ŵĥéñ óţĥéŕ éñáƀĺéđ šóúŕçéš ĥávé ñó ḿáţçĥíñĝ ĺýŕíçš. one two three four five six seven"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其他已启用来源未找到匹配歌词时，将歌名、歌手和时长发送给酷狗音乐。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其他已啟用來源未找到匹配歌詞時，將歌名、歌手和時長傳送給酷狗音樂。"
+          }
+        }
+      }
+    },
     "Sends the song title, artist, album and duration to LRClib to find matching lyrics." : {
       "localizations" : {
         "en" : {
@@ -25800,6 +25856,34 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Úšé Đéƒáúĺţ (%@) one two"
+          }
+        }
+      }
+    },
+    "Use Kugou as a fallback" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use Kugou as a fallback"
+          }
+        },
+        "en-XA" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Úšé Ķúĝóú áš á ƒáĺĺƀáçķ one two"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用酷狗音乐作为备用来源"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用酷狗音樂作為備用來源"
           }
         }
       }

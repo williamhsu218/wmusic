@@ -129,6 +129,9 @@ public final class LyricsViewModel: ObservableObject {
         case "netease":
             L10n.string("NetEase Cloud Music")
 
+        case "kugou":
+            L10n.string("Kugou")
+
         case "user":
             L10n.string("Edited")
 

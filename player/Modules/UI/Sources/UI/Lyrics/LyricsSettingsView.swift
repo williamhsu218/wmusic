@@ -12,6 +12,7 @@ public struct LyricsSettingsView: View {
     @AppStorage("lyrics.sourcePriority") private var sourcePriority: LyricsSourcePriority = .preferSynced
     @AppStorage("lyrics.lrclibEnabled") private var lrclibEnabled = false
     @AppStorage("lyrics.neteaseEnabled") private var neteaseEnabled = false
+    @AppStorage("lyrics.kugouEnabled") private var kugouEnabled = false
     @AppStorage("lyrics.embedOnSave") private var embedOnSave = false
 
     public init() {}
@@ -52,6 +53,10 @@ public struct LyricsSettingsView: View {
                     .disabled(!self.lrclibEnabled)
                     .accessibilityIdentifier("settings.lyrics.netease")
                     .help(L10n.string("Sends the song title and artist to NetEase when LRClib is unavailable or has no matching lyrics."))
+                Toggle(L10n.string("Use Kugou as a fallback"), isOn: self.$kugouEnabled)
+                    .disabled(!self.lrclibEnabled)
+                    .accessibilityIdentifier("settings.lyrics.kugou")
+                    .help(L10n.string("Sends the song title, artist and duration to Kugou when other enabled sources have no matching lyrics."))
                 Text(self.lrclibFooter)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -70,7 +75,7 @@ public struct LyricsSettingsView: View {
 
     /// Multi-sentence footer as sentence keys joined in code (#314).
     private var lrclibFooter: String {
-        L10n.string("LRClib is tried first. NetEase is tried next when enabled. Local files and your edits keep their existing priority.")
+        L10n.string("Enabled sources are tried in order: LRClib, NetEase, then Kugou. Local files and your edits keep their existing priority.")
             + " " + L10n.string("Fetched lyrics may be copyrighted; opt-in use is your responsibility.")
     }
 

@@ -78,7 +78,7 @@ public actor LyricsService {
             if let row, row.source == "embedded", row.isSynced {
                 return (self.parse(row: row), "embedded")
             }
-            if let row, ["lrclib", "netease"].contains(row.source ?? "") {
+            if let row, ["lrclib", "netease", "kugou"].contains(row.source ?? "") {
                 return (self.parse(row: row), row.source)
             }
             if let row, row.source == "embedded", !row.isSynced {
@@ -95,7 +95,7 @@ public actor LyricsService {
             if let row, row.source == "embedded", !row.isSynced {
                 return (self.parse(row: row), "embedded")
             }
-            if let row, ["lrclib", "netease"].contains(row.source ?? "") {
+            if let row, ["lrclib", "netease", "kugou"].contains(row.source ?? "") {
                 return (self.parse(row: row), row.source)
             }
         }
@@ -238,7 +238,7 @@ public actor LyricsService {
         if let row, row.source == "user" {
             return self.parse(row: row)
         }
-        if let row, ["lrclib", "netease"].contains(row.source ?? "") {
+        if let row, ["lrclib", "netease", "kugou"].contains(row.source ?? "") {
             return self.parse(row: row)
         }
         if let sidecar = try await self.loadSidecar(for: trackID) {
@@ -488,17 +488,20 @@ public actor LyricsService {
     /// A failed read searches with an empty artist, which quietly returns the
     /// wrong lyrics or none at all (#492).
     private func artistName(for track: Track) async -> String {
-        guard let aid = track.artistID else { return "" }
-        do {
-            return try await self.artistRepo.fetch(id: aid).name
-        } catch {
-            self.log.warning("lyrics.artistLookup.failed", [
-                "track": track.id ?? -1,
-                "artist": aid,
-                "error": String(reflecting: error),
-            ])
-            return ""
+        for aid in [track.artistID, track.albumArtistID].compactMap({ $0 }) {
+            do {
+                let name = try await self.artistRepo.fetch(id: aid).name.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Compilation placeholders do not identify the performer.
+                if !name.isEmpty, !["variousartists", "群星", "unknownartist", "未知艺术家"].contains(LyricsMatch.normalized(name)) { return name }
+            } catch {
+                self.log.warning("lyrics.artistLookup.failed", [
+                    "track": track.id ?? -1,
+                    "artist": aid,
+                    "error": String(reflecting: error),
+                ])
+            }
         }
+        return ""
     }
 
     /// The track's album title for an LRClib query, or nil when it has none.

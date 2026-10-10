@@ -105,12 +105,12 @@ struct LyricsNetworkTests {
         let id = try await TrackRepository(database: db).upsert(Track(
             fileURL: "/tmp/original-fixture.wav", duration: 180, title: "Song", addedAt: now, updatedAt: now
         ))
-        let client = FixtureClient(result: FetchedLyrics(document: .unsynced("Original cached"), source: "netease"))
+        let client = FixtureClient(result: FetchedLyrics(document: .unsynced("Original cached"), source: "kugou"))
         let service = LyricsService(database: db, fetcher: client)
         let result = try await service.forceFetchWithSource(for: id)
-        #expect(result?.source == "netease")
+        #expect(result?.source == "kugou")
         let resolved = try await service.lyricsWithSource(for: id)
-        #expect(resolved.1 == "netease")
+        #expect(resolved.1 == "kugou")
         UserDefaults.standard.set(true, forKey: "lyrics.lrclibEnabled")
         defer { UserDefaults.standard.removeObject(forKey: "lyrics.lrclibEnabled") }
         #expect(try await service.autoFetchIfMissing(for: id) == .unsynced("Original cached"))
@@ -122,6 +122,94 @@ struct LyricsNetworkTests {
         #expect(LyricsMatch.normalized("周杰倫") == LyricsMatch.normalized("周杰伦"))
         #expect(LyricsMatch.score(title: "青花瓷", artists: ["Jay Chou 周杰倫"], duration: 239, album: nil, queryTitle: "青花瓷", queryArtist: "周杰伦", queryDuration: 240, queryAlbum: nil) != nil)
         #expect(LyricsMatch.score(title: "青花瓷 (Live)", artists: ["周杰伦"], duration: 239, album: nil, queryTitle: "青花瓷", queryArtist: "周杰伦", queryDuration: 240, queryAlbum: nil) == nil)
+    }
+
+    @Test("NetEase finds an original beyond the first twenty search results")
+    func deepCatalog() async throws {
+        let session = Self.session { request in
+            if request.url!.path.contains("search") {
+                let limit = Int(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "limit" }!.value!)!
+                let covers = (0..<76).map { i in ["id": i + 100, "name": "画心", "artists": [["name": "Cover artist"]], "duration": 432000] as [String: Any] }
+                let original: [String: Any] = ["id": 327089, "name": "画心", "artists": [["name": "张靓颖"]], "duration": 432293]
+                let data = try! JSONSerialization.data(withJSONObject: ["code": 200, "result": ["songs": Array((covers + [original]).prefix(limit))]])
+                return (200, String(decoding: data, as: UTF8.self))
+            }
+            #expect(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.contains(.init(name: "id", value: "327089")))
+            return (200, #"{"code":200,"lrc":{"lyric":"[00:01.00]Original deep catalog fixture"}}"#)
+        }
+        #expect(try await NetEaseLyricsClient(session: session).get(artist: "张靓颖", title: "画心", album: nil, duration: 432)?.testSyncedLineCount == 1)
+    }
+
+    @Test("NetEase recovers from catalog failure using the alternate response shape and aliases")
+    func alternateCatalog() async throws {
+        let session = Self.session { request in
+            if request.url!.path.hasSuffix("search/get/web") { return (503, "{}") }
+            if request.url!.path.contains("cloudsearch") {
+                return (200, #"{"code":200,"result":{"songs":[{"id":7,"name":"画心","ar":[{"name":"张靓颖","alias":["Jane Zhang"]}],"dt":432293,"al":{"name":"Album"}}]}}"#)
+            }
+            return (200, #"{"code":200,"lrc":{"lyric":"[00:01.00]Original alternate fixture"}}"#)
+        }
+        #expect(try await NetEaseLyricsClient(session: session).get(artist: "Jane Zhang", title: "画心", album: nil, duration: 432)?.testSyncedLineCount == 1)
+    }
+
+    @Test("A broken lyric candidate does not prevent another valid recording")
+    func candidateFailure() async throws {
+        let session = Self.session { request in
+            if request.url!.path.contains("search") {
+                return (200, #"{"code":200,"result":{"songs":[{"id":1,"name":"Song","artists":[{"name":"Artist"}],"duration":180000},{"id":2,"name":"Song","artists":[{"name":"Artist"}],"duration":181000}]}}"#)
+            }
+            if URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.contains(.init(name: "id", value: "1")) { return (500, "{}") }
+            return (200, #"{"code":200,"lrc":{"lyric":"[00:01.00]Original second candidate"}}"#)
+        }
+        #expect(try await NetEaseLyricsClient(session: session).get(artist: "Artist", title: "Song", album: nil, duration: 180)?.testSyncedLineCount == 1)
+    }
+
+    @Test("Kugou decodes verified LRC, rejects covers and tries another broken candidate")
+    func kugou() async throws {
+        let session = Self.session { request in
+            #expect(request.url!.scheme == "https")
+            #expect(request.httpShouldHandleCookies == false)
+            #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            if request.url!.path == "/search" {
+                #expect(items.contains(.init(name: "keyword", value: "张靓颖 - 画心")))
+                #expect(items.contains(.init(name: "duration", value: "432000")))
+                return (200, #"{"status":200,"candidates":[{"id":"99","accesskey":"fixture","song":"画心","singer":"Cover","duration":432000},{"id":"1","accesskey":"fixture","song":"画心","singer":"张靓颖","duration":432000},{"id":"2","accesskey":"fixture","song":"画心","singer":"张靓颖","duration":432100}]}"#)
+            }
+            #expect(items.contains(.init(name: "fmt", value: "lrc")))
+            #expect(!items.contains(.init(name: "id", value: "99")))
+            if items.contains(.init(name: "id", value: "1")) { return (200, #"{"status":200,"content":"not base64"}"#) }
+            let content = Data("[00:01.00]Original Kugou fixture".utf8).base64EncodedString()
+            return (200, "{\"status\":200,\"content\":\"\(content)\"}")
+        }
+        let result = try await KugouLyricsClient(session: session).fetch(artist: "张靓颖", title: "画心", album: nil, duration: 432)
+        #expect(result?.source == "kugou")
+        #expect(result?.document.testSyncedLineCount == 1)
+    }
+
+    @Test("Kugou has independent consent and is skipped on cancellation")
+    func additionalConsent() async throws {
+        let third = FixtureClient(result: FetchedLyrics(document: .unsynced("Original third provider"), source: "kugou"))
+        let disabled = OnlineLyricsClient(primary: FixtureClient(), fallback: FixtureClient(), fallbackEnabled: { false }, additional: third, additionalEnabled: { false })
+        #expect(try await disabled.fetch(artist: "A", title: "T", album: nil, duration: 180) == nil)
+        #expect(await third.calls == 0)
+        let enabled = OnlineLyricsClient(primary: FixtureClient(failure: URLError(.cannotConnectToHost)), fallback: FixtureClient(), fallbackEnabled: { true }, additional: third, additionalEnabled: { true })
+        #expect(try await enabled.fetch(artist: "A", title: "T", album: nil, duration: 180)?.source == "kugou")
+        let cancelled = OnlineLyricsClient(primary: FixtureClient(failure: CancellationError()), additional: third, additionalEnabled: { true })
+        await #expect(throws: CancellationError.self) { _ = try await cancelled.fetch(artist: "A", title: "T", album: nil, duration: 180) }
+        #expect(await third.calls == 1)
+    }
+
+    @Test("Promotional decorations and remasters match, while recording versions stay distinct")
+    func titleDecoration() {
+        #expect(LyricsMatch.score(title: "小幸运 (电影《我的少女时代》主题曲)", artists: ["田馥甄"], duration: 265, album: nil, queryTitle: "小幸运", queryArtist: "田馥甄", queryDuration: 265, queryAlbum: nil) != nil)
+        #expect(LyricsMatch.cleanTitle("07. Artist - Song (2020 Remastered)", artist: "Artist") == "Song")
+        #expect(LyricsMatch.score(title: "Song", artists: ["A", "B"], duration: 180, album: nil, queryTitle: "Song", queryArtist: "A & B", queryDuration: 180, queryAlbum: nil) != nil)
+        #expect(LyricsMatch.score(title: "Song", artists: ["A"], duration: 180, album: nil, queryTitle: "Song", queryArtist: "A & B", queryDuration: 180, queryAlbum: nil) == nil)
+        for version in ["Live", "现场版", "Remix", "伴奏", "Acoustic", "Taylor's Version"] {
+            #expect(LyricsMatch.score(title: "Song (\(version))", artists: ["Artist"], duration: 180, album: nil, queryTitle: "Song", queryArtist: "Artist", queryDuration: 180, queryAlbum: nil) == nil)
+        }
+        #expect(LyricsMatch.score(title: "Song", artists: ["Someone Else"], duration: 180, album: nil, queryTitle: "Song", queryArtist: "Artist", queryDuration: 180, queryAlbum: nil) == nil)
     }
 
     private static func session(_ handler: @escaping (URLRequest) -> (Int, String)) -> URLSession {
@@ -173,6 +261,30 @@ struct LyricsLiveChannelTests {
         // the shipped retrieval chain, not that external service's uptime.
         let second = try await OnlineLyricsClient(fallbackEnabled: { true }).fetch(artist: "G.E.M.邓紫棋", title: "自由的你", album: "自由的你", duration: 296)
         #expect((second?.document.testSyncedLineCount ?? 0) > 5)
+    }
+
+    @Test("Common songs and the two reported failures work through actual providers", .enabled(if: ProcessInfo.processInfo.environment["WMUSIC_LYRICS_LIVE"] == "1"))
+    func commonSongs() async throws {
+        let samples: [(String, String, Double)] = [
+            ("张靓颖", "画心", 432), ("张靓颖", "如果爱下去", 242),
+            ("周杰伦", "青花瓷", 239), ("田馥甄", "小幸运", 265),
+            ("陈奕迅", "十年", 205), ("孙燕姿", "遇见", 210),
+            ("Adele", "Hello", 295.5), ("Taylor Swift", "Love Story", 235.3),
+        ]
+        let netease = NetEaseLyricsClient()
+        let kugou = KugouLyricsClient()
+        for (artist, title, duration) in samples {
+            let first = try await netease.fetch(artist: artist, title: title, album: nil, duration: duration)
+            let second = try await kugou.fetch(artist: artist, title: title, album: nil, duration: duration)
+            print("LYRICS_LIVE \(artist) / \(title): netease=\(first?.document.testSyncedLineCount ?? 0), kugou=\(second?.document.testSyncedLineCount ?? 0)")
+            #expect((first?.document.testSyncedLineCount ?? 0) > 5 || (second?.document.testSyncedLineCount ?? 0) > 5, "\(artist) / \(title)")
+            if title == "画心" || title == "如果爱下去" {
+                #expect((first?.document.testSyncedLineCount ?? 0) > 5)
+                #expect((second?.document.testSyncedLineCount ?? 0) > 5)
+                let aggregate = try await OnlineLyricsClient(fallbackEnabled: { true }, additionalEnabled: { true }).fetch(artist: artist, title: title, album: nil, duration: duration)
+                #expect((aggregate?.document.testSyncedLineCount ?? 0) > 5)
+            }
+        }
     }
 
     @Test("A failed primary switches to the real NetEase endpoint", .enabled(if: ProcessInfo.processInfo.environment["WMUSIC_LYRICS_LIVE"] == "1"))

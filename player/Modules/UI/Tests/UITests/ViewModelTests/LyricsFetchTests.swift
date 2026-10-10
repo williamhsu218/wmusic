@@ -25,13 +25,13 @@ struct LyricsFetchTests {
         await self.wait { !vm.isFetching }
         #expect(vm.fetchMessage == L10n.string("Online lyrics could not be retrieved. Check your connection or try again."))
 
-        await client.configure(result: FetchedLyrics(document: .unsynced("Original retry fixture"), source: "netease"))
+        await client.configure(result: FetchedLyrics(document: .unsynced("Original retry fixture"), source: "kugou"))
         vm.forceFetch(for: id)
         await self.wait { !vm.isFetching && vm.document != nil }
         #expect(vm.fetchMessage == nil)
         #expect(vm.document == .unsynced("Original retry fixture"))
-        #expect(vm.documentSource == "netease")
-        #expect(vm.documentSourceLabel == L10n.string("NetEase Cloud Music"))
+        #expect(vm.documentSource == "kugou")
+        #expect(vm.documentSourceLabel == L10n.string("Kugou"))
         vm.trackDidChange(trackID: nil)
     }
 

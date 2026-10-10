@@ -34,6 +34,22 @@ struct LyricsServiceTests {
         ))
     }
 
+    @Test("A missing performer tag uses the album artist, without changing metadata")
+    func albumArtistLookup() async throws {
+        let db = try await makeDB()
+        let artist = try await ArtistRepository(database: db).findOrCreate(name: "张靓颖")
+        let now = Int64(Date().timeIntervalSince1970)
+        let id = try await TrackRepository(database: db).upsert(Track(
+            fileURL: "/tmp/original-album-artist.wav", duration: 432, title: "画心",
+            albumArtistID: artist.id, addedAt: now, updatedAt: now
+        ))
+        let spy = SpyFetcher(returnDoc: .unsynced("Original album artist fixture"))
+        let service = self.makeService(db: db, fetcher: spy)
+        #expect(try await service.forceFetch(for: id) != nil)
+        #expect(spy.lastArtist == "张靓颖")
+        #expect(try await TrackRepository(database: db).fetch(id: id).artistID == nil)
+    }
+
     // MARK: - Basic CRUD
 
     @Test("lyrics returns nil when nothing is stored")
@@ -363,6 +379,7 @@ extension LyricsServiceTests {
 /// Test double that records calls and returns a fixed document.
 final class SpyFetcher: LRClibClientProtocol, @unchecked Sendable {
     private(set) var wasCalled = false
+    private(set) var lastArtist: String?
     private let returnDoc: LyricsDocument?
 
     init(returnDoc: LyricsDocument? = nil) {
@@ -376,6 +393,7 @@ final class SpyFetcher: LRClibClientProtocol, @unchecked Sendable {
         duration: TimeInterval
     ) async throws -> LyricsDocument? {
         self.wasCalled = true
+        self.lastArtist = artist
         return self.returnDoc
     }
 

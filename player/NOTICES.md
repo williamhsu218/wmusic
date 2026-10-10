@@ -338,6 +338,6 @@ This product uses the Apple iTunes Search API. Use of the Apple iTunes Search AP
 
 ---
 
-*This file was generated for WMusic 1.0.3. Swift package versions are
+*This file was generated for WMusic 1.0.4. Swift package versions are
 pinned in the workspace `Package.resolved`; bundled native libraries come
 from the local Homebrew installation used to build the app.*

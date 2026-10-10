@@ -206,6 +206,22 @@ struct LyricsServiceTests {
         #expect(text == "From lrclib")
     }
 
+    @Test("auto-fetch preserves existing embedded synced lyrics")
+    func autoFetchPreservesEmbeddedSync() async throws {
+        let db = try await makeDB()
+        let spy = SpyFetcher(returnDoc: .unsynced("Online replacement"))
+        let service = self.makeService(db: db, fetcher: spy)
+        let id = try await seedTrack(db: db)
+        let original = LRCParser.parseDocument("[00:01.00]Original embedded fixture")
+        try await service.setLyrics(original, for: id, source: "embedded")
+        let prior = UserDefaults.standard.object(forKey: "lyrics.lrclibEnabled")
+        UserDefaults.standard.set(true, forKey: "lyrics.lrclibEnabled")
+        defer { UserDefaults.standard.set(prior, forKey: "lyrics.lrclibEnabled") }
+        #expect(try await service.autoFetchIfMissing(for: id) == original)
+        #expect(!spy.wasCalled)
+        #expect(try await service.lyricsWithSource(for: id).1 == "embedded")
+    }
+
     // MARK: - Observe
 
     @Test("observe emits nil initially then updated document")

@@ -39,4 +39,6 @@ public enum LyricsSource: Sendable, Equatable {
     case embeddedUnsynced
     /// Fetched from LRClib.net.
     case lrclib
+    /// Fetched from NetEase Cloud Music after a separate opt-in.
+    case netease
 }

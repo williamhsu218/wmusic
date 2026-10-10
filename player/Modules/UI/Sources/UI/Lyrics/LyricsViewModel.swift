@@ -22,8 +22,10 @@ public final class LyricsViewModel: ObservableObject {
     /// bar, which cannot observe the `@Published` originals (#546).
     public let menuState = LyricsMenuState()
 
-    /// The source that produced ``document``: `"user"`, `"sidecar"`, `"embedded"`, `"lrclib"`, or `nil`.
+    /// The source that produced ``document``: `"user"`, `"sidecar"`, `"embedded"`, `"lrclib"`, `"netease"`, or `nil`.
     @Published public private(set) var documentSource: String?
+    /// Lookup status for the currently displayed track, separate from no lyrics.
+    @Published public private(set) var fetchMessage: String?
 
     /// Index into `syncedLines` that corresponds to the current playback position.
     @Published public private(set) var currentLineIndex: Int?
@@ -85,6 +87,8 @@ public final class LyricsViewModel: ObservableObject {
     private var offsetLoadTask: Task<Void, Never>?
     private var offsetCommitTask: Task<Void, Never>?
     private var currentTrackID: Int64?
+    private var fetchTask: Task<Void, Never>?
+    private var fetchGeneration = UUID()
     /// The offset currently stored in the database for `currentTrackID`. The
     /// observed document already has this folded in (LyricsService.parse), so
     /// position maths applies only the unsaved delta.
@@ -122,6 +126,9 @@ public final class LyricsViewModel: ObservableObject {
         case "lrclib":
             "LRClib"
 
+        case "netease":
+            L10n.string("NetEase Cloud Music")
+
         case "user":
             L10n.string("Edited")
 
@@ -132,6 +139,7 @@ public final class LyricsViewModel: ObservableObject {
 
     /// Called whenever the now-playing track changes.  Loads lyrics and wires observation.
     public func trackDidChange(trackID: Int64?) {
+        self.cancelFetch()
         // If the editor is open for a non-playing track, close it before switching context.
         if self.isEditorPresented {
             self.isEditorPresented = false
@@ -194,49 +202,64 @@ public final class LyricsViewModel: ObservableObject {
         }
     }
 
-    /// Triggers an opt-in LRClib fetch if the current track has no lyrics.
+    /// Triggers an opt-in online lookup when the current track needs lyrics.
     public func fetchIfMissing() {
         guard let trackID = currentTrackID, !isFetching else { return }
-        self.isFetching = true
-        Task {
-            defer { self.isFetching = false }
-            do {
-                _ = try await self.service.autoFetchIfMissing(for: trackID)
-            } catch {
-                self.log.error("lyrics.fetch.failed", ["error": String(reflecting: error)])
-            }
-        }
+        self.beginFetch(for: trackID, explicit: false)
     }
 
-    /// Unconditionally fetches lyrics from LRClib for the current track, replacing
-    /// any existing lyrics regardless of source.  Does nothing when LRClib is not
+    /// Fetches online lyrics for the current track, replacing
+    /// any existing lyrics regardless of source. Does nothing when online lyrics are not
     /// enabled in Settings or no track is loaded.
     public func forceFetch() {
         guard let trackID = currentTrackID, !isFetching, lrclibEnabled else { return }
-        self.isFetching = true
-        Task {
-            defer { self.isFetching = false }
-            do {
-                let doc = try await self.service.forceFetch(for: trackID, embedInFile: self.embedOnSave)
-                self.reflectFetched(doc, for: trackID)
-            } catch {
-                self.log.error("lyrics.forceFetch.failed", ["error": String(reflecting: error)])
-            }
-        }
+        self.beginFetch(for: trackID, explicit: true)
     }
 
-    /// Fetches lyrics from LRClib for any given track ID, replacing existing lyrics.
-    /// Caller is responsible for checking whether LRClib is enabled.
+    /// Fetches online lyrics for a track, replacing existing lyrics.
+    /// Caller is responsible for checking the online lyrics opt-in.
     public func forceFetch(for trackID: Int64) {
         guard !self.isFetching else { return }
+        self.beginFetch(for: trackID, explicit: true)
+    }
+
+    private func cancelFetch() {
+        self.fetchTask?.cancel()
+        self.fetchGeneration = UUID()
+        self.isFetching = false
+        self.fetchMessage = nil
+    }
+
+    private func beginFetch(for trackID: Int64, explicit: Bool) {
         self.isFetching = true
-        Task {
-            defer { self.isFetching = false }
+        self.fetchMessage = nil
+        let generation = UUID()
+        self.fetchGeneration = generation
+        self.fetchTask = Task {
+            defer {
+                if self.fetchGeneration == generation { self.isFetching = false }
+            }
             do {
-                let doc = try await self.service.forceFetch(for: trackID, embedInFile: self.embedOnSave)
-                self.reflectFetched(doc, for: trackID)
+                if explicit {
+                    let result = try await self.service.forceFetchWithSource(for: trackID, embedInFile: self.embedOnSave)
+                    try Task.checkCancellation()
+                    self.reflectFetched(result?.document, for: trackID, source: result?.source)
+                    if result == nil, self.currentTrackID == trackID {
+                        self.fetchMessage = L10n.string("No matching lyrics were found. Check the song title and artist.")
+                    }
+                } else {
+                    _ = try await self.service.autoFetchIfMissing(for: trackID)
+                }
+            } catch is CancellationError {
+                // A track change cancels its old lookup without an error banner.
             } catch {
-                self.log.error("lyrics.forceFetch.failed", ["error": String(reflecting: error)])
+                guard self.fetchGeneration == generation, self.currentTrackID == trackID else { return }
+                if case LyricsLookupError.missingMetadata = error {
+                    self.fetchMessage = L10n.string("Add a song title and artist before fetching lyrics.")
+                } else {
+                    self.fetchMessage = L10n.string("Online lyrics could not be retrieved. Check your connection or try again.")
+                }
+                self.log.error("lyrics.fetch.failed", ["error": String(reflecting: error)])
             }
         }
     }
@@ -245,10 +268,10 @@ public final class LyricsViewModel: ObservableObject {
     /// currently on display, so the pane and editor do not have to wait for the DB
     /// observation to round-trip. Fetches for any other track are left to persist
     /// silently so they never hijack what the now-playing pane is showing.
-    private func reflectFetched(_ doc: LyricsDocument?, for trackID: Int64) {
+    private func reflectFetched(_ doc: LyricsDocument?, for trackID: Int64, source: String?) {
         guard let doc, self.currentTrackID == trackID else { return }
         self.document = doc
-        self.documentSource = "lrclib"
+        self.documentSource = source
     }
 
     /// Opens the lyrics pane (if not already visible) and presents the editor sheet
@@ -266,6 +289,7 @@ public final class LyricsViewModel: ObservableObject {
             self.openEditor()
             return
         }
+        self.cancelFetch()
         // Remember the now-playing track so we can restore after editing.
         self.nowPlayingTrackID = self.currentTrackID
         self.currentTrackID = trackID

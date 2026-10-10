@@ -60,7 +60,7 @@ struct LyricsEditorRaceTests {
         // An explicit fetch is a deliberate action, so it honours the embed
         // toggle; the playback auto-fetch must NOT (no file rewrites mid-play).
         let source = try self.viewModelSource()
-        #expect(source.ranges(of: "embedInFile: self.embedOnSave").count == 2)
+        #expect(source.contains("forceFetchWithSource(for: trackID, embedInFile: self.embedOnSave)"))
         #expect(!source.contains("autoFetchIfMissing(for: trackID, embed"))
     }
 }

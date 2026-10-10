@@ -141,10 +141,10 @@ extension BocanCommands {
             .disabled(self.vm.nowPlaying.nowPlayingTrackID == nil)
 
             if self.lyricsLrclibEnabled {
-                Button("Fetch Lyrics from LRClib") {
+                Button("Fetch Lyrics Online") {
                     self.lyricsVM.forceFetch()
                 }
-                .help("Fetch lyrics from LRClib for the current track, replacing any existing lyrics")
+                .help("Fetch matching online lyrics for the current track, replacing existing lyrics")
                 .disabled(self.vm.nowPlaying.nowPlayingTrackID == nil || self.lyricsVM.menuState.isFetching)
             }
 

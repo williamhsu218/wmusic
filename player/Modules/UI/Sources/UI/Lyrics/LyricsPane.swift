@@ -258,7 +258,7 @@ public struct LyricsPane: View {
         if self.vm.isFetching {
             ProgressView()
                 .controlSize(.small)
-                .help(L10n.string("Fetching from LRClib\u{2026}"))
+                .help(L10n.string("Fetching lyrics\u{2026}"))
         } else {
             Button {
                 self.vm.forceFetch()
@@ -266,8 +266,8 @@ public struct LyricsPane: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain)
-            .help(L10n.string("Replace with LRClib result"))
-            .accessibilityLabel(L10n.string("Replace lyrics with LRClib result"))
+            .help(L10n.string("Replace with online lyrics"))
+            .accessibilityLabel(L10n.string("Replace with online lyrics"))
             .accessibilityIdentifier(A11y.Lyrics.replaceButton)
         }
     }

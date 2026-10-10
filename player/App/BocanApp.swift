@@ -1020,7 +1020,7 @@ extension BocanApp {
         // of the legacy direct TagWriter path.
         let lsvc = LyricsService(
             database: db,
-            fetcher: LRClibClient(),
+            fetcher: OnlineLyricsClient(),
             editService: lvm.metadataEditService
         )
         let lyricsViewModel = LyricsViewModel(service: lsvc)

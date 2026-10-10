@@ -211,7 +211,7 @@ extension TrackTableCoordinator {
             menu.addItem(item)
         }
         if let fetchLyrics = acts.fetchLyricsFromLRClib, let track = first {
-            let item = ActionMenuItem(L10n.string("Fetch Lyrics from LRClib")) { fetchLyrics(track) }
+            let item = ActionMenuItem(L10n.string("Fetch Lyrics Online")) { fetchLyrics(track) }
             item.isEnabled = selected.count == 1
             menu.addItem(item)
         }

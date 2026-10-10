@@ -49,21 +49,24 @@ struct LRClibClientTests {
 
     // MARK: - Not-found
 
-    @Test("get returns nil on 404")
+    @Test("A failed search after 404 is reported as a service failure")
     func getReturnsNilOn404() async throws {
         let session = URLSession.stubbed(
             for: "lrclib.net",
-            body: Data(),
+            body: Data("[]".utf8),
             statusCode: 404
         )
         let client = LRClibClient(session: session)
-        let doc = try await client.get(artist: "A", title: "T", album: nil, duration: 180)
-        #expect(doc == nil)
+        // The real search endpoint returns 200 + []; the routed fallback cases
+        // are covered by LyricsNetworkTests. A 404 search is an API failure.
+        await #expect(throws: (any Error).self) {
+            _ = try await client.get(artist: "A", title: "T", album: nil, duration: 180)
+        }
     }
 
     // MARK: - Rate limit
 
-    @Test("get retries on 429 and eventually returns nil after max attempts")
+    @Test("get reports rate limiting after bounded retries")
     func getRetriesOn429() async throws {
         let session = URLSession.stubbed(
             for: "lrclib.net",
@@ -71,29 +74,32 @@ struct LRClibClientTests {
             statusCode: 429
         )
         let client = LRClibClient(session: session)
-        // With 3 attempts all returning 429 → nil
-        let doc = try await client.get(artist: "A", title: "T", album: nil, duration: 180)
-        #expect(doc == nil)
+        // Rate limiting is bounded and remains distinguishable from no match.
+        await #expect(throws: (any Error).self) {
+            _ = try await client.get(artist: "A", title: "T", album: nil, duration: 180)
+        }
     }
 
     // MARK: - Network failure
 
-    @Test("get returns nil on network error without throwing")
+    @Test("get propagates a network error")
     func getReturnsNilOnNetworkError() async throws {
         let session = URLSession.stubbedError(URLError(.notConnectedToInternet))
         let client = LRClibClient(session: session)
-        let doc = try await client.get(artist: "A", title: "T", album: nil, duration: 180)
-        #expect(doc == nil)
+        await #expect(throws: URLError.self) {
+            _ = try await client.get(artist: "A", title: "T", album: nil, duration: 180)
+        }
     }
 
     // MARK: - Search
 
-    @Test("search returns empty array on network error")
+    @Test("search propagates a network error")
     func searchEmptyOnError() async throws {
         let session = URLSession.stubbedError(URLError(.notConnectedToInternet))
         let client = LRClibClient(session: session)
-        let results = try await client.search(artist: "A", title: "T", album: nil)
-        #expect(results.isEmpty)
+        await #expect(throws: URLError.self) {
+            _ = try await client.search(artist: "A", title: "T", album: nil)
+        }
     }
 
     @Test("search returns parsed documents from JSON array")

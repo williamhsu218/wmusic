@@ -40,15 +40,27 @@ public struct LyricsView: View {
     // MARK: - Body
 
     public var body: some View {
-        switch self.vm.document {
-        case .none:
-            self.emptyState
+        Group {
+            switch self.vm.document {
+            case .none:
+                self.emptyState
 
-        case let .unsynced(text):
-            self.unsyncedView(text: text)
+            case let .unsynced(text):
+                self.unsyncedView(text: text)
 
-        case let .synced(lines, _):
-            self.syncedView(lines: lines)
+            case let .synced(lines, _):
+                self.syncedView(lines: lines)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if self.vm.document != nil, let message = self.vm.fetchMessage {
+                Text(message)
+                    .font(.caption)
+                    .padding(10)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(8)
+                    .accessibilityIdentifier("lyrics.fetchStatus")
+            }
         }
     }
 
@@ -75,16 +87,24 @@ public struct LyricsView: View {
                         .font(.headline)
                         .foregroundStyle(.secondary)
 
+                    if let message = self.vm.fetchMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .accessibilityIdentifier("lyrics.fetchStatus")
+                    }
+
                     if self.vm.lrclibEnabled {
-                        Button(L10n.string("Fetch from LRClib")) {
+                        Button(L10n.string("Fetch lyrics online")) {
                             self.vm.forceFetch()
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .accessibilityIdentifier(A11y.Lyrics.fetchButton)
-                        .help(L10n.string("Searches LRClib.net for lyrics matching this track."))
+                        .help(L10n.string("Searches the enabled online sources for lyrics matching this track."))
                     } else {
-                        Text(localized: "Paste lyrics in the editor, or enable LRClib in Settings.")
+                        Text(localized: "Paste lyrics in the editor, or enable online lyrics in Settings.")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                             .multilineTextAlignment(.center)

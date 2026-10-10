@@ -44,6 +44,16 @@ struct ExpandedLyricsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .bottom) {
+                if self.vm.document != nil, let message = self.vm.fetchMessage {
+                    Text(message)
+                        .font(.caption)
+                        .padding(12)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .padding()
+                        .accessibilityIdentifier("lyrics.fetchStatus")
+                }
+            }
         }
         .onChange(of: self.trackID) { _, _ in self.followsPlayback = true }
         .accessibilityElement(children: .contain)

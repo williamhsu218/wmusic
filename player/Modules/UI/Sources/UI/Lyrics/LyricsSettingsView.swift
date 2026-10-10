@@ -11,6 +11,7 @@ public struct LyricsSettingsView: View {
     @AppStorage("lyrics.fontSize") private var fontSizeDefault: LyricsFontSize = .medium
     @AppStorage("lyrics.sourcePriority") private var sourcePriority: LyricsSourcePriority = .preferSynced
     @AppStorage("lyrics.lrclibEnabled") private var lrclibEnabled = false
+    @AppStorage("lyrics.neteaseEnabled") private var neteaseEnabled = false
     @AppStorage("lyrics.embedOnSave") private var embedOnSave = false
 
     public init() {}
@@ -43,10 +44,14 @@ public struct LyricsSettingsView: View {
                 .help(L10n.string("Which lyrics win when a track has both its own and a downloaded set."))
             }
 
-            Section(L10n.string("LRClib (opt-in)")) {
-                Toggle(L10n.string("Fetch lyrics from LRClib.net"), isOn: self.$lrclibEnabled)
+            Section(L10n.string("Online lyrics (opt-in)")) {
+                Toggle(L10n.string("Fetch missing lyrics online"), isOn: self.$lrclibEnabled)
                     .accessibilityIdentifier(A11y.SettingsIDs.lyricsLrclib)
-                    .help(L10n.string("Looks up missing lyrics online, which sends the track's artist and title to LRClib.net."))
+                    .help(L10n.string("Sends the song title, artist, album and duration to LRClib to find matching lyrics."))
+                Toggle(L10n.string("Use NetEase Cloud Music as a fallback"), isOn: self.$neteaseEnabled)
+                    .disabled(!self.lrclibEnabled)
+                    .accessibilityIdentifier("settings.lyrics.netease")
+                    .help(L10n.string("Sends the song title and artist to NetEase when LRClib is unavailable or has no matching lyrics."))
                 Text(self.lrclibFooter)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -65,8 +70,8 @@ public struct LyricsSettingsView: View {
 
     /// Multi-sentence footer as sentence keys joined in code (#314).
     private var lrclibFooter: String {
-        L10n.string("Fetched lyrics may be copyrighted; opt-in use is your responsibility.")
-            + " " + L10n.string("LRClib is a community-maintained database.")
+        L10n.string("LRClib is tried first. NetEase is tried next when enabled. Local files and your edits keep their existing priority.")
+            + " " + L10n.string("Fetched lyrics may be copyrighted; opt-in use is your responsibility.")
     }
 
     /// UI-side localized labels for the Library-owned priority enum, so the

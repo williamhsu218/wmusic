@@ -7,9 +7,10 @@ import Observability
 
 /// Abstraction over the LRClib HTTP API, allowing test doubles to be injected.
 public protocol LRClibClientProtocol: Sendable {
+    func fetch(artist: String, title: String, album: String?, duration: TimeInterval) async throws -> FetchedLyrics?
     /// Fetches lyrics using an exact artist/title/album/duration lookup.
     ///
-    /// Returns `nil` when no match is found or when the request fails gracefully.
+    /// Returns `nil` only when no match is found. Network failures throw.
     func get(
         artist: String,
         title: String,
@@ -19,13 +20,19 @@ public protocol LRClibClientProtocol: Sendable {
 
     /// Searches LRClib with optional filters.
     ///
-    /// Returns an empty array on failure rather than throwing,
-    /// so callers can fall through to the next source without crashing.
+    /// Returns an empty array when no results exist. Network failures throw.
     func search(
         artist: String?,
         title: String?,
         album: String?
     ) async throws -> [LyricsDocument]
+}
+
+public extension LRClibClientProtocol {
+    func fetch(artist: String, title: String, album: String?, duration: TimeInterval) async throws -> FetchedLyrics? {
+        guard let document = try await self.get(artist: artist, title: title, album: album, duration: duration) else { return nil }
+        return FetchedLyrics(document: document, source: "lrclib")
+    }
 }
 
 // MARK: - LRClibClient
@@ -60,15 +67,19 @@ public actor LRClibClient: LRClibClientProtocol {
         album: String?,
         duration: TimeInterval
     ) async throws -> LyricsDocument? {
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw LyricsLookupError.missingMetadata }
         try await self.limiter.wait()
 
         var components = URLComponents(url: Self.baseURL.appendingPathComponent("get"), resolvingAgainstBaseURL: false)!
         var items: [URLQueryItem] = [
             URLQueryItem(name: "artist_name", value: artist),
             URLQueryItem(name: "track_name", value: title),
-            URLQueryItem(name: "duration", value: String(Int(duration))),
         ]
-        if let album {
+        if duration.isFinite, duration > 0 {
+            items.append(URLQueryItem(name: "duration", value: String(Int(duration.rounded()))))
+        }
+        if let album, !album.isEmpty {
             items.append(URLQueryItem(name: "album_name", value: album))
         }
         components.queryItems = items
@@ -77,7 +88,21 @@ public actor LRClibClient: LRClibClientProtocol {
 
         self.log.debug("lrclib.get.start", ["artist": artist, "title": title])
 
-        return try await self.fetchWithRetry(url: url)
+        if let document = try await self.fetchWithRetry(url: url) { return document }
+        // Album tags, simplified/traditional names, and punctuation often differ
+        // between a local file and the catalog. Search by title, then verify the
+        // full title, artist identity, and duration locally.
+        let results = try await self.searchResults(artist: nil, title: title, album: nil)
+        return results.compactMap { result -> (LyricsDocument, Double)? in
+            guard let candidateTitle = result.trackName, let candidateArtist = result.artistName,
+                  let document = Self.toDocument(result),
+                  let score = LyricsMatch.score(
+                      title: candidateTitle, artists: [candidateArtist], duration: result.duration, album: result.albumName,
+                      queryTitle: title, queryArtist: artist, queryDuration: duration, queryAlbum: album
+                  ) else { return nil }
+            let syncedBonus = result.syncedLyrics?.isEmpty == false ? 10.0 : 0
+            return (document, score + syncedBonus)
+        }.max(by: { $0.1 < $1.1 })?.0
     }
 
     public func search(
@@ -85,6 +110,10 @@ public actor LRClibClient: LRClibClientProtocol {
         title: String?,
         album: String?
     ) async throws -> [LyricsDocument] {
+        try await self.searchResults(artist: artist, title: title, album: album).compactMap { Self.toDocument($0) }
+    }
+
+    private func searchResults(artist: String?, title: String?, album: String?) async throws -> [LRClibSearchResult] {
         try await self.limiter.wait()
 
         var components = URLComponents(url: Self.baseURL.appendingPathComponent("search"), resolvingAgainstBaseURL: false)!
@@ -117,9 +146,9 @@ public actor LRClibClient: LRClibClientProtocol {
                 "bytes": data.count,
                 "error": String(reflecting: error),
             ])
-            return []
+            throw LyricsLookupError.invalidResponse("LRClib")
         }
-        return results.compactMap { Self.toDocument($0) }
+        return results
     }
 
     // MARK: - Private
@@ -134,7 +163,10 @@ public actor LRClibClient: LRClibClientProtocol {
 
             do {
                 let (data, response) = try await self.session.data(for: request)
-                guard let http = response as? HTTPURLResponse else { return nil }
+                try Task.checkCancellation()
+                guard let http = response as? HTTPURLResponse, data.count <= 2_000_000 else {
+                    throw LyricsLookupError.invalidResponse("LRClib")
+                }
 
                 switch http.statusCode {
                 case 200:
@@ -147,24 +179,26 @@ public actor LRClibClient: LRClibClientProtocol {
                             "bytes": data.count,
                             "error": String(reflecting: error),
                         ])
-                        return nil
+                        throw LyricsLookupError.invalidResponse("LRClib")
                     }
                 case 404:
                     return nil
                 case 429:
                     attempt += 1
-                    let delay = UInt64(pow(2.0, Double(attempt))) * 1_000_000_000
+                    guard attempt < maxAttempts else { throw LyricsLookupError.httpStatus("LRClib", 429) }
+                    let delay = UInt64(attempt) * 1_000_000_000
                     self.log.warning("lrclib.rateLimit", ["attempt": attempt])
                     try await Task.sleep(nanoseconds: delay)
                 default:
                     self.log.warning("lrclib.unexpectedStatus", ["status": http.statusCode])
-                    return nil
+                    throw LyricsLookupError.httpStatus("LRClib", http.statusCode)
                 }
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 self.log.error("lrclib.networkError", ["error": String(reflecting: error)])
-                return nil
+                try OnlineLyricsClient.propagateCancellation(error)
+                throw error
             }
         }
         return nil
@@ -174,16 +208,21 @@ public actor LRClibClient: LRClibClientProtocol {
         do {
             let (data, response) = try await self.session.data(for: request)
             guard let http = response as? HTTPURLResponse,
-                  (200 ..< 300).contains(http.statusCode) else { return nil }
+                  (200 ..< 300).contains(http.statusCode) else {
+                throw LyricsLookupError.unavailable
+            }
+            try Task.checkCancellation()
+            guard data.count <= 2_000_000 else { throw LyricsLookupError.invalidResponse("LRClib") }
             return data
         } catch {
             self.log.error("lrclib.fetchFailed", ["error": String(reflecting: error)])
-            return nil
+            try OnlineLyricsClient.propagateCancellation(error)
+            throw error
         }
     }
 
     private func makeRequest(url: URL) -> URLRequest {
-        var req = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 15)
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
         req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         return req
     }
@@ -217,10 +256,15 @@ private struct LRClibGetResult: Decodable, LRClibResult {
 }
 
 private struct LRClibSearchResult: Decodable, LRClibResult {
+    let trackName: String?
+    let artistName: String?
+    let albumName: String?
+    let duration: Double?
     let syncedLyrics: String?
     let plainLyrics: String?
 
     enum CodingKeys: String, CodingKey {
+        case trackName, artistName, albumName, duration
         case syncedLyrics
         case plainLyrics
     }

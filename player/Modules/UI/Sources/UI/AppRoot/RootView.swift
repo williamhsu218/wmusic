@@ -231,12 +231,16 @@ public struct BocanRootView: View {
 
     public var body: some View {
         self.windowContent
+            .accessibilityHidden(self.browserInputBlocked)
+            // Keep the browser mounted so returning preserves navigation and
+            // selection, while the player owns the window's visible controls.
+            .toolbarVisibility(self.browserInputBlocked ? .hidden : .visible, for: .windowToolbar)
+            .toolbarBackgroundVisibility(self.browserInputBlocked ? .hidden : .automatic, for: .windowToolbar)
             .overlay {
             if self.expandedPrewarmed {
                 ZStack {
-                    // Block pointer input during the fade without changing any
-                    // modifier on NavigationSplitView or its toolbar. Its
-                    // layout stays identical on both sides of the transition.
+                    // Block pointer input until the player has finished fading
+                    // out, then restore the browser and its native toolbar.
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture {}
@@ -466,8 +470,8 @@ public struct BocanRootView: View {
         }
     }
 
-    /// Animate only opacity. Keeping the native toolbar in place avoids the
-    /// separate AppKit titlebar animation and browser safe-area relayout.
+    /// Fade the player while keeping the browser alive. Its toolbar stays
+    /// hidden until closing completes, before restoring browser input/focus.
     private func setExpandedNowPlaying(_ expanded: Bool) {
         guard expanded != self.showExpandedNowPlaying else { return }
         self.expandedTransitionGeneration &+= 1

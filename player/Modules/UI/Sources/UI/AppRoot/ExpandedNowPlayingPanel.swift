@@ -5,41 +5,25 @@ import SwiftUI
 struct ExpandedNowPlayingPanel: View {
     let library: LibraryViewModel
     let lyricsVM: LyricsViewModel
+    let selection: Selection
     let isPresented: Bool
     let onGetInfo: (Int64) -> Void
     let onNavigate: () -> Void
 
-    @AppStorage("ui.expandedNowPlaying.panel") private var selection: Panel = .queue
-
-    private enum Panel: String {
+    enum Selection: String {
         case queue, lyrics
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 16) {
-                Text(L10n.string(self.selection == .queue ? "Playing Queue" : "Lyrics"))
-                    .font(.title3.weight(.semibold))
-                    .accessibilityAddTraits(.isHeader)
-                    .accessibilityIdentifier(self.selection == .queue
-                        ? A11y.NowPlaying.expandedQueueTitle : "nowPlaying.expanded.lyricsTitle")
-
-                Spacer(minLength: 0)
-
-                Picker(L10n.string("Now Playing"), selection: self.$selection) {
-                    Label(L10n.string("Queue"), systemImage: "list.bullet").tag(Panel.queue)
-                    Label(L10n.string("Lyrics"), systemImage: "quote.bubble").tag(Panel.lyrics)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .accessibilityIdentifier(A11y.NowPlaying.expandedPanelPicker)
-            }
-            .padding(.horizontal, 22)
-            .frame(height: 60)
-
             if self.selection == .queue {
-                Divider()
+                Text(L10n.string("Playing Queue"))
+                    .font(.title3.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .frame(height: 48)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier(A11y.NowPlaying.expandedQueueTitle)
                 QueueView(
                     vm: self.library,
                     showsGenre: false,
@@ -59,14 +43,5 @@ struct ExpandedNowPlayingPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            if self.selection == .lyrics {
-                LinearGradient(
-                    colors: [Color.accentColor.opacity(0.07), .clear],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-        }
     }
 }

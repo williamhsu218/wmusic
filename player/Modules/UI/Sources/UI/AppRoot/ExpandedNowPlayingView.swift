@@ -13,12 +13,14 @@ struct ExpandedNowPlayingView: View {
     let onGetInfo: (Int64) -> Void
     let onNavigate: () -> Void
 
+    @AppStorage("ui.expandedNowPlaying.panel") private var selection: ExpandedNowPlayingPanel.Selection = .queue
+
     private var nowPlaying: NowPlayingViewModel { self.library.nowPlaying }
 
     var body: some View {
         GeometryReader { geometry in
             let isCompact = geometry.size.height < 620 || geometry.size.width < 920
-            let controlHeight: CGFloat = 48
+            let controlHeight: CGFloat = 58
             let contentWidth = isCompact
                 ? geometry.size.width
                 : min(max(0, geometry.size.width - 64), 2100)
@@ -32,7 +34,7 @@ struct ExpandedNowPlayingView: View {
                 : AnyLayout(HStackLayout(spacing: 28))
 
             VStack(spacing: 0) {
-                self.closeControl
+                self.playbackControls
                     .frame(height: controlHeight)
 
                 // Only the layout changes at the compact breakpoint. Keep the
@@ -50,16 +52,14 @@ struct ExpandedNowPlayingView: View {
                     ExpandedNowPlayingPanel(
                         library: self.library,
                         lyricsVM: self.lyricsVM,
+                        selection: self.selection,
                         isPresented: self.isPresented,
                         onGetInfo: self.onGetInfo,
                         onNavigate: self.onNavigate
                     )
                         .frame(maxWidth: .infinity, maxHeight: isCompact ? .infinity : nil)
-                        .frame(height: isCompact ? nil : min(max(0, contentHeight - 40), 940))
-                        .background(Color.bgSecondary.opacity(0.53))
-                        .clipShape(RoundedRectangle(cornerRadius: isCompact ? 18 : 22, style: .continuous))
+                        .frame(height: isCompact ? nil : contentHeight)
                         .padding(.horizontal, isCompact ? 24 : 0)
-                        .padding(.vertical, isCompact ? 0 : 20)
                         .padding(.bottom, isCompact ? 16 : 0)
                 }
                 .frame(width: contentWidth, height: contentHeight)
@@ -78,6 +78,9 @@ struct ExpandedNowPlayingView: View {
                     .ignoresSafeArea()
             }
         }
+        // The listening surface fills the space released by the hidden
+        // library toolbar instead of retaining an empty titlebar-sized gap.
+        .ignoresSafeArea(.container, edges: .top)
         .onExitCommand(perform: self.isPresented ? self.onClose : nil)
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(self.isPresented ? .isModal : [])
@@ -85,7 +88,9 @@ struct ExpandedNowPlayingView: View {
         .accessibilityIdentifier(A11y.NowPlaying.expandedRoot)
     }
 
-    private var closeControl: some View {
+    /// The player owns its controls above both columns. Empty header space is
+    /// draggable without taking gestures away from the lyrics or the buttons.
+    private var playbackControls: some View {
         HStack {
             Button(action: self.onClose) {
                 Image(systemName: "chevron.down")
@@ -102,9 +107,28 @@ struct ExpandedNowPlayingView: View {
             .disabled(!self.isPresented)
 
             Spacer()
+
+            Picker(L10n.string("Now Playing"), selection: self.$selection) {
+                Label(L10n.string("Queue"), systemImage: "list.bullet")
+                    .tag(ExpandedNowPlayingPanel.Selection.queue)
+                Label(L10n.string("Lyrics"), systemImage: "quote.bubble")
+                    .tag(ExpandedNowPlayingPanel.Selection.lyrics)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .accessibilityIdentifier(A11y.NowPlaying.expandedPanelPicker)
         }
         .padding(.leading, 24)
         .padding(.trailing, 24)
+        .frame(maxHeight: .infinity)
+        .background {
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(WindowDragGesture())
+                .allowsWindowActivationEvents(true)
+                .accessibilityHidden(true)
+        }
     }
 
     @ViewBuilder

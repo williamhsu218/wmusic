@@ -281,9 +281,21 @@ try:
             print(f"Already current: {installed}")
             print(f"Existing rollback preserved: {rollback}")
             raise AlreadyCurrent()
-    icon = Path("Contents/Resources/AppIcon.icns")
-    previous_icon = sha256(installed / icon) if (installed / icon).is_file() else None
-    candidate_icon = sha256(candidate / icon) if (candidate / icon).is_file() else None
+    def icon_identity(app):
+        if not app.exists():
+            return None
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+        filename = info.get("CFBundleIconFile", "AppIcon")
+        if not filename.endswith(".icns"):
+            filename += ".icns"
+        icon = app / "Contents/Resources" / filename
+        catalog = app / "Contents/Resources/Assets.car"
+        return (info.get("CFBundleIconName"), filename,
+                sha256(icon) if icon.is_file() else None,
+                sha256(catalog) if catalog.is_file() else None)
+
+    previous_icon = icon_identity(installed)
+    candidate_icon = icon_identity(candidate)
     stage = Path(tempfile.mkdtemp(prefix=".wmusic-install.", dir=applications))
     next_rollback = Path(tempfile.mkdtemp(prefix=".rollback-next.", dir=backup_base))
     stage_app = stage / "WMusic.app"

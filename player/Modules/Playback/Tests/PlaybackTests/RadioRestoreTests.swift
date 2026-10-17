@@ -57,16 +57,9 @@ struct RadioRestoreTests {
         let engine = AudioEngine()
         let player = QueuePlayer(engine: engine, database: db)
 
-        // Activation (and the restore inside it) runs detached from init;
-        // poll until the queue lands rather than sleeping a guessed window.
-        var restored: QueueItem?
-        for _ in 0 ..< 200 {
-            if let item = await player.queue.currentItem {
-                restored = item
-                break
-            }
-            try await Task.sleep(nanoseconds: 25_000_000)
-        }
+        // Queue rows can land before activation consumes the saved position.
+        await player.waitUntilActivated()
+        let restored = await player.queue.currentItem
 
         #expect(restored?.playableSource.isLiveStream == true, "queue rows must still restore")
         #expect(

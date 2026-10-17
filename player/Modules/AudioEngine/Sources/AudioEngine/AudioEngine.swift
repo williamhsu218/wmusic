@@ -130,6 +130,9 @@ public actor AudioEngine: Transport, AudioGraphInsertionPoint {
         self._state == .playing
     }
 
+    /// Authoritative transport state, without waiting for the state stream's consumer.
+    public var playbackState: PlaybackState { self._state }
+
     // MARK: - Gapless public API: AudioEngine+GaplessAPI.swift
 
     // MARK: - Tap state

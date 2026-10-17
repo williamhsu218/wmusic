@@ -323,12 +323,13 @@ public final class NowPlayingViewModel {
     /// flag). Called once after activation; engine-driven emissions
     /// overwrite the seeded display the moment anything actually loads.
     private func seedDisplayFromRestoredQueue(_ qp: QueuePlayer) async {
-        guard self.currentTrack == nil, !self.hasCurrentItem else { return }
         guard let item = await qp.queue.currentItem else { return }
-        if case .localBookmark = item.playableSource {
-            return
+        if self.currentTrack == nil, !self.hasCurrentItem {
+            await self.applyRestoredItem(item, player: qp)
         }
-        await self.applyStreamItem(item)
+        // The queue stream may have seeded metadata before activation finished
+        // restoring the position. Read that position after the activation gate.
+        self.position = await qp.currentTime
     }
 
     /// Re-derives the display from the queue after a mutation that never
@@ -342,10 +343,23 @@ public final class NowPlayingViewModel {
             }
             return
         }
+        await self.applyRestoredItem(item, player: qp)
+    }
+
+    /// Seed from SQLite metadata without opening the audio file at launch.
+    private func applyRestoredItem(_ item: QueueItem, player: QueuePlayer) async {
         if case .localBookmark = item.playableSource {
-            return
+            do {
+                let track = try await TrackRepository(database: self.database).fetch(id: item.trackID)
+                guard await player.queue.currentItem?.id == item.id else { return }
+                self.setCurrentTrack(track)
+            } catch {
+                self.log.warning("nowplaying.restore.metadataFailed", ["error": String(reflecting: error)])
+            }
+        } else {
+            await self.applyStreamItem(item)
         }
-        await self.applyStreamItem(item)
+        self.position = await player.currentTime
     }
 
     /// Populates the now-playing display from a queue item that has no local
@@ -515,10 +529,17 @@ public final class NowPlayingViewModel {
 public extension NowPlayingViewModel {
     /// Toggles play/pause on the engine.
     func playPause() async {
+        let start = Date()
+        defer { self.log.debug("transport.playPause.end", ["ms": -start.timeIntervalSinceNow * 1000]) }
         do {
-            if self.isPlaying {
+            let player = self.engine as? QueuePlayer
+            if let player { await player.waitUntilActivated() }
+            let playing = if let player { await player.isPlaying } else { self.isPlaying }
+            let hasQueue = if let player { await !player.queue.items.isEmpty } else { false }
+            self.log.debug("transport.playPause.start", ["action": playing ? "pause" : "play"])
+            if playing {
                 await self.engine.pause()
-            } else if self.isPaused || self.nowPlayingTrackID != nil {
+            } else if hasQueue || self.isPaused || self.hasCurrentItem {
                 // Resume: either explicitly paused mid-playback, or stopped after a
                 // session restore (engine loaded a track but never called play()).
                 // QueuePlayer.play() handles the stopped-with-queue case internally,

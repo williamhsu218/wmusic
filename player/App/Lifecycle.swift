@@ -1,28 +1,59 @@
-import AppKit
-import Persistence
-import Playback
+import Foundation
+import Observability
 
-/// Registers a `willTerminateNotification` observer that saves the current
-/// playback position to `UserDefaults` and runs an opportunistic
-/// `incremental_vacuum` before the process exits.
+/// AppKit keeps servicing its main run loop while asynchronous shutdown saves
+/// playback state. The save itself may need the main actor (podcast resolver /
+/// Now Playing), so willTerminate must never wait on a semaphore.
 ///
-/// A `DispatchSemaphore` blocks termination briefly while the async save
-/// completes; the 2-second timeout prevents a hang on slow devices.  Vacuum
-/// runs only when the freelist exceeds the threshold defined inside
-/// `Database.vacuum()` (ADR-003 audit #5 / #17).
-func registerTerminationObserver(player: QueuePlayer, database: Database) {
-    NotificationCenter.default.addObserver(
-        forName: NSApplication.willTerminateNotification,
-        object: nil,
-        queue: nil
-    ) { _ in
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached {
-            await player.savePositionForSuspend()
-            // Best-effort vacuum; never block quit on a DB error.
-            _ = try? await database.vacuum()
-            semaphore.signal()
+/// Logout and restart wait on the quit reply, so a hung save (a sleeping NAS,
+/// a stuck sync listener) must not keep WMusic or the session from quitting:
+/// the reply is sent at the deadline even if preparation is still running.
+@MainActor
+final class TerminationCoordinator {
+    static let defaultDeadline: Duration = .seconds(3)
+
+    var prepare: (@MainActor () async -> Void)?
+    private let deadline: Duration
+    private var isPreparing = false
+    private var pendingReply: (@MainActor () -> Void)?
+    private var deadlineTask: Task<Void, Never>?
+    private let log = AppLogger.make(.app)
+
+    init(deadline: Duration = TerminationCoordinator.defaultDeadline) {
+        self.deadline = deadline
+    }
+
+    func requestTermination(reply: @escaping @MainActor () -> Void) {
+        guard !self.isPreparing else { return }
+        self.isPreparing = true
+        self.pendingReply = reply
+        let start = Date()
+        let deadline = self.deadline
+        self.deadlineTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: deadline)
+            } catch {
+                return
+            }
+            self?.finish(timedOut: true, start: start)
         }
-        _ = semaphore.wait(timeout: .now() + 2)
+        Task {
+            await self.prepare?()
+            self.finish(timedOut: false, start: start)
+        }
+    }
+
+    /// Replies exactly once: whichever of preparation and deadline comes first.
+    private func finish(timedOut: Bool, start: Date) {
+        guard let reply = self.pendingReply else { return }
+        self.pendingReply = nil
+        self.deadlineTask?.cancel()
+        let elapsed = -start.timeIntervalSinceNow * 1000
+        if timedOut {
+            self.log.warning("app.termination.timedOut", ["ms": elapsed])
+        } else {
+            self.log.debug("app.termination.prepared", ["ms": elapsed])
+        }
+        reply()
     }
 }

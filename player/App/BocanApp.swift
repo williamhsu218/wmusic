@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// inspect live scan state without importing UI types into AppKit callbacks.
     var libraryViewModel: LibraryViewModel?
     var dspViewModel: DSPViewModel?
+    let terminationCoordinator = TerminationCoordinator()
 
     // MARK: Lifecycle
 
@@ -53,16 +54,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     /// Intercepts ⌘Q when a scan or ReplayGain analysis is active.
     ///
-    /// Returns `.terminateLater` and shows a confirmation alert; the alert
-    /// calls `NSApp.reply(toApplicationShouldTerminate:)` when dismissed so
-    /// AppKit can proceed or cancel the quit.  Returns `.terminateNow`
-    /// immediately when nothing is running so normal quits are unaffected.
+    /// Returns `.terminateLater` while confirming active work and saving
+    /// playback state. Replies only after the save, keeping the main actor free.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let isInitialScan = self.libraryViewModel?.isInitialScan == true
         let isScanning = isInitialScan || self.libraryViewModel?.isScanning == true
         let isAnalyzing = self.dspViewModel?.isAnalyzing == true
 
-        guard isScanning || isAnalyzing else { return .terminateNow }
+        guard isScanning || isAnalyzing else {
+            self.terminationCoordinator.requestTermination {
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
 
         let informativeText = if isInitialScan {
             "Your music library is being built for the first time. "
@@ -86,7 +90,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // .terminateLater; otherwise the nested run loop causes AppKit re-entrancy.
         Task { @MainActor in
             let reply = alert.runModal() == .alertFirstButtonReturn
-            NSApp.reply(toApplicationShouldTerminate: reply)
+            if reply {
+                self.terminationCoordinator.requestTermination {
+                    sender.reply(toApplicationShouldTerminate: true)
+                }
+            } else {
+                sender.reply(toApplicationShouldTerminate: false)
+            }
         }
 
         return .terminateLater
@@ -1045,9 +1055,6 @@ extension BocanApp {
         // the `library.watchForChanges` preference).
         Task { [weak lvm] in await lvm?.startOrStopWatcher() }
 
-        // Persist playback position on quit so it can be restored on next launch.
-        registerTerminationObserver(player: qp, database: db)
-
         // ADR-067: the Phone Sync server. Constructed unconditionally so the
         // Settings toggle (22-8) can start/stop it, but only started here when
         // `sync.enabled` is on (default off). `serverName` is injected as a
@@ -1074,6 +1081,19 @@ extension BocanApp {
         let phoneSyncViewModel = PhoneSyncViewModel(control: phoneSyncController)
         phoneSyncBridge.receiver = phoneSyncViewModel
         Self.installSyncServerLifecycleObservers(syncServer: syncServer)
+        appDelegate.terminationCoordinator.prepare = {
+            async let stopSync: Void = syncServer.stop()
+            await qp.prepareForTermination()
+            // Reclaim free pages only after the queue and position are saved;
+            // the coordinator's deadline bounds a slow vacuum. It is a no-op
+            // below the freelist threshold (ADR-003 audit #5 / #17).
+            do {
+                try await db.vacuum()
+            } catch {
+                log.warning("app.termination.vacuumFailed", ["error": String(reflecting: error)])
+            }
+            await stopSync
+        }
         if UserDefaults.standard.bool(forKey: "sync.enabled") {
             Task { [syncServer] in
                 do {
@@ -1143,18 +1163,6 @@ extension BocanApp {
             queue: nil
         ) { _ in
             Task { await syncServer.reAdvertise() }
-        }
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil,
-            queue: nil
-        ) { _ in
-            let semaphore = DispatchSemaphore(value: 0)
-            Task.detached {
-                await syncServer.stop()
-                semaphore.signal()
-            }
-            _ = semaphore.wait(timeout: .now() + 1)
         }
     }
 }

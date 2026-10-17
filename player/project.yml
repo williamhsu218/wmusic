@@ -133,6 +133,7 @@ targets:
       - path: Modules/Observability/Tests/ObservabilityTests
       - path: Modules/UI/Tests/UITests/ViewModelTests
       - path: App/SingleInstance.swift # compile directly so tests can verify constants
+      - path: App/Lifecycle.swift # exercise asynchronous quit without launching the app
       # The UI-to-module adapters, compiled directly so the seam tests can
       # drive them against real services (#422).
       - path: App/AppPodcastActions.swift

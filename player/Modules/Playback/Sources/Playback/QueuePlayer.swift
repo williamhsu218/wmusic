@@ -32,6 +32,8 @@ public actor QueuePlayer: Transport {
     private let crossfadeScheduler: CrossfadeScheduler
     private let historyRecorder: PlayHistoryRecorder
     private let persistence: QueuePersistence
+    private let resumeDefaults: UserDefaults
+    private var pendingResume: (itemID: QueueItem.ID, position: TimeInterval)?
     /// The sleep timer — available for UI observation via `LibraryViewModel`.
     public nonisolated let sleepTimer: SleepTimer
 
@@ -161,7 +163,8 @@ public actor QueuePlayer: Transport {
         database: Database,
         scrobbleSink: (any ScrobbleSink)? = nil,
         subsonicResolver: (any SubsonicStreamResolving)? = nil,
-        podcastResolver: (any PodcastEpisodeResolving)? = nil
+        podcastResolver: (any PodcastEpisodeResolving)? = nil,
+        resumeDefaultsSuiteName: String? = nil
     ) {
         self.engine = engine
         self.database = database
@@ -170,6 +173,7 @@ public actor QueuePlayer: Transport {
         self.queue = PlaybackQueue()
         self.historyRecorder = PlayHistoryRecorder(database: database, scrobbleSink: scrobbleSink)
         self.persistence = QueuePersistence(database: database)
+        self.resumeDefaults = resumeDefaultsSuiteName.flatMap { UserDefaults(suiteName: $0) } ?? .standard
         let crossfadeScheduler = CrossfadeScheduler()
         self.crossfadeScheduler = crossfadeScheduler
         self.gaplessScheduler = GaplessScheduler(engine: engine, crossfade: crossfadeScheduler)
@@ -298,9 +302,11 @@ public actor QueuePlayer: Transport {
     }
 
     public func play() async throws {
-        // If the engine hasn't loaded anything yet (idle or stopped state), try to
-        // load the current queue item first so the play button always does something.
-        if self.lastEmittedState == .idle || self.lastEmittedState == .stopped {
+        await self.waitUntilActivated()
+        // Use the engine itself: the forwarded stream may still describe a
+        // previous load. A failed restore/load must be retryable with Play.
+        switch await self.engine.playbackState {
+        case .idle, .stopped, .ended, .failed:
             // If the queue was exhausted (currentIndex became nil after reaching the
             // end) but still has items, restart from the beginning.
             if await self.queue.currentItem == nil, await !(self.queue.items.isEmpty) {
@@ -309,20 +315,22 @@ public actor QueuePlayer: Transport {
             if await (self.queue.currentItem) != nil {
                 try await self.loadCurrentItem()
             }
+        default:
+            break
         }
         try await self.engine.play()
         await self.nowPlayingCentre?.setPlaying(true)
     }
 
     public func pause() async {
-        // Persist a podcast position once before suspending, so a resume point
-        // exists even between the 5 s ticks.
-        await self.persistPodcastPositionIfNeeded()
         await self.engine.pause()
         await self.nowPlayingCentre?.setPlaying(false)
+        // Silence the audio before any database or preference work.
+        await self.savePositionForSuspend()
     }
 
     public func stop() async {
+        self.pendingResume = nil
         await self.persistPodcastPositionIfNeeded()
         await self.engine.stop()
         await self.gaplessScheduler.stop()
@@ -335,11 +343,20 @@ public actor QueuePlayer: Transport {
     }
 
     public var currentTime: TimeInterval {
-        get async { await self.engine.currentTime }
+        get async {
+            if let pending = self.pendingResume, await self.queue.currentItem?.id == pending.itemID {
+                return pending.position
+            }
+            return await self.engine.currentTime
+        }
     }
 
     public var duration: TimeInterval {
         get async { await self.engine.duration }
+    }
+
+    public var isPlaying: Bool {
+        get async { await self.engine.isPlaying }
     }
 
     /// Stream facts from the engine's current decoder (ADR-078 slice 5); nil for
@@ -377,19 +394,42 @@ public actor QueuePlayer: Transport {
     /// Captures the current engine position to `UserDefaults` so the next launch
     /// can seek the restored track to where the user left off.
     ///
-    /// Call this from `applicationWillTerminate` (or the equivalent notification).
-    /// Safe to call when nothing is playing — it is a no-op when position is zero.
+    /// Call while AppKit still services its run loop, before termination.
+    /// Also checkpoints pauses; an unloaded restored item retains its resume point.
     public func savePositionForSuspend() async {
         // A podcast item persists its per-episode position through the resolver,
         // independent of the global last-position key (which podcast items
-        // ignore on restore). Do this first so it is not gated by the global
-        // `position > 0` guard below.
+        // ignore on restore).
         await self.persistPodcastPositionIfNeeded()
 
-        let position = await self.engine.currentTime
-        guard position > 0 else { return }
-        UserDefaults.standard.set(position, forKey: "playback.resumePosition")
+        guard let item = await self.queue.currentItem, !item.playableSource.isLiveStream else { return }
+        let position = if let pending = self.pendingResume, pending.itemID == item.id {
+            pending.position
+        } else {
+            await self.engine.currentTime
+        }
+        self.resumeDefaults.set(position, forKey: "playback.resumePosition")
+        self.resumeDefaults.set(item.id.uuidString, forKey: "playback.resumeItemID")
         self.log.debug("queueplayer.position.saved", ["position": position])
+    }
+
+    /// Runs while AppKit is still servicing its main run loop, before termination.
+    /// Flush the queue too: quitting inside the debounce window must not lose it.
+    public func prepareForTermination() async {
+        await self.waitUntilActivated()
+        if await self.engine.isPlaying {
+            await self.engine.pause()
+            await self.nowPlayingCentre?.setPlaying(false)
+        }
+        await self.savePositionForSuspend()
+        let snapshot = await self.queue.persistenceSnapshot()
+        await self.persistence.saveImmediately(
+            items: snapshot.items,
+            currentIndex: snapshot.currentIndex,
+            repeatMode: snapshot.repeatMode,
+            shuffleState: snapshot.shuffleState,
+            sourceItems: snapshot.sourceItems
+        )
     }
 
     /// Stops playback, clears the queue, and erases all persisted queue and
@@ -404,7 +444,9 @@ public actor QueuePlayer: Transport {
             repeatMode: .off,
             shuffleState: .off
         )
-        UserDefaults.standard.removeObject(forKey: "playback.resumePosition")
+        self.pendingResume = nil
+        self.resumeDefaults.removeObject(forKey: "playback.resumePosition")
+        self.resumeDefaults.removeObject(forKey: "playback.resumeItemID")
         self.log.info("queueplayer.saved_state.cleared")
     }
 
@@ -638,6 +680,9 @@ public actor QueuePlayer: Transport {
     }
 
     private func loadAndPlay(item: QueueItem, autoPlay: Bool = true) async throws {
+        if let pending = self.pendingResume, pending.itemID != item.id {
+            self.pendingResume = nil
+        }
         // A manual load always starts fresh; the engine's load drops any
         // armed crossfade.
         self.armedBoundary = nil
@@ -786,6 +831,20 @@ public actor QueuePlayer: Transport {
         // item; the global last-position restore path skips podcast items so
         // the two resume mechanisms never fight.
         await self.applyPodcastResumeIfNeeded(for: item)
+
+        if let pending = self.pendingResume, pending.itemID == item.id {
+            if case .podcast = item.playableSource {
+                // Podcast positions belong to the per-episode resolver.
+            } else {
+                let position = item.duration > 0 ? min(pending.position, item.duration) : pending.position
+                do {
+                    try await self.engine.seek(to: position)
+                } catch {
+                    self.log.warning("queueplayer.position.restore.failed", ["error": String(reflecting: error)])
+                }
+            }
+            self.pendingResume = nil
+        }
 
         if case .podcast = item.playableSource {
             // A podcast has no local `tracks` row; drive Now Playing from the
@@ -1436,50 +1495,23 @@ public actor QueuePlayer: Transport {
         )
         self.log.debug("queueplayer.queue.restored", ["count": saved.items.count])
 
-        // Identify items whose backing files have been moved or deleted while
-        // the app was closed so the UI can render them as disabled rows.
-        await self.recomputeUnavailableItems(items: saved.items)
-
-        // If a resume position was saved on last quit, pre-load the current item
-        // and seek to it (without playing) so the user can resume where they left off.
-        let savedPosition = UserDefaults.standard.double(forKey: "playback.resumePosition")
-        guard savedPosition > 0 else { return }
-        UserDefaults.standard.removeObject(forKey: "playback.resumePosition")
-
-        // Live radio cannot resume: there is no position to return to, and a
-        // seek on a live ICY stream degrades into FFmpeg reading the stream
-        // at the server's pace while the transport gate is held, wedging
-        // every subsequent play (launch hang: restoreQueue -> seek ->
-        // SSL_read). Restore the queue rows only; pressing play cold-starts
-        // the station fresh.
-        if let current = await self.queue.currentItem,
-           case .internetRadio = current.playableSource {
-            self.log.debug("queueplayer.position.restore.skippedLiveStream", [:])
-            return
-        }
-
-        // A podcast item carries its own per-episode resume position, applied
-        // inside `loadAndPlay`. The global last-position must not double-seek it
-        // (gotcha: the two resume paths must not fight). Pre-load so the
-        // per-episode seek runs, but skip the global seek for a podcast item.
-        let currentIsPodcast = if let current = await self.queue.currentItem,
-                                  case .podcast = current.playableSource {
-            true
+        // Restore metadata and the resume intent only. Opening a removable or
+        // network file at launch can fail before its volume becomes available.
+        // Play loads it on demand, preserving the selected row and shuffle order.
+        let position = self.resumeDefaults.double(forKey: "playback.resumePosition")
+        let savedID = self.resumeDefaults.string(forKey: "playback.resumeItemID")
+        if let item = await self.queue.currentItem,
+           !item.playableSource.isLiveStream, position.isFinite, position > 0,
+           savedID == nil || savedID == item.id.uuidString {
+            self.pendingResume = (item.id, position)
         } else {
-            false
+            self.resumeDefaults.removeObject(forKey: "playback.resumePosition")
+            self.resumeDefaults.removeObject(forKey: "playback.resumeItemID")
         }
 
-        do {
-            try await self.loadCurrentItem()
-            if currentIsPodcast {
-                self.log.debug("queueplayer.position.restore.podcastPerEpisode", [:])
-            } else {
-                try await self.engine.seek(to: savedPosition)
-                self.log.debug("queueplayer.position.restored", ["position": savedPosition])
-            }
-        } catch {
-            self.log.warning("queueplayer.position.restore.failed", ["error": String(reflecting: error)])
-        }
+        // File existence checks can wait on a sleeping NAS. They must not hold
+        // activation or the player's executor while the listener presses Play.
+        Task { await self.recomputeUnavailableItems(items: saved.items) }
     }
 
     // MARK: - Unavailable items
@@ -1552,53 +1584,60 @@ public actor QueuePlayer: Transport {
                 "error": String(reflecting: error),
             ])
         }
-        var handles: [String: RootScopeHandle] = [:]
-        defer { handles.removeAll() } // RAII releases scopes
+        let scopedRoots = roots
+        let log = self.log
+        let missing = await Task.detached(priority: .utility) {
+            var handles: [String: RootScopeHandle] = [:]
+            defer { handles.removeAll() } // RAII releases scopes
 
-        var missing: Set<QueueItem.ID> = []
-        for item in items {
-            // Only file-backed items can go missing on disk. Remote sources
-            // (internet radio, Subsonic, streamed podcasts) carry http(s)
-            // URLs whose `.path` never exists locally; checking them marked
-            // every restored station "(missing)" and disabled its row.
-            guard let url = URL(string: item.fileURL),
-                  url.scheme == nil || url.isFileURL else { continue }
-            let path = url.path
-            guard !path.isEmpty else {
-                missing.insert(item.id)
-                continue
-            }
+            var missing: Set<QueueItem.ID> = []
+            for item in items {
+                // Only file-backed items can go missing on disk. Remote sources
+                // (internet radio, Subsonic, streamed podcasts) carry http(s)
+                // URLs whose `.path` never exists locally; checking them marked
+                // every restored station "(missing)" and disabled its row.
+                guard let url = URL(string: item.fileURL),
+                      url.scheme == nil || url.isFileURL else { continue }
+                let path = url.path
+                guard !path.isEmpty else {
+                    missing.insert(item.id)
+                    continue
+                }
 
-            // Acquire (and memoise) the scope for the matching root so the
-            // sandbox grants `fileExists` access to files inside it.
-            if let root = roots.first(where: {
-                let prefix = $0.path == "/" ? "/" : $0.path + "/"
-                return path.hasPrefix(prefix)
-            }), handles[root.path] == nil {
-                var stale = false
-                do {
-                    let url = try URL(
-                        resolvingBookmarkData: root.bookmark,
-                        options: .withSecurityScope,
-                        relativeTo: nil,
-                        bookmarkDataIsStale: &stale
-                    )
-                    if let handle = RootScopeHandle(url: url) {
-                        handles[root.path] = handle
+                // Acquire (and memoise) the scope for the matching root so the
+                // sandbox grants `fileExists` access to files inside it.
+                if let root = scopedRoots.first(where: {
+                    let prefix = $0.path == "/" ? "/" : $0.path + "/"
+                    return path.hasPrefix(prefix)
+                }), handles[root.path] == nil {
+                    var stale = false
+                    do {
+                        let url = try URL(
+                            resolvingBookmarkData: root.bookmark,
+                            options: .withSecurityScope,
+                            relativeTo: nil,
+                            bookmarkDataIsStale: &stale
+                        )
+                        if let handle = RootScopeHandle(url: url) {
+                            handles[root.path] = handle
+                        }
+                    } catch {
+                        // Files under this root then read as missing (#494).
+                        log.warning("queueplayer.availability.bookmarkUnresolvable", [
+                            "rootPath": root.path,
+                            "error": String(reflecting: error),
+                        ])
                     }
-                } catch {
-                    // Files under this root then read as missing (#494).
-                    self.log.warning("queueplayer.availability.bookmarkUnresolvable", [
-                        "rootPath": root.path,
-                        "error": String(reflecting: error),
-                    ])
+                }
+
+                if !FileManager.default.fileExists(atPath: path) {
+                    missing.insert(item.id)
                 }
             }
-
-            if !FileManager.default.fileExists(atPath: path) {
-                missing.insert(item.id)
-            }
-        }
+            return missing
+        }.value
+        // A queue replaced while the scan was running must not inherit its IDs.
+        guard await self.queue.items.map(\.id) == items.map(\.id) else { return }
 
         self._unavailableItemIDs = missing
         self.emitUnavailableItems(missing)

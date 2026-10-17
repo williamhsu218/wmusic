@@ -76,7 +76,6 @@ targets:
         excludes:
           - Info.plist
           - Bocan.entitlements
-          - AppIcon.icon
       - path: NOTICES.md
         buildPhase: resources
     settings:
@@ -84,10 +83,8 @@ targets:
         PRODUCT_NAME: WMusic
         PRODUCT_MODULE_NAME: Bocan
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        # Use the approved W-note artwork at native macOS icon sizes.
-        # Keep the former Composer package out of the resource build so it
-        # cannot override Assets.xcassets/AppIcon.appiconset.
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Use one Icon Composer artwork for every icon size and appearance.
+        ASSETCATALOG_COMPILER_APPICON_NAME: WMusicIcon
         INFOPLIST_KEY_CFBundleDisplayName: "WMusic"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.music"
       configs:

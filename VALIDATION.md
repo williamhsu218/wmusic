@@ -181,3 +181,51 @@ Sources 新增 NAS Folders，使用 macOS 的 SMB 连接与安全文件夹授权
 - 正式应用退出后，通过 `script/install_local_app.sh` 安装到 `/Applications/WMusic.app`。全部 153 个文件／目录／符号链接和权限条目与候选一致。唯一回滚 `current-rollback` 中的应用与安装前正式版完全一致，数据库快照通过完整性检查并与安装前 49 张表的逻辑摘要一致；安装本身没有更改真实数据库。
 - 实际启动路径、About 的 **1.0.2 (3)**、全窗口歌词的隐藏滚动条、直接滚动及恢复跟随已读回；未点击真实歌曲播放。启动时应用的例行扫描更新了部分歌曲的不可用标记，其他歌曲字段、曲目集合、播放列表、队列内容及播放历史保持一致。运行库 `quick_check=ok`，没有加载 Homebrew 动态库。
 - 发布说明位于 [docs/releases/v1.0.2.md](docs/releases/v1.0.2.md)。安装和实际窗口证据位于 `.build-logs/github-release-1.0.2/`；完整截图基线、其他 Mac 兼容性和真实 NAS 播放仍沿用已有验收限制。
+
+## 1.0.3 歌词渠道修复与发布（2026-10-10）
+
+- 版本 **1.0.3 (4)**，源码提交 `d9f8d5d`。原来仅向 LRClib 做精确查询，404、网络失败和解析失败都被当成没有歌词。现在精确查询无结果时按歌名搜索，核对歌手与时长，拒绝翻唱、不同版本和时长明显不符的结果；新增可单独开启的网易云音乐备用渠道，不使用账号或 Cookie。不同失败原因分别提示，切歌时取消旧请求；保存实际来源，不覆盖手动编辑、旁置 LRC 和内嵌同步歌词。
+- Library 34 项与 UI／本地化 53 项测试通过，共 87 项，其中两项是实际网络请求测试。早期一次直接要求 LRClib 在线的测试遇到 503，记录保留，不据此认定该服务长期稳定。
+- 原生 QA 使用独立身份 `com.willhsu.wmusic.lyricschannelsqa.20261010`、独立 E2E 库和静音合成 WAV，没有播放真实音频。界面显示 NetEase Cloud Music / Synced，主渠道故障时显示明确的连接失败提示；QA 与候选的 Mach-O UUID 相同。
+- 正常退出旧版后通过 `script/install_local_app.sh` 安装，候选与正式版全部文件一致，安装本身保持 48 张表一致，唯一回滚为 1.0.2 (3)。About 显示 **1.0.3 (4)**；在正式设置中开启网易云备用渠道并读回。启动后除 settings 的例行备份时间外 47 张表完全相同，队列与页面状态语义相同，`quick_check=ok`；未播放真实曲目。
+- 发布前 `script/check_publish_privacy.py --history` 通过。ZIP 本地解压、CRC 与严格签名检查通过，三个 GitHub 附件的服务端 SHA-256 与本地一致；完整下载回验因 TLS 握手错误和超时未完成，未记为通过。Release：<https://github.com/williamhsu218/wmusic/releases/tag/v1.0.3>。证据见 [.build-logs/lyrics-channels-20261010/acceptance.md](.build-logs/lyrics-channels-20261010/acceptance.md)。
+
+## 1.0.4 常见歌曲歌词搜索优化（2026-10-10）
+
+- 版本 **1.0.4 (5)**，源码提交 `0e8decf`。用户反馈张靓颖《画心》《如果爱下去》搜索不到歌词；实测原因是网易云搜索只读取前 20 条，两首原版分别位于第 77、46 条。候选扩大到 100 条，加入备用搜索接口、标题单独查询、繁简体与歌手别名。LRClib 搜索规范化主题曲、重制版等附注，现场、翻唱、混音等版本仍校验身份，时长最多容差 12 秒。新增独立开启的酷狗歌词专用源，依次尝试 LRClib、网易云、酷狗并保存实际来源；缺少曲目歌手时尝试专辑歌手。
+- Library 42 项与 UI／本地化 53 项测试通过，共 95 项。8 首常见歌曲在网易云与酷狗均取得同步歌词，两首反馈曲还验证了完整获取链；这是实测样本，不代表所有歌曲都能取得。
+- 原生 QA 使用独立身份 `com.willhsu.wmusic.lyricssearchqa.20261010` 和静音合成 WAV：两首均显示 NetEase Cloud Music / Synced，关闭网易云后刷新显示 Kugou / Synced；新增开关、展开歌词的滚动与跟随正常。
+- 安装后全部文件与候选一致，安装本身保持 48 张表一致，唯一回滚为 1.0.3 (4)。About 显示 **1.0.4 (5)**，正式界面显示 NetEase Cloud Music / Synced。启动后 46 张表完全相同，lyrics 多一条自动获取的缓存，settings 中队列与页面状态语义相同，`quick_check=ok`；曲目、播放列表与历史未变。首次重启时曾短暂出现 “audio stream could not be reached” 提示，之后消失；本轮不作为 NAS 播放验收。
+- 隐私检查、ZIP 校验及三个附件的服务端 SHA-256／大小核对通过；完整下载回验超过 45 秒未完成，未记为通过。Release：<https://github.com/williamhsu218/wmusic/releases/tag/v1.0.4>。证据见 [.build-logs/lyrics-search-20261010/acceptance.md](.build-logs/lyrics-search-20261010/acceptance.md)。
+
+## 1.0.5 (6) 展开播放界面与发布（2026-10-10）
+
+- 源码提交 `80e67a4`。展开播放页时隐藏曲库导航、标题和搜索工具栏，收起后恢复，并保留导航、选择与搜索状态。歌词／队列与整页共用背景，移除右侧圆角底板、渐变和分隔线；Queue / Lyrics 移到顶部独立控制行，顶部空白区域可拖动窗口。
+- Release 构建与 62 项相关 UI／歌词／窗口测试通过。扩大到 116 项时有 4 项失败（旧 LyricsPlaybackDriver 字符串约定与 3 个 NowPlayingStrip 快照），在改动前源码上同样复现，基线另有 1 项 NowPlayingDisplay 时序失败；快照未重录，扩大检查未计为通过。
+- 原生 QA 使用独立身份 `com.willhsu.wmusic.playeruxqa.20261010`、合成音频和原创测试歌词，覆盖浅色／深色、紧凑／宽屏、Queue / Lyrics 切换、歌词滚动与拖动、Follow Lyrics、顶部拖动、Esc 收起和 ⌘F 返回搜索。
+- 安装后 About 显示 **1.0.5 (6)**，唯一回滚为 1.0.4。安装时 49 张表完全一致，启动后仅 settings 的例行备份时间更新，`quick_check=ok`；保持暂停，未播放真实曲目。
+- 隐私检查通过，三个附件的服务端 SHA-256 与大小一致；ZIP 为 54,858,063 字节，SHA-256 `dd2437e49bfa823a52f1df24067ace0abd789d017b98e43b1260ed2d912badf6`。完整下载回验在下载 10,485,760 字节、50.71 秒时超时，未记为通过。Release：<https://github.com/williamhsu218/wmusic/releases/tag/v1.0.5>，发布于 2026-10-10T03:03:11Z。证据见 [.build-logs/player-ux-20261010/acceptance.md](.build-logs/player-ux-20261010/acceptance.md)。
+
+## 1.0.5 (8) 图标统一（2026-10-12，本机，部分未通过）
+
+- 以 `player/Resources/WMusicIcon.icon` 作为唯一图标来源，原 W 音符图不变；统一 CFBundleIconFile、CFBundleIconName 与 Xcode 图标设置，并移除另一套资源。安装脚本改为同时比较图标名称、ICNS 与 Assets.car 摘要，图标变化时刷新系统登记。
+- 构建、严格签名和安装脚本的身份与沙盒校验通过；候选与正式版全部 118 个文件一致，About 与 NSWorkspace 小尺寸浅色／深色图标一致。唯一回滚为 1.0.5 (6)。真实曲库 `quick_check=ok`，曲目、播放列表、队列与历史未变；启动时例行更新了 library_roots 状态与备份时间。
+- 未通过：系统设置 → 存储 → 应用程序中的正式应用仍显示白色外框，判断为系统按应用标识缓存的旧图标；清除系统图标缓存需要管理员权限，未执行，也未重启 Mac。Dock 实际截图未取得。本版本未发布到 GitHub。证据见 [.build-logs/small-icon-consistency-20261012/acceptance.md](.build-logs/small-icon-consistency-20261012/acceptance.md)。
+
+## 1.0.5 (9) 会话延迟恢复（2026-10-15，本机）
+
+- 启动时只从数据库恢复队列、选中项与续播位置，不打开音频文件，避免休眠的 NAS 或移动磁盘导致恢复失败；点击播放时按需加载，并可重试此前失败的加载，暂停时保存位置。退出准备改为异步执行，保存期间 AppKit 主循环保持响应。3 秒退出期限当时尚未加入，见 1.0.6。
+- Playback 241 项、UI 定点 58 项、AudioEngine 播放控制 16 项与异步退出 1 项测试通过。
+- 独立 QA 使用 1,293 项合成队列：先复现旧故障，再验证同曲重试、重启后直接播放、续播位置（15.64 秒）、队列顺序与选中项保留，以及连续开关切换。另以已安装包的隔离副本验证播放／暂停、退出重启与同曲续播，两次退出准备约 87 ms 和 128 ms。
+- 正式安装后 About、正常退出与重启读回通过；真实续播位置 180.72 秒，除 settings 外 48 张表未变，曲库、播放列表与历史保留，`quick_check=ok`。唯一回滚为 1.0.5 (8)。启动扫描显示 0 首新增、1,295 首未变、1 项错误，未修改媒体文件；未用真实曲库播放。
+- 限制：未做真实 NAS 重新挂载测试；扩大的 NowPlaying 过滤选中了快照套件，其中 3 个基线不同，未计为通过。本版本未发布到 GitHub。证据见 `.build-logs/transport-20261015/` 的 `acceptance.json` 与 `installed-acceptance.json`。
+
+## 1.0.6 (10) 退出期限与本机安装（2026-10-18）
+
+- 1.0.6 收录 2026-10-17 的三项提交：移除遗留 foobar2000 材料并整理文档、单一 Icon Composer 图标（即 1.0.5 (8) 的图标工作），以及会话延迟恢复与退出期限。与已安装的 1.0.5 (9) 逐一比对 118 个文件，差异仅为版本号、Xcode 27.0 → 27.1 的构建信息、主程序、Assets.car 的渲染项名称（WMusicIcon.icns 完全相同）、NOTICES 版本行和签名。唯一新增行为在退出：保存卡住时最多 3 秒后仍回复退出，并在保存队列后执行按阈值触发的增量 vacuum；`app.termination.timedOut` 与 `app.termination.vacuumFailed` 两个日志键不在 1.0.5 (9) 的主程序中。
+- 候选由 `script/build_local_app.sh` 从提交 `f4b9ff3` 构建：ad-hoc 签名、固定身份、沙盒、无调试权限，不链接 Debug dylib。主程序目标为 macOS 15.0，附带的 33 个库与工具要求 macOS 27.0，全部为 arm64。构建时工作区只有 xcodegen 写入的随机 TEMP_ 标识变化，内容等价，已丢弃。
+- 异步退出 3 项测试以独立 SwiftPM 包对当前源码全部通过，包括保存卡住时按期限只回复一次，以及先保存队列再 vacuum。10 月 15 日的同类测试包通过符号链接引用源码，当时只包含并运行了 1 项。
+- 隔离 QA 使用身份 `com.willhsu.wmusic.quitqa.20261018` 和 `BOCAN_E2E_RUN` 合成音频。播放中退出时保存 28.68 秒位置与队列，vacuum 未达阈值未执行，退出准备 171.65 ms，未超时，进程正常结束；重启后恢复到 E2E Tone One 的 0:28，继续播放正常；第二次退出准备 124.04 ms。
+- 安装前正式版已退出。真实曲库只读快照：`quick_check=ok`，48 张表（不含 sqlite_ 内部表），2,767 首、7 个播放列表、388 条历史。`script/install_local_app.sh` 安装 **1.0.6 (10)**，正式版与候选全部 118 个文件一致、签名有效；唯一回滚为 1.0.5 (9) 及安装前曲库快照（DELETE 日志模式，`quick_check=ok`）。
+- 正式启动后恢复当前曲目并暂停在 1:53，播放列表可见；About 显示 **Version 1.0.6 (10)**；Dock 只有一个 WMusic 入口，显示 W 音符图标。1.0.5 (8) 遗留的系统设置存储列表白框问题本次未复核。正常退出时保存 113.4 秒位置与队列，执行增量 vacuum，退出准备 121.67 ms。之后各表行数不变，`quick_check=ok`，settings 仅 `backup.local.lastDate`、`playback.queue.v2`、`ui.state.v2` 变化；未播放真实曲目。
+- `script/check_publish_privacy.py --history` 无违规。记录时尚未推送分支，也未发布 GitHub Release。限制：保存卡住时的退出期限只由单元测试覆盖，未使用真实休眠的 NAS；未运行完整截图套件。证据见 `.build-logs/release-1.0.6-20261018/`。

@@ -4,11 +4,11 @@ WMusic 是面向 macOS 本地曲库的 SwiftUI 播放器。`player/` 是从开�
 
 ## 下载
 
-源码仓库：[williamhsu218/wmusic](https://github.com/williamhsu218/wmusic)。安装包见 [GitHub Releases](https://github.com/williamhsu218/wmusic/releases/latest)，当前版本为 **1.0.2 (3)**。
+源码仓库：[williamhsu218/wmusic](https://github.com/williamhsu218/wmusic)。安装包见 [GitHub Releases](https://github.com/williamhsu218/wmusic/releases/latest)，当前版本为 **1.0.6 (10)**。
 
-下载 `WMusic-1.0.2-macos-arm64.zip`，解压后将 `WMusic.app` 放入 `/Applications`。更新前先正常退出旧应用，并保留旧应用与曲库备份；本工作区的更新继续使用下文的安装脚本维护唯一回滚。安装包不包含音乐文件或用户数据库，运行时无需安装 Homebrew。
+下载 `WMusic-1.0.6-macos-arm64.zip`，解压后将 `WMusic.app` 放入 `/Applications`。更新前先正常退出旧应用，并保留旧应用与曲库备份；本工作区的更新继续使用下文的安装脚本维护唯一回滚。安装包不包含音乐文件或用户数据库，运行时无需安装 Homebrew。
 
-此预编译包要求 **Apple Silicon 和 macOS 27+**：主程序的构建目标为 macOS 15，但本次附带音频库的最低系统版本为 macOS 27。应用采用 ad-hoc 签名，未经过 Apple 公证；其他 Mac 的首次打开与实际播放仍需对应机器验收。附件包含 SHA-256 校验值与构建信息，版本内容和验证范围见 [1.0.2 发布说明](docs/releases/v1.0.2.md)。
+此预编译包要求 **Apple Silicon 和 macOS 27+**：主程序的构建目标为 macOS 15，但本次附带音频库的最低系统版本为 macOS 27。应用采用 ad-hoc 签名，未经过 Apple 公证；其他 Mac 的首次打开与实际播放仍需对应机器验收。附件包含 SHA-256 校验值与构建信息。版本内容见 [GitHub 上的 1.0.6 发布说明](https://github.com/williamhsu218/wmusic/releases/tag/v1.0.6)，各版本的验证范围见 [VALIDATION.md](VALIDATION.md)。
 
 ## 本地开发
 
@@ -41,7 +41,9 @@ open /Applications/WMusic.app
 
 需要回滚时，先正常退出 WMusic，核对回滚包和 `previous-app-files.json`，再用其中的 `WMusic.app` 替换 `/Applications/WMusic.app`。曲库快照用于另行恢复，不能在应用运行时覆盖数据库；恢复前需同时处理现存 `library.sqlite-wal` 与 `library.sqlite-shm`，避免旧 WAL 与快照混用。不要把候选、旧安装目录或其他历史备份当作正式启动入口。
 
-已导入的单个音频文件若要修改标签，请先在应用的 Settings → Library 中用 Add Folder 选取它们所在的文件夹，再重新执行编辑。macOS 会为该文件夹授予写入权限；旧版逐文件导入时保存的权限不会自动升级。添加文件夹不会复制音频文件。主窗口左下角封面现在打开覆盖整个窗口的播放页，显示大封面和播放控制，右侧可切换实时队列与大字歌词。歌词支持逐句高亮、自动跟随和点击跳转；“播放当前曲后停止”仍可从 Playback 菜单使用。
+已导入的单个音频文件若要修改标签，请先在应用的 Settings → Library 中用 Add Folder 选取它们所在的文件夹，再重新执行编辑。macOS 会为该文件夹授予写入权限；旧版逐文件导入时保存的权限不会自动升级。添加文件夹不会复制音频文件。主窗口左下角封面现在打开覆盖整个窗口的播放页，显示大封面和播放控制，右侧可切换实时队列与大字歌词。歌词支持逐句高亮、自动跟随和点击跳转；“播放当前曲后停止”仍可从 Playback 菜单使用。播放页展开时隐藏曲库导航和搜索工具栏，收起后恢复原来的导航、选择与搜索状态。
+
+在线歌词默认关闭，可在 Settings → Lyrics 的 **Online lyrics (opt-in)** 中开启：**Fetch missing lyrics online** 使用 LRClib，**Use NetEase Cloud Music as a fallback** 与 **Use Kugou as a fallback** 为备用渠道。已开启的渠道依次尝试 LRClib、网易云音乐、酷狗，只发送歌名、歌手等匹配信息，不需要账号；本地歌词文件、手动编辑和已内嵌的同步歌词保持原有优先级。
 
 目前验收的是本机 Apple Silicon 环境；其他 Mac 的系统兼容性和首次打开流程仍需在对应机器上验证。ad-hoc 包没有 Apple 公证。
 
@@ -54,6 +56,8 @@ open /Applications/WMusic.app
 3. 导入的 NAS 文件夹会出现在侧栏 Sources 中，点击即可浏览该文件夹的歌曲；歌曲也会并入现有曲库。WMusic 直接读取共享文件，不复制音频到 Mac。
 
 NAS 断开或目录读取失败时，扫描保留已导入歌曲，不将临时断线当作文件删除。Sources 显示上次扫描的可用状态；使用 **Reconnect…** 重新连接后点击 **Rescan**。服务器上的新增或修改文件可能需要手动扫描才能更新。若 macOS 把同一个共享挂载到不同路径，应恢复原挂载路径后再扫描；本轮不自动迁移来源、队列或历史。
+
+启动时只从曲库恢复队列、当前曲目和续播位置，不读取音频文件，因此 NAS 休眠或外接磁盘暂不可用不会导致恢复失败；点击播放时才加载，加载失败后可再次点击重试。退出时先保存位置与队列，最多等待 3 秒，卡住的网络卷不会阻止退出、注销或重启。
 
 Sources 的 **Music Servers** 仍支持 Subsonic/OpenSubsonic 兼容音乐服务，例如 NAS 上的 Navidrome；填写服务的 HTTP(S) 地址和账户信息即可浏览、串流其曲库。群晖 DSM 网页地址和 `smb://` 共享地址分别使用各自入口。本轮新增连接流程针对 SMB；其他已挂载的文件共享仍可通过 Settings → Library → Add Folder 添加。
 
@@ -68,5 +72,5 @@ Sources 的 **Music Servers** 仍支持 Subsonic/OpenSubsonic 兼容音乐服务
 - `script/check_publish_privacy.py`：检查源码、文档与 Git 历史中的网络地址。
 - `dist/`：本机构建候选的输出目录。
 - `.build-logs/`：构建日志、验收证据与 `install-backups/current-rollback/` 唯一回滚快照。
-- `docs/releases/`：发布说明。
+- `docs/releases/`：1.0.1 与 1.0.2 的发布说明；之后版本的说明见 [GitHub Releases](https://github.com/williamhsu218/wmusic/releases)。
 - [本地候选验收记录](VALIDATION.md)：构建、运行、合成音频播放和仍待确认的能力。

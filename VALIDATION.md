@@ -132,7 +132,7 @@
 - APE 已在安装版曲库中显示并完成界面播放进度验收；本轮未从空曲库重跑导入操作，也未用真实输出设备逐项听测 APE、无缝播放、均衡器、格式切换，或连接 Subsonic、播客服务、Last.fm 与 Bòcan 手机客户端。
 - Debug 产物仍引用 `/opt/homebrew/opt/` 下的 FFmpeg 与 TagLib，不能作为可复制的应用使用。Release 成品已完成本机依赖重定位与运行验收，但朋友的 Mac 上的系统兼容性和首次打开流程还未测试。本机 Homebrew FFmpeg 构建标记为 GPL-3.0-or-later，部分动态库针对 macOS 27 构建；私下交付前仍需核查目标系统及附带库声明。
 
-开发入口和依赖见 [README](README.md)，选型依据见 [PLAYER_SELECTION](PLAYER_SELECTION.md)。
+开发入口和依赖见 [README](README.md)，源码来源与本地改动约定见 [UPSTREAM](player/UPSTREAM.md)。
 
 ## 2026-10-01：NAS Sources 功能候选
 

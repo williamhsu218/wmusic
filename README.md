@@ -1,6 +1,6 @@
 # WMusic
 
-WMusic 是面向 macOS 本地曲库的播放器开发工作区，仅计划本机使用或私下给朋友使用。`player/` 是从开源 [Bòcan](https://github.com/bocan/bocan-music) 引入的独立 SwiftUI 播放器候选；`themes/WMusic-Nocturne/` 与现有 foobar2000 配置保留作视觉参考和回滚资料。两个播放器的数据与安装目录彼此独立。
+WMusic 是面向 macOS 本地曲库的 SwiftUI 播放器。`player/` 是从开源 [Bòcan](https://github.com/bocan/bocan-music) 引入的播放器源码，使用独立的 WMusic 应用标识、数据目录和 Nocturne 配色。
 
 ## 下载
 
@@ -62,11 +62,11 @@ Sources 的 **Music Servers** 仍支持 Subsonic/OpenSubsonic 兼容音乐服务
 ## 目录
 
 - `player/`：播放器源码与其原始 Apache-2.0 许可、第三方声明；[来源与本地改动](player/UPSTREAM.md)。
+- `script/build_and_run.sh`：构建并运行工作区开发版本。
 - `script/build_local_app.sh`：可重复构建独立、ad-hoc 签名的本机应用。
 - `script/install_local_app.sh`：固定安装正式版并维护唯一应用与曲库回滚快照。
-- `themes/WMusic-Nocturne/`：现有 foobar2000 深蓝主题、布局和组件清单。
-- `window-resize-hook.m`、`build/`、`backups/`：旧 foobar2000 定制与回滚材料，不属于新播放器构建。
-- [选型与验收口径](PLAYER_SELECTION.md)：候选项目比较与取舍。
+- `script/check_publish_privacy.py`：检查源码、文档与 Git 历史中的网络地址。
+- `dist/`：本机构建候选的输出目录。
+- `.build-logs/`：构建日志、验收证据与 `install-backups/current-rollback/` 唯一回滚快照。
+- `docs/releases/`：发布说明。
 - [本地候选验收记录](VALIDATION.md)：构建、运行、合成音频播放和仍待确认的能力。
-
-`DEVELOPMENT_PLAN.md` 是 2025 年从零开发 Rust/Tauri 跨平台播放器的历史提案；当前 macOS 实施方案以本文和 `PLAYER_SELECTION.md` 为准。

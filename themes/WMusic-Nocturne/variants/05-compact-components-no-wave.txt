@@ -1,7 +1,0 @@
-splitter horizontal style=thin
- splitter vertical style=thin NSSplitViewItem.holdingPriority=800
-  albumart NSSplitViewItem.holdingPriority=350
-  playback-controls format-title="%title%" format-artist="$if2(%artist%,Unknown artist)" format-info="%codec% · %bitrate%kbps · %samplerate%Hz · %channels%"
- splitter vertical style=thin NSSplitViewItem.holdingPriority=500
-  plorg tab-name="播放列表" font-size=11 NSSplitViewItem.canCollapse
-  simplaylist font-size=12

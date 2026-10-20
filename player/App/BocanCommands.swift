@@ -164,6 +164,9 @@ struct BocanCommands: Commands {
             .keyboardShortcut("l", modifiers: [.command, .option])
 
             Button(self.visualizerPaneVisible ? "Hide Visualizer" : "Show Visualizer") {
+                if !self.visualizerPaneVisible {
+                    self.lyricsPaneVisible = false
+                }
                 self.toggleAnimated(self.$visualizerPaneVisible)
             }
             .keyboardShortcut("v", modifiers: [.command, .shift])

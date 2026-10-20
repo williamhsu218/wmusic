@@ -65,6 +65,8 @@ public struct BocanRootView: View {
     /// re-renders when the pane opens or closes and not when a lyric line
     /// changes (#456). Both sides read and write one UserDefaults key.
     @AppStorage("lyrics.paneVisible") private var lyricsPaneVisible = false
+    @AppStorage("lyrics.paneWidth") private var inspectorWidth: Double = 340
+    @AppStorage("visualizer.paneVisible") private var visualizerVisible = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(
@@ -110,39 +112,14 @@ public struct BocanRootView: View {
                 } detail: {
                     ContentPane(vm: self.vm)
                 }
-                // Routed: the library query everywhere, History's own query
-                // on History (ADR-094 slice 2).
-                .searchable(text: self.$vm.searchText, placement: .toolbar, prompt: Text(localized: "Search"))
-                .searchFocused(self.$searchFocused)
-                .toolbar {
-                    MainToolbarItems(
-                        vm: self.vm,
-                        miniPlayerOpen: self.windowMode.miniPlayerOpen,
-                        toggleMiniPlayer: { self.windowMode.toggleMiniPlayer() },
-                        lyricsPaneVisible: self.$lyricsPaneVisible,
-                        visualizerPaneVisible: self.$visualizerVM.paneVisible,
-                        immersiveOpen: self.immersiveOpen,
-                        toggleImmersive: {
-                            if self.immersiveOpen {
-                                self.dismissWindow(id: ImmersiveWindowView.windowID)
-                            } else {
-                                self.openWindow(id: ImmersiveWindowView.windowID)
-                            }
-                        },
-                        reduceMotion: self.reduceMotion,
-                        inspectorSelection: self.$inspectorSelection
-                    )
-                }
 
-                if self.visualizerVM.paneVisible {
-                    VisualizerPane(vm: self.visualizerVM, nowPlayingVM: self.vm.nowPlaying)
-                } else if self.lyricsPaneVisible {
-                    LibraryInspector(
-                        library: self.vm,
-                        lyricsVM: self.lyricsVM,
-                        selection: self.$inspectorSelection,
-                        isVisible: self.$lyricsPaneVisible
-                    )
+                if self.visualizerVisible || self.lyricsPaneVisible {
+                    self.playbackInspector
+                        .frame(width: min(420, max(300, self.inspectorWidth)))
+                        .frame(maxHeight: .infinity)
+                        .overlay(alignment: .leading) {
+                            PlaybackPanelResizeHandle(width: self.$inspectorWidth)
+                        }
                 }
             }
             NowPlayingStrip(
@@ -152,6 +129,34 @@ public struct BocanRootView: View {
                 prewarmExpandedNowPlaying: { self.prewarmExpandedNowPlaying() }
             )
             .environmentObject(self.visualizerVM)
+        }
+        // Routed: the library query everywhere, History's own query
+        // on History (ADR-094 slice 2).
+        .searchable(text: self.$vm.searchText, placement: .toolbar, prompt: Text(localized: "Search"))
+        .searchFocused(self.$searchFocused)
+        .toolbar {
+            MainToolbarItems(
+                vm: self.vm,
+                miniPlayerOpen: self.windowMode.miniPlayerOpen,
+                toggleMiniPlayer: { self.windowMode.toggleMiniPlayer() },
+                lyricsPaneVisible: self.$lyricsPaneVisible,
+                visualizerPaneVisible: self.$visualizerVisible,
+                immersiveOpen: self.immersiveOpen,
+                toggleImmersive: {
+                    if self.immersiveOpen {
+                        self.dismissWindow(id: ImmersiveWindowView.windowID)
+                    } else {
+                        self.openWindow(id: ImmersiveWindowView.windowID)
+                    }
+                },
+                reduceMotion: self.reduceMotion
+            )
+        }
+        // AppStorage on a model is not a View invalidation source. Observe
+        // pane routing here too, then publish the model change for its host.
+        .onChange(of: self.visualizerVisible, initial: true) { _, visible in
+            self.visualizerVM.objectWillChange.send()
+            self.visualizerVM.paneVisible = visible
         }
         .modifier(LyricsPlaybackDriver(lyricsVM: self.lyricsVM, nowPlaying: self.vm.nowPlaying))
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -464,6 +469,20 @@ public struct BocanRootView: View {
         guard !self.expandedPrewarmed else { return }
         withTransaction(Transaction(animation: nil)) {
             self.expandedPrewarmed = true
+        }
+    }
+
+    @ViewBuilder
+    private var playbackInspector: some View {
+        if self.visualizerVisible {
+            VisualizerPane(vm: self.visualizerVM, nowPlayingVM: self.vm.nowPlaying, usesInspectorSizing: true)
+        } else {
+            LibraryInspector(
+                library: self.vm,
+                lyricsVM: self.lyricsVM,
+                selection: self.$inspectorSelection,
+                isVisible: self.$lyricsPaneVisible
+            )
         }
     }
 

@@ -13,6 +13,7 @@ public struct VisualizerPane: View {
 
     public var nowPlayingVM: NowPlayingViewModel
     public var embedded: Bool
+    public var usesInspectorSizing: Bool
 
     // MARK: - State
 
@@ -23,10 +24,11 @@ public struct VisualizerPane: View {
 
     // MARK: - Init
 
-    public init(vm: VisualizerViewModel, nowPlayingVM: NowPlayingViewModel, embedded: Bool = false) {
+    public init(vm: VisualizerViewModel, nowPlayingVM: NowPlayingViewModel, embedded: Bool = false, usesInspectorSizing: Bool = false) {
         self.vm = vm
         self.nowPlayingVM = nowPlayingVM
         self.embedded = embedded
+        self.usesInspectorSizing = usesInspectorSizing
     }
 
     // MARK: - Body
@@ -55,7 +57,7 @@ public struct VisualizerPane: View {
                 }
                 .onHover { _ in self.overlayTrigger += 1 }
             }
-            .frame(width: self.embedded ? nil : self.paneWidth)
+            .frame(width: self.embedded || self.usesInspectorSizing ? nil : self.paneWidth)
             // ignoresSafeAreaEdges: [] — the ShapeStyle background form
             // defaults to .all, which paints the black up through the top
             // safe area, i.e. under the toolbar and native tab strip in a
@@ -63,32 +65,32 @@ public struct VisualizerPane: View {
             // bug there). The pane must stay inside its own frame.
             .background(Color.black, ignoresSafeAreaEdges: [])
             .overlay(alignment: .leading) {
-                if !self.embedded {
-                HStack(spacing: 0) {
-                    Rectangle()
-                        .fill(Color.clear)
-                        .frame(width: 6)
-                        .contentShape(Rectangle())
-                        .gesture(
-                            DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                                .onChanged { value in
-                                    if self.resizeDragStart == nil {
-                                        self.resizeDragStart = self.paneWidth
+                if !self.embedded, !self.usesInspectorSizing {
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 6)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                                    .onChanged { value in
+                                        if self.resizeDragStart == nil {
+                                            self.resizeDragStart = self.paneWidth
+                                        }
+                                        let newWidth = (self.resizeDragStart ?? self.paneWidth) - value.translation.width
+                                        self.paneWidth = max(220, min(600, newWidth))
                                     }
-                                    let newWidth = (self.resizeDragStart ?? self.paneWidth) - value.translation.width
-                                    self.paneWidth = max(220, min(600, newWidth))
+                                    .onEnded { _ in self.resizeDragStart = nil }
+                            )
+                            .onHover { hovering in
+                                if hovering {
+                                    NSCursor.resizeLeftRight.push()
+                                } else {
+                                    NSCursor.pop()
                                 }
-                                .onEnded { _ in self.resizeDragStart = nil }
-                        )
-                        .onHover { hovering in
-                            if hovering {
-                                NSCursor.resizeLeftRight.push()
-                            } else {
-                                NSCursor.pop()
                             }
-                        }
-                    Divider()
-                }
+                        Divider()
+                    }
                 }
             }
             // .contain, not the default: setting both a label and an

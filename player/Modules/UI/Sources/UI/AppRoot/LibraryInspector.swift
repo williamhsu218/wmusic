@@ -6,21 +6,35 @@ struct LibraryInspector: View {
     let lyricsVM: LyricsViewModel
     @Binding var selection: String
     @Binding var isVisible: Bool
-    @AppStorage("lyrics.paneWidth") private var width: Double = 300
-    @State private var resizeStart: Double?
-    @State private var resizeCursorPushed = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Picker(L10n.string("Inspector"), selection: self.$selection) {
+                Picker(L10n.string("Playback Panel"), selection: self.$selection) {
                     Text(L10n.string("Lyrics")).tag("lyrics")
                     Text(L10n.string("Queue")).tag("queue")
-                    Text(L10n.string("Track Info")).tag("info")
+                    Text(L10n.string("Info")).tag("info")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .accessibilityIdentifier("inspector.selection")
+                Spacer(minLength: 0)
+                if self.selection == "queue" {
+                    Menu {
+                        Button(L10n.string("Clear Queue"), role: .destructive) {
+                            Task { await self.library.requestClearQueue() }
+                        }
+                        .accessibilityIdentifier("inspector.clearQueue")
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help(L10n.string("Queue Options"))
+                    .accessibilityLabel(L10n.string("Queue Options"))
+                    .accessibilityIdentifier("inspector.queueOptions")
+                }
                 Button {
                     self.isVisible = false
                 } label: {
@@ -31,23 +45,13 @@ struct LibraryInspector: View {
                 .accessibilityLabel(L10n.string("Close Inspector"))
                 .accessibilityIdentifier("inspector.close")
             }
-            .padding(10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
             Divider()
             switch self.selection {
             case "queue":
-                VStack(spacing: 0) {
-                    HStack {
-                        Spacer()
-                        Button(L10n.string("Clear Queue")) {
-                            Task { await self.library.requestClearQueue() }
-                        }
-                        .controlSize(.small)
-                        .accessibilityIdentifier("inspector.clearQueue")
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    QueueView(vm: self.library, showsGenre: false)
-                        .scrollContentBackground(.hidden)
-                }
+                QueueView(vm: self.library, showsGenre: false, inspectorStyle: true)
+                    .scrollContentBackground(.hidden)
             case "info":
                 NowPlayingInspectorInfo(library: self.library)
             default:
@@ -57,48 +61,8 @@ struct LibraryInspector: View {
                 }
             }
         }
-        .frame(width: min(420, max(260, self.width)))
-        .frame(maxHeight: .infinity)
-        .background(.regularMaterial)
-        .overlay(alignment: .leading) {
-            Rectangle().fill(Color.separatorAdaptive).frame(width: 1)
-            Color.clear.frame(width: 6).contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 1, coordinateSpace: .global).onChanged { value in
-                        if self.resizeStart == nil {
-                            self.resizeStart = min(420, max(260, self.width))
-                        }
-                        self.width = min(
-                            420, max(260, (self.resizeStart ?? self.width) - value.translation.width)
-                        )
-                    }.onEnded { _ in self.resizeStart = nil }
-                )
-                .onHover { hovering in
-                    if hovering, !self.resizeCursorPushed {
-                        NSCursor.resizeLeftRight.push()
-                        self.resizeCursorPushed = true
-                    } else if !hovering, self.resizeCursorPushed {
-                        NSCursor.pop()
-                        self.resizeCursorPushed = false
-                    }
-                }
-                .onDisappear {
-                    if self.resizeCursorPushed {
-                        NSCursor.pop()
-                        self.resizeCursorPushed = false
-                    }
-                    self.resizeStart = nil
-                }
-                .accessibilityLabel(L10n.string("Resize Inspector"))
-                .accessibilityValue(L10n.string("\(Int(self.width)) points"))
-                .accessibilityAdjustableAction { direction in
-                    switch direction {
-                    case .increment: self.width = min(420, max(260, self.width) + 20)
-                    case .decrement: self.width = max(260, min(420, self.width) - 20)
-                    @unknown default: break
-                    }
-                }
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.bgPrimary)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("library.inspector")
     }

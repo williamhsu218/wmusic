@@ -13,6 +13,8 @@ public struct QueueView: View {
     /// Larger rows and clearer current/next labels for the full-window player.
     /// The library and Immersive queue keep their existing compact rows.
     public var prominentRows: Bool
+    /// Compact sections and inset highlights for the native playback inspector.
+    public var inspectorStyle: Bool
     /// The expanded Now Playing view closes before opening the editor.
     /// Other queue surfaces use the root window's normal editor presenter.
     public var onGetInfo: ((Int64) -> Void)?
@@ -23,12 +25,14 @@ public struct QueueView: View {
         vm: LibraryViewModel,
         showsGenre: Bool = true,
         prominentRows: Bool = false,
+        inspectorStyle: Bool = false,
         onGetInfo: ((Int64) -> Void)? = nil,
         onNavigate: (() -> Void)? = nil
     ) {
         self.vm = vm
         self.showsGenre = showsGenre
         self.prominentRows = prominentRows
+        self.inspectorStyle = inspectorStyle
         self.onGetInfo = onGetInfo
         self.onNavigate = onNavigate
     }
@@ -38,6 +42,7 @@ public struct QueueView: View {
             vm: self.vm,
             showsGenre: self.showsGenre,
             prominentRows: self.prominentRows,
+            inspectorStyle: self.inspectorStyle,
             onGetInfo: self.onGetInfo,
             onNavigate: self.onNavigate
         )
@@ -60,20 +65,33 @@ private struct QueueContentView: View {
     var nowPlaying: NowPlayingViewModel
     var showsGenre = true
     var prominentRows = false
+    var inspectorStyle = false
     var onGetInfo: ((Int64) -> Void)?
     var onNavigate: (() -> Void)?
     @State private var queueSnapshot = QueueSnapshot()
     @State private var refreshGeneration = 0
 
-    private var items: [QueueItem] { self.queueSnapshot.items }
-    private var currentIndex: Int? { self.queueSnapshot.currentIndex }
-    private var unavailableIDs: Set<QueueItem.ID> { self.queueSnapshot.unavailableIDs }
-    private var hasLoadedQueue: Bool { self.queueSnapshot.hasLoadedQueue }
+    private var items: [QueueItem] {
+        self.queueSnapshot.items
+    }
+
+    private var currentIndex: Int? {
+        self.queueSnapshot.currentIndex
+    }
+
+    private var unavailableIDs: Set<QueueItem.ID> {
+        self.queueSnapshot.unavailableIDs
+    }
+
+    private var hasLoadedQueue: Bool {
+        self.queueSnapshot.hasLoadedQueue
+    }
 
     init(
         vm: LibraryViewModel,
         showsGenre: Bool = true,
         prominentRows: Bool = false,
+        inspectorStyle: Bool = false,
         onGetInfo: ((Int64) -> Void)? = nil,
         onNavigate: (() -> Void)? = nil
     ) {
@@ -81,6 +99,7 @@ private struct QueueContentView: View {
         self.nowPlaying = vm.nowPlaying
         self.showsGenre = showsGenre
         self.prominentRows = prominentRows
+        self.inspectorStyle = inspectorStyle
         self.onGetInfo = onGetInfo
         self.onNavigate = onNavigate
     }
@@ -127,9 +146,12 @@ private struct QueueContentView: View {
                             isAlreadyNext: entry.isAlreadyNext,
                             position: entry.index,
                             showsGenre: self.showsGenre,
-                            prominentRows: self.prominentRows
+                            prominentRows: self.prominentRows,
+                            inspectorStyle: self.inspectorStyle
                         )
-                        .listRowBackground(entry.isCurrent ? Color.accentColor.opacity(0.15) : Color.clear)
+                        .listRowBackground(!self.inspectorStyle && entry.isCurrent ? Color.accentColor.opacity(0.15) : Color.clear)
+                        .listRowSeparator(self.inspectorStyle ? .hidden : .automatic)
+                        .listRowInsets(self.inspectorStyle ? EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 6) : nil)
                         .contextMenu {
                             Button(L10n.string("Play From Here")) {
                                 Task {
@@ -220,8 +242,8 @@ private struct QueueContentView: View {
                     if self.prominentRows, self.hasLoadedQueue, self.items.isEmpty {
                         self.emptyQueueState
                     } else if self.prominentRows, self.hasLoadedQueue,
-                       self.upcoming.count == 1,
-                       self.upcoming.first?.isCurrent == true {
+                              self.upcoming.count == 1,
+                              self.upcoming.first?.isCurrent == true {
                         VStack(spacing: 9) {
                             Image(systemName: "list.bullet.indent")
                                 .font(.title2)
@@ -328,7 +350,7 @@ private struct QueueContentView: View {
         let start = self.upcoming.first?.index ?? 0
         var newItems = self.items
         guard source.allSatisfy({ newItems.indices.contains($0 + start) }),
-              (0...newItems.count).contains(destination + start) else { return }
+              (0 ... newItems.count).contains(destination + start) else { return }
         newItems.move(fromOffsets: IndexSet(source.map { $0 + start }), toOffset: destination + start)
         // Preserve the playing item and the source order held behind shuffle.
         await queue.reorder(to: newItems)
@@ -366,6 +388,7 @@ private struct QueueRow: View {
     let position: Int
     var showsGenre = true
     var prominentRows = false
+    var inspectorStyle = false
     @State private var isHovered = false
 
     /// Best-effort display title: metadata title → decoded filename stem → raw last path component.
@@ -391,6 +414,20 @@ private struct QueueRow: View {
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if self.inspectorStyle, self.isCurrent || self.isAlreadyNext {
+                Text(self.isCurrent ? L10n.string("Now Playing") : L10n.string("Up Next"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.top, self.isAlreadyNext ? 10 : 4)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            self.rowContent
+        }
+    }
+
+    private var rowContent: some View {
         HStack(spacing: 0) {
             // Playing indicator — animated bars for the current track, warning glyph for
             // unavailable rows. Opacity-hidden otherwise; always hidden from VoiceOver.
@@ -399,8 +436,10 @@ private struct QueueRow: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(Color.orange)
-                } else {
+                } else if self.isCurrent {
                     PlayingBarsIndicator(isPlaying: self.isPlaying)
+                } else {
+                    Color.clear
                 }
             }
             .frame(width: 20)
@@ -461,10 +500,19 @@ private struct QueueRow: View {
                 .opacity(self.isHovered ? 1 : 0)
                 .accessibilityHidden(true)
         }
-        .padding(.vertical, self.prominentRows ? 10 : 3)
-        .padding(.horizontal, self.prominentRows ? 8 : 0)
+        .frame(minHeight: self.inspectorStyle ? 28 : 0)
+        .padding(.vertical, self.prominentRows ? 10 : (self.inspectorStyle ? 4 : 3))
+        .padding(.horizontal, self.prominentRows || self.inspectorStyle ? 8 : 0)
+        .background {
+            if self.inspectorStyle {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(self.isCurrent ? Color.accentColor.opacity(0.07) : (self.isHovered ? Color.primary.opacity(0.04) : Color.clear))
+            }
+        }
         .opacity(self.isUnavailable ? 0.55 : 1.0)
-        .help(self.isUnavailable ? L10n.string("File missing — original location no longer exists") : "")
+        .help(self.isUnavailable
+            ? L10n.string("File missing — original location no longer exists")
+            : (self.inspectorStyle ? [self.displayTitle, self.displaySubtitle].compactMap(\.self).joined(separator: "\n") : ""))
         .onHover { self.isHovered = $0 }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)

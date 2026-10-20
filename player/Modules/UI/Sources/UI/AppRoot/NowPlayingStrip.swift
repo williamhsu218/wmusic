@@ -67,12 +67,16 @@ public struct NowPlayingStrip: View {
                                 self.inspectorSelection = "queue"
                                 self.inspectorVisible = true
                             }
-                        } label: { Image(systemName: "list.bullet") }
-                            .buttonStyle(.plain)
+                        } label: { Label(L10n.string("Queue"), systemImage: "list.bullet") }
+                            .font(.caption)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                             .foregroundStyle(self.inspectorVisible && self.inspectorSelection == "queue" ? Color.accentColor : Color
                                 .textSecondary)
                             .help(L10n.string("Playing Queue"))
                             .accessibilityLabel(L10n.string("Playing Queue"))
+                            .accessibilityValue(self.inspectorVisible && self.inspectorSelection == "queue" ? L10n.string("on") : L10n
+                                .string("off"))
                             .accessibilityIdentifier("nowPlayingStrip.queue")
                     }
                 }

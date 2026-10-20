@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - MainToolbarItems
 
 /// The main window's navigation-placement toolbar group: history, the view
-/// toggles (mini player, lyrics, visualizer, Immersive Mode) and Identify
+/// toggles (mini player, playback panel, visualizer, Immersive Mode) and Identify
 /// Track. Split out of ``BocanRootView`` to keep that file under the length
 /// cap. A plain struct: the root re-evaluates on every value it passes in,
 /// so the labels and enablement stay live without wrappers here.
@@ -18,9 +18,8 @@ struct MainToolbarItems: ToolbarContent {
     let immersiveOpen: Bool
     let toggleImmersive: () -> Void
     let reduceMotion: Bool
-    let inspectorSelection: Binding<String>
-    private var lyricsSelected: Bool {
-        self.lyricsPaneVisible.wrappedValue && self.inspectorSelection.wrappedValue == "lyrics"
+    private var inspectorShown: Bool {
+        self.lyricsPaneVisible.wrappedValue || self.visualizerPaneVisible.wrappedValue
     }
 
     var body: some ToolbarContent {
@@ -40,7 +39,6 @@ struct MainToolbarItems: ToolbarContent {
             .help(L10n.string("Forward (⌘])"))
             .keyboardShortcut("]", modifiers: .command)
             .accessibilityIdentifier(A11y.Toolbar.forward)
-
         }
         ToolbarItemGroup(placement: .primaryAction) {
             Button(
@@ -55,18 +53,17 @@ struct MainToolbarItems: ToolbarContent {
             .accessibilityValue(self.miniPlayerOpen ? L10n.string("on") : L10n.string("off"))
 
             Button(
-                self.lyricsSelected ? L10n.string("Hide Lyrics") : L10n.string("Show Lyrics"),
-                systemImage: "text.quote"
+                self.inspectorShown ? L10n.string("Hide Playback Panel") : L10n.string("Show Playback Panel"),
+                systemImage: "sidebar.right"
             ) {
-                let alreadyShowingLyrics = self.lyricsPaneVisible.wrappedValue && self.inspectorSelection.wrappedValue == "lyrics"
-                self.inspectorSelection.wrappedValue = "lyrics"
+                let visible = self.inspectorShown
                 self.visualizerPaneVisible.wrappedValue = false
-                self.lyricsPaneVisible.wrappedValue = !alreadyShowingLyrics
+                self.lyricsPaneVisible.wrappedValue = !visible
             }
-            .help(L10n.string("Toggle lyrics pane (⌥⌘L)"))
-            .accessibilityIdentifier(A11y.Toolbar.lyricsToggle)
-            .foregroundStyle(self.lyricsSelected ? Color.accentColor : Color.primary)
-            .accessibilityValue(self.lyricsSelected ? L10n.string("on") : L10n.string("off"))
+            .help(L10n.string("Queue, lyrics, and track information"))
+            .accessibilityIdentifier("toolbar.inspector")
+            .foregroundStyle(self.inspectorShown ? Color.accentColor : Color.primary)
+            .accessibilityValue(self.inspectorShown ? L10n.string("on") : L10n.string("off"))
 
             Button(
                 self.visualizerPaneVisible.wrappedValue ? L10n.string("Hide Visualizer") : L10n.string("Show Visualizer"),
@@ -74,6 +71,9 @@ struct MainToolbarItems: ToolbarContent {
                 // magnifier used by Identify Track right beside it.
                 systemImage: "chart.bar.xaxis"
             ) {
+                if !self.visualizerPaneVisible.wrappedValue {
+                    self.lyricsPaneVisible.wrappedValue = false
+                }
                 self.toggleAnimated(self.visualizerPaneVisible)
             }
             .help(L10n.string("Toggle visualizer pane (⇧⌘V)"))
@@ -83,7 +83,7 @@ struct MainToolbarItems: ToolbarContent {
 
             Button(
                 self.immersiveOpen ? L10n.string("Exit Immersive Mode") : L10n.string("Enter Immersive Mode"),
-                systemImage: "rectangle.split.3x1"
+                systemImage: "arrow.up.left.and.arrow.down.right"
             ) {
                 self.toggleImmersive()
             }

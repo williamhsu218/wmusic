@@ -41,7 +41,6 @@ public struct BocanRootView: View {
     @State private var batchCoverArtVM: BatchCoverArtViewModel?
     @State private var duplicateReviewVM: DuplicateReviewViewModel?
     /// Per-window state: the main browser stays mounted behind its player.
-    @Namespace private var artworkTransition
     @AppStorage("ui.inspector.selection") private var inspectorSelection = "lyrics"
     @State private var showExpandedNowPlaying = false
     @State private var expandedPrewarmed = false
@@ -138,17 +137,19 @@ public struct BocanRootView: View {
                 if self.visualizerVM.paneVisible {
                     VisualizerPane(vm: self.visualizerVM, nowPlayingVM: self.vm.nowPlaying)
                 } else if self.lyricsPaneVisible {
-                    LibraryInspector(library: self.vm, lyricsVM: self.lyricsVM,
-                                     selection: self.$inspectorSelection, isVisible: self.$lyricsPaneVisible)
+                    LibraryInspector(
+                        library: self.vm,
+                        lyricsVM: self.lyricsVM,
+                        selection: self.$inspectorSelection,
+                        isVisible: self.$lyricsPaneVisible
+                    )
                 }
             }
             NowPlayingStrip(
                 vm: self.vm.nowPlaying,
                 scrobbleSettingsVM: self.scrobbleSettingsVM,
                 openExpandedNowPlaying: { self.setExpandedNowPlaying(true) },
-                prewarmExpandedNowPlaying: { self.prewarmExpandedNowPlaying() },
-                artworkNamespace: self.artworkTransition,
-                expanded: self.showExpandedNowPlaying
+                prewarmExpandedNowPlaying: { self.prewarmExpandedNowPlaying() }
             )
             .environmentObject(self.visualizerVM)
         }
@@ -232,36 +233,35 @@ public struct BocanRootView: View {
             .toolbarVisibility(self.browserInputBlocked ? .hidden : .visible, for: .windowToolbar)
             .toolbarBackgroundVisibility(self.browserInputBlocked ? .hidden : .automatic, for: .windowToolbar)
             .overlay {
-            if self.expandedPrewarmed {
-                ZStack {
-                    // Block pointer input until the player has finished fading
-                    // out, then restore the browser and its native toolbar.
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture {}
-                        .allowsHitTesting(self.browserInputBlocked)
-                        .accessibilityHidden(true)
+                if self.expandedPrewarmed {
+                    ZStack {
+                        // Block pointer input until the player has finished fading
+                        // out, then restore the browser and its native toolbar.
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture {}
+                            .allowsHitTesting(self.browserInputBlocked)
+                            .accessibilityHidden(true)
 
-                    ExpandedNowPlayingView(
-                        library: self.vm,
-                        lyricsVM: self.lyricsVM,
-                        visualizerVM: self.visualizerVM,
-                        artworkNamespace: self.artworkTransition,
-                        isPresented: self.showExpandedNowPlaying,
-                        onClose: { self.setExpandedNowPlaying(false) },
-                        onGetInfo: { trackID in
-                            self.pendingExpandedInfoTrackID = trackID
-                            self.setExpandedNowPlaying(false)
-                        },
-                        onNavigate: { self.setExpandedNowPlaying(false) }
-                    )
-                    .opacity(self.showExpandedNowPlaying ? 1 : 0)
-                    .allowsHitTesting(self.showExpandedNowPlaying)
-                    .disabled(!self.showExpandedNowPlaying)
-                    .accessibilityHidden(!self.showExpandedNowPlaying)
+                        ExpandedNowPlayingView(
+                            library: self.vm,
+                            lyricsVM: self.lyricsVM,
+                            visualizerVM: self.visualizerVM,
+                            isPresented: self.showExpandedNowPlaying,
+                            onClose: { self.setExpandedNowPlaying(false) },
+                            onGetInfo: { trackID in
+                                self.pendingExpandedInfoTrackID = trackID
+                                self.setExpandedNowPlaying(false)
+                            },
+                            onNavigate: { self.setExpandedNowPlaying(false) }
+                        )
+                        .opacity(self.showExpandedNowPlaying ? 1 : 0)
+                        .allowsHitTesting(self.showExpandedNowPlaying)
+                        .disabled(!self.showExpandedNowPlaying)
+                        .accessibilityHidden(!self.showExpandedNowPlaying)
+                    }
                 }
             }
-        }
             .focused(self.$mainContentFocused)
             .frame(minWidth: 900, minHeight: 550)
             // No root .accessibilityIdentifier: an unused "BocanMainWindow" one masked a child's own identifier (ADR-084).

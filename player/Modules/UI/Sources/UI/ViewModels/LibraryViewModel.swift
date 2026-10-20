@@ -405,6 +405,13 @@ public final class LibraryViewModel: ObservableObject { // swiftlint:disable:thi
     var startupScanTriggered = false
     /// The startup scan is allowed to run silently when the library is intact.
     var activeScanIsStartup = false
+    var scanStartedWithPopulatedLibrary = false
+    /// Routine opt-in startup scans can be cancelled by normal termination.
+    /// Unknown counts, first builds and explicit scans remain protected.
+    public var scanRequiresQuitConfirmation: Bool {
+        self.isInitialScan || (self.isScanning && !(self.activeScanIsStartup && self.scanStartedWithPopulatedLibrary))
+    }
+
     /// Pending debounced reload task scheduled by `scheduleWatcherReload()`.
     /// Cancelled and replaced whenever a new FSEvents batch arrives so that
     /// a burst of back-to-back file changes collapses into a single refresh.

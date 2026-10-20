@@ -18,15 +18,23 @@ struct StartupScanGateTests {
         let suite = "wmusic-startup-test-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        if enabled { defaults.set(true, forKey: "library.scanOnLaunch") }
+        if enabled {
+            defaults.set(true, forKey: "library.scanOnLaunch")
+        }
         let database = try await Database(location: .inMemory)
         let scanner = LibraryScanner(database: database)
         try await scanner.addRoot(folder)
-        _ = try await TrackRepository(database: database).insert(Track(fileURL: "file:///synthetic/saved.wav", title: "Saved Track", addedAt: 1, updatedAt: 1))
+        _ = try await TrackRepository(database: database).insert(Track(
+            fileURL: "file:///synthetic/saved.wav",
+            title: "Saved Track",
+            addedAt: 1,
+            updatedAt: 1
+        ))
         let vm = LibraryViewModel(database: database, engine: MockTransport(), scanner: scanner)
         await vm.triggerStartupScanIfNeeded(userDefaults: defaults)
         if enabled {
             #expect(vm.isScanning)
+            #expect(!vm.scanRequiresQuitConfirmation, "Populated startup scan must not block immediate quit")
             try await self.waitForScanToFinish(vm)
             #expect(try await !PendingMaintenanceRepository(database: database).hasRequest(task: PendingMaintenance.Task.fullRescan))
         } else {
@@ -38,6 +46,7 @@ struct StartupScanGateTests {
         #expect(!vm.isScanning, "A second window must not scan again")
         vm.rescanLibrary(mode: .quick)
         #expect(vm.isScanning, "Manual rescan remains available with launch scanning off")
+        #expect(vm.scanRequiresQuitConfirmation, "Manual scan still protects active work")
         try await self.waitForScanToFinish(vm)
         await scanner.stopWatching()
     }
@@ -75,6 +84,7 @@ struct StartupScanGateTests {
         // The trigger sets this synchronously, before the real scanner task
         // starts. A no-op implementation cannot pass by merely setting a flag.
         #expect(vm.isScanning)
+        #expect(vm.isInitialScan && vm.scanRequiresQuitConfirmation, "First build is protected before the scanner task starts")
         try await self.waitForScanToFinish(vm)
         #expect(
             try await !maintenance.hasRequest(task: PendingMaintenance.Task.fullRescan),
@@ -95,7 +105,7 @@ struct StartupScanGateTests {
 
     private func waitForScanToFinish(_ vm: LibraryViewModel) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
-        while vm.isScanning && ContinuousClock.now < deadline {
+        while vm.isScanning, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(!vm.isScanning, "The fixture scan did not finish")

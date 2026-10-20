@@ -6,17 +6,22 @@ struct AlbumArtworkButton: View {
     let album: Album
     let onOpen: () -> Void
     let onPlay: () -> Void
-    @State private var hovered = false
+    var isActive = false
+    private enum Action: Hashable { case open, play }
+    @FocusState private var focusedAction: Action?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        let revealed = self.isActive || self.focusedAction != nil
         ZStack(alignment: .bottomTrailing) {
             Button(action: self.onOpen) {
                 Artwork(
                     artPath: self.album.coverArtPath, seed: Int(self.album.id ?? 0),
-                    size: Theme.albumGridMinWidth)
+                    size: Theme.albumGridMinWidth
+                )
             }
             .buttonStyle(.plain)
+            .focused(self.$focusedAction, equals: .open)
             .accessibilityLabel(L10n.string("View Album") + ": " + self.album.title)
             .accessibilityIdentifier("album.open.\(self.album.id ?? 0)")
 
@@ -28,14 +33,16 @@ struct AlbumArtworkButton: View {
                     .overlay(Circle().strokeBorder(.primary.opacity(0.12)))
             }
             .buttonStyle(.plain)
+            .focused(self.$focusedAction, equals: .play)
             .padding(10)
-            // Keep a visible affordance and a keyboard/VoiceOver target at rest.
-            .opacity(self.hovered ? 1 : 0.65)
+            .opacity(revealed ? 1 : 0)
+            .scaleEffect(revealed || self.reduceMotion ? 1 : 0.88)
+            .allowsHitTesting(revealed)
+            .accessibilityHidden(!revealed)
             .help(L10n.string("Play Album"))
             .accessibilityLabel(L10n.string("Play Album") + ": " + self.album.title)
             .accessibilityIdentifier("album.play.\(self.album.id ?? 0)")
         }
-        .onHover { self.hovered = $0 }
-        .animation(self.reduceMotion ? nil : .easeOut(duration: 0.15), value: self.hovered)
+        .animation(self.reduceMotion ? nil : .easeOut(duration: 0.15), value: revealed)
     }
 }

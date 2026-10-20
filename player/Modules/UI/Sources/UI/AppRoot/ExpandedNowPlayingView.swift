@@ -6,8 +6,9 @@ import SwiftUI
 struct ExpandedNowPlayingView: View {
     let library: LibraryViewModel
     let lyricsVM: LyricsViewModel
-    var visualizerVM: VisualizerViewModel? = nil
-    var artworkNamespace: Namespace.ID? = nil
+    var visualizerVM: VisualizerViewModel?
+    enum Presentation: Equatable { case embedded, immersive }
+    var presentation: Presentation = .embedded
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The parent keeps this surface mounted behind the browser between visits.
     /// Gate its window-level commands while it is hidden.
@@ -18,23 +19,26 @@ struct ExpandedNowPlayingView: View {
 
     @AppStorage("ui.expandedNowPlaying.panel") private var selection: ExpandedNowPlayingPanel.Selection = .queue
 
-    private var nowPlaying: NowPlayingViewModel { self.library.nowPlaying }
+    private var nowPlaying: NowPlayingViewModel {
+        self.library.nowPlaying
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let isCompact = geometry.size.height < 620 || geometry.size.width < 920
-            let controlHeight: CGFloat = 58
+            let immersive = self.presentation == .immersive && !isCompact
+            let controlHeight: CGFloat = immersive ? 72 : 58
             let contentWidth = isCompact
                 ? geometry.size.width
-                : min(max(0, geometry.size.width - 64), 2100)
+                : min(max(0, geometry.size.width - (immersive ? 128 : 64)), immersive ? 1800 : 2100)
             let contentHeight = isCompact
                 ? max(0, geometry.size.height - controlHeight)
-                : min(max(0, geometry.size.height - controlHeight), 1160)
+                : min(max(0, geometry.size.height - controlHeight), immersive ? 1040 : 1160)
             let playerWidth = min(contentWidth * 0.43, 760)
             let heroHeight = min(250, max(230, contentHeight * 0.46))
             let layout = isCompact
                 ? AnyLayout(VStackLayout(spacing: 0))
-                : AnyLayout(HStackLayout(spacing: 28))
+                : AnyLayout(HStackLayout(spacing: immersive ? 48 : 28))
 
             VStack(spacing: 0) {
                 self.playbackControls
@@ -49,8 +53,10 @@ struct ExpandedNowPlayingView: View {
                         width: playerWidth,
                         height: contentHeight
                     )
-                    .frame(width: isCompact ? nil : playerWidth,
-                           height: isCompact ? heroHeight : contentHeight)
+                    .frame(
+                        width: isCompact ? nil : playerWidth,
+                        height: isCompact ? heroHeight : contentHeight
+                    )
 
                     ExpandedNowPlayingPanel(
                         library: self.library,
@@ -61,10 +67,10 @@ struct ExpandedNowPlayingView: View {
                         onNavigate: self.onNavigate,
                         visualizerVM: self.visualizerVM
                     )
-                        .frame(maxWidth: .infinity, maxHeight: isCompact ? .infinity : nil)
-                        .frame(height: isCompact ? nil : contentHeight)
-                        .padding(.horizontal, isCompact ? 24 : 0)
-                        .padding(.bottom, isCompact ? 16 : 0)
+                    .frame(maxWidth: .infinity, maxHeight: isCompact ? .infinity : nil)
+                    .frame(height: isCompact ? nil : contentHeight)
+                    .padding(.horizontal, isCompact ? 24 : 0)
+                    .padding(.bottom, isCompact ? 16 : 0)
                 }
                 .frame(width: contentWidth, height: contentHeight)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -90,16 +96,16 @@ struct ExpandedNowPlayingView: View {
     private var playbackControls: some View {
         HStack {
             Button(action: self.onClose) {
-                Image(systemName: "chevron.down")
+                Image(systemName: self.presentation == .immersive ? "xmark" : "chevron.down")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.textPrimary)
                     .frame(width: 32, height: 32)
                     .background(Color.bgSecondary.opacity(0.72), in: Circle())
             }
             .buttonStyle(.plain)
-            .help(L10n.string("Close"))
-            .accessibilityLabel(L10n.string("Close"))
-            .accessibilityIdentifier(A11y.NowPlaying.expandedClose)
+            .help(L10n.string(self.presentation == .immersive ? "Exit Immersive Mode" : "Close"))
+            .accessibilityLabel(L10n.string(self.presentation == .immersive ? "Exit Immersive Mode" : "Close"))
+            .accessibilityIdentifier(self.presentation == .immersive ? "immersive.close" : A11y.NowPlaying.expandedClose)
             .keyboardShortcut(self.isPresented ? .cancelAction : nil)
             .disabled(!self.isPresented)
 
@@ -230,7 +236,7 @@ struct ExpandedNowPlayingView: View {
             }
         }
         .frame(width: size, height: size)
-        .modifier(PlaybackArtworkMatch(namespace: self.artworkNamespace, isSource: self.isPresented, enabled: !self.reduceMotion))
+        .scaleEffect(self.isPresented || self.reduceMotion ? 1 : 0.96)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: .black.opacity(0.23), radius: 24, y: 14)
         .accessibilityLabel(
@@ -240,5 +246,4 @@ struct ExpandedNowPlayingView: View {
         )
         .accessibilityIdentifier(A11y.Immersive.artwork)
     }
-
 }

@@ -18,6 +18,7 @@ public final class TrackTableCoordinator: NSObject, NSTableViewDelegate {
     /// selection. `TrackTableUpdatePlan` diffs the next inputs against it (#450).
     var applied = TrackTableUpdatePlan.Applied()
     var hasAppliedInitialSnapshot = false
+    private var scrollObservation = TrackScrollObservation()
     /// Tracks the last scroll-request counter processed to avoid re-scrolling.
     var lastScrollRequest: Int = -1
 
@@ -62,8 +63,15 @@ public final class TrackTableCoordinator: NSObject, NSTableViewDelegate {
 
     @objc func didScroll(_ notification: Notification) {
         guard let clip = notification.object as? NSClipView, let onScroll = self.parent.onScroll else { return }
-        let offset = clip.bounds.minY
-        DispatchQueue.main.async { onScroll(offset) }
+        let bounds = clip.bounds
+        guard let offset = self.scrollObservation.verticalOffset(after: bounds) else { return }
+        let version = self.parent.rowsVersion
+        DispatchQueue.main.async { [weak self] in
+            // AppKit can advance or pixel-align the bounds before this queued
+            // update runs. The genuine input remains valid for these rows.
+            guard let self, self.parent.rowsVersion == version else { return }
+            onScroll(offset)
+        }
     }
 
     public func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -108,8 +116,7 @@ public final class TrackTableCoordinator: NSObject, NSTableViewDelegate {
             : baseFont
         (cell as? TrackTextCell)?.current = isNowPlaying
         if let titleCell = cell as? TrackTitleCell {
-            titleCell.indicator.isHidden = !isNowPlaying
-            titleCell.indicator.rootView = PlayingBarsIndicator(isPlaying: isNowPlaying && self.parent.isPlaying)
+            titleCell.updatePlaybackIndicator(isCurrent: isNowPlaying, isPlaying: self.parent.isPlaying)
         }
         // Prefix the column name for VoiceOver; rating speaks as "3 stars".
         let colTitle = TrackTable.columnSpecs.first { $0.id == column.identifier }?.title ?? column.title

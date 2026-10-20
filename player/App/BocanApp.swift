@@ -58,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// playback state. Replies only after the save, keeping the main actor free.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let isInitialScan = self.libraryViewModel?.isInitialScan == true
-        let isScanning = isInitialScan || self.libraryViewModel?.isScanning == true
+        let isScanning = self.libraryViewModel?.scanRequiresQuitConfirmation == true
         let isAnalyzing = self.dspViewModel?.isAnalyzing == true
 
         guard isScanning || isAnalyzing else {
@@ -511,6 +511,7 @@ struct BocanApp: App {
     private static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             "library.watchForChanges": true,
+            "library.scanOnLaunch": false,
             "ui.windowMode.restoresLastMode": true,
             "appearance.colorScheme": "dark",
             "appearance.accentColor": "nocturne",

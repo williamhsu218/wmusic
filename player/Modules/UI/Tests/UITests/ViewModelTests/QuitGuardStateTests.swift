@@ -39,7 +39,7 @@ struct QuitGuardStateTests {
         let vm = try await self.makeLibraryVM()
         vm.isScanning = true
         // AppDelegate guard condition: isScanning || isInitialScan || isAnalyzing
-        let guardActive = vm.isScanning || vm.isInitialScan
+        let guardActive = vm.scanRequiresQuitConfirmation
         #expect(guardActive == true)
     }
 
@@ -49,7 +49,7 @@ struct QuitGuardStateTests {
         vm.isInitialScan = true
         // First-load scenario: guard fires even if the generic isScanning flag
         // is checked by itself — isInitialScan implies a scan is active.
-        let guardActive = vm.isScanning || vm.isInitialScan
+        let guardActive = vm.scanRequiresQuitConfirmation
         #expect(guardActive == true)
     }
 
@@ -58,7 +58,7 @@ struct QuitGuardStateTests {
         let vm = try await self.makeLibraryVM()
         vm.isScanning = false
         vm.isInitialScan = false
-        let guardActive = vm.isScanning || vm.isInitialScan
+        let guardActive = vm.scanRequiresQuitConfirmation
         #expect(guardActive == false)
     }
 
@@ -70,6 +70,21 @@ struct QuitGuardStateTests {
         vm.cancelScan()
         #expect(vm.isScanning == false)
         #expect(vm.isInitialScan == false)
+    }
+
+    @Test("only a known populated startup scan bypasses scan confirmation")
+    func onlyRoutineLaunchScanBypassesGuard() async throws {
+        let vm = try await self.makeLibraryVM()
+        vm.isScanning = true
+        vm.activeScanIsStartup = true
+        #expect(vm.scanRequiresQuitConfirmation, "Unknown library count remains protected")
+        vm.scanStartedWithPopulatedLibrary = true
+        #expect(!vm.scanRequiresQuitConfirmation)
+        vm.isInitialScan = true
+        #expect(vm.scanRequiresQuitConfirmation)
+        vm.cancelScan()
+        #expect(!vm.scanRequiresQuitConfirmation)
+        #expect(!vm.activeScanIsStartup && !vm.scanStartedWithPopulatedLibrary)
     }
 
     // MARK: - DSPViewModel analysing state

@@ -177,6 +177,7 @@ public extension LibraryViewModel {
         guard let task = self.scanTask else {
             self.stopScanFlush()
             self.activeScanIsStartup = false
+            self.scanStartedWithPopulatedLibrary = false
             self.isScanning = false
             self.isInitialScan = false
             self.scanCurrentPath = ""
@@ -279,7 +280,7 @@ public extension LibraryViewModel {
                 return
             }
             guard !Task.isCancelled else { return }
-            self.triggerScan(mode: .quick, isStartup: true)
+            self.triggerScan(mode: .quick, isStartup: true, knownTrackCount: count)
         } catch {
             self.log.warning("scan.startup.check.failed", ["error": String(reflecting: error)])
         }
@@ -291,7 +292,7 @@ public extension LibraryViewModel {
         self.triggerScan(mode: mode)
     }
 
-    internal func triggerScan(mode: ScanMode, isStartup: Bool = false) {
+    internal func triggerScan(mode: ScanMode, isStartup: Bool = false, knownTrackCount: Int? = nil) {
         guard let scanner else { return }
         guard !self.isScanning else {
             self.log.debug("scan.trigger.skipped", ["mode": "\(mode)", "reason": "in-flight"])
@@ -299,6 +300,8 @@ public extension LibraryViewModel {
         }
         self.log.debug("scan.trigger", ["mode": "\(mode)"])
         self.activeScanIsStartup = isStartup
+        self.scanStartedWithPopulatedLibrary = (knownTrackCount ?? -1) > 0
+        self.isInitialScan = knownTrackCount == 0
         self.isScanning = true
         self.scanWalked = 0
         self.scanInserted = 0
@@ -323,16 +326,21 @@ public extension LibraryViewModel {
             // so the overlay covered already-populated content during the
             // routine startup rescan.
             let trackCount: Int
-            do {
-                trackCount = try await TrackRepository(database: self.database).count()
-            } catch {
-                // A failed count reads as an empty library, which flips the
-                // heuristic the wrong way and covers populated content with the
-                // full-screen overlay (#491).
-                self.log.warning("scan.trackCount.failed", ["error": String(reflecting: error)])
-                trackCount = -1
+            if let knownTrackCount {
+                trackCount = knownTrackCount
+            } else {
+                do {
+                    trackCount = try await TrackRepository(database: self.database).count()
+                } catch {
+                    // A failed count reads as an empty library, which flips the
+                    // heuristic the wrong way and covers populated content with the
+                    // full-screen overlay (#491).
+                    self.log.warning("scan.trackCount.failed", ["error": String(reflecting: error)])
+                    trackCount = -1
+                }
             }
             self.isInitialScan = trackCount == 0
+            self.scanStartedWithPopulatedLibrary = trackCount > 0
             let stream = await scanner.scan(mode: mode)
             for await event in stream {
                 self.handleScanEvent(event)
@@ -343,6 +351,7 @@ public extension LibraryViewModel {
                 self.log.warning("scan.stream.ended_without_finished")
                 self.stopScanFlush()
                 self.activeScanIsStartup = false
+                self.scanStartedWithPopulatedLibrary = false
                 self.isScanning = false
                 self.isInitialScan = false
                 self.scanCurrentPath = ""
@@ -388,6 +397,7 @@ public extension LibraryViewModel {
             self.scanSummary = self.activeScanIsStartup && !changed && summary.errors == 0
                 ? nil : summary
             self.activeScanIsStartup = false
+            self.scanStartedWithPopulatedLibrary = false
             self.isScanning = false
             self.scanCurrentPath = ""
             Task { [weak self] in

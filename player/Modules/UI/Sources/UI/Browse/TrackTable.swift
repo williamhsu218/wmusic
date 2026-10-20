@@ -98,7 +98,7 @@ public struct TrackTable: NSViewRepresentable {
     /// When non-nil the table allows intra-table drag-reorder and calls this
     /// closure (on the main thread) with SwiftUI-style `(source, destination)` indices.
     let onMove: ((IndexSet, Int) -> Void)?
-    var onScroll: ((CGFloat) -> Void)? = nil
+    var onScroll: ((CGFloat) -> Void)?
     var isPlaying = false
     @AppStorage("appearance.rowDensity") private var rowDensity = "spacious"
 
@@ -179,7 +179,12 @@ public struct TrackTable: NSViewRepresentable {
 
         let scrollView = self.makeScrollView(wrapping: tableView)
         scrollView.contentView.postsBoundsChangedNotifications = true
-        NotificationCenter.default.addObserver(coordinator, selector: #selector(TrackTableCoordinator.didScroll(_:)), name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
+        NotificationCenter.default.addObserver(
+            coordinator,
+            selector: #selector(TrackTableCoordinator.didScroll(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
         return scrollView
     }
 
@@ -291,16 +296,18 @@ public struct TrackTable: NSViewRepresentable {
         // 7 — Scroll to the now-playing track when requested.
         self.applyScrollIfNeeded(coordinator: coordinator, tableView: tableView)
         let visible = tableView.rows(in: tableView.visibleRect)
+        let titleIndex = tableView.tableColumns.firstIndex(where: { $0.identifier == .title })
         if visible.location != NSNotFound {
             for index in visible.location ..< NSMaxRange(visible) {
                 if let rowView = tableView.rowView(atRow: index, makeIfNecessary: false) as? TrackTableRowView {
                     rowView.current = index < coordinator.rows.count && coordinator.rows[index].id == self.nowPlayingTrackID
                 }
-                if let titleIndex = tableView.tableColumns.firstIndex(where: { $0.identifier == .title }),
+                if let titleIndex,
                    let cell = tableView.view(atColumn: titleIndex, row: index, makeIfNecessary: false) as? TrackTitleCell {
                     let current = index < coordinator.rows.count && coordinator.rows[index].id == self.nowPlayingTrackID
-                    cell.indicator.isHidden = !current
-                    cell.indicator.rootView = PlayingBarsIndicator(isPlaying: current && self.isPlaying)
+                    if current || cell.playbackState != nil {
+                        cell.updatePlaybackIndicator(isCurrent: current, isPlaying: self.isPlaying)
+                    }
                 }
             }
         }

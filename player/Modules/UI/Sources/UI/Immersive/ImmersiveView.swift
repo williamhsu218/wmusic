@@ -9,8 +9,12 @@ public struct ImmersiveView: View {
     private let onClose: () -> Void
     public nonisolated static let preferenceKey = "ui.immersive.visible"
 
-    public init(library: LibraryViewModel, lyricsVM: LyricsViewModel,
-                visualizerVM: VisualizerViewModel, onClose: @escaping () -> Void) {
+    public init(
+        library: LibraryViewModel,
+        lyricsVM: LyricsViewModel,
+        visualizerVM: VisualizerViewModel,
+        onClose: @escaping () -> Void
+    ) {
         self.library = library
         self.lyricsVM = lyricsVM
         self.visualizerVM = visualizerVM
@@ -20,7 +24,7 @@ public struct ImmersiveView: View {
     public var body: some View {
         ExpandedNowPlayingView(
             library: self.library, lyricsVM: self.lyricsVM,
-            visualizerVM: self.visualizerVM, isPresented: true,
+            visualizerVM: self.visualizerVM, presentation: .immersive, isPresented: true,
             onClose: self.onClose,
             onGetInfo: { id in
                 self.onClose()

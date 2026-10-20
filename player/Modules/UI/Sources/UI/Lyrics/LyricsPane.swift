@@ -64,7 +64,9 @@ public struct LyricsPane: View {
             }
             .frame(width: self.embedded ? nil : self.paneWidth)
             .background {
-                if self.reduceTransparency {
+                if self.embedded {
+                    Color.clear
+                } else if self.reduceTransparency {
                     Color(nsColor: .windowBackgroundColor)
                 } else {
                     Color.clear.background(.ultraThinMaterial)
@@ -72,31 +74,31 @@ public struct LyricsPane: View {
             }
             .overlay(alignment: .leading) {
                 if !self.embedded {
-                HStack(spacing: 0) {
-                    Rectangle()
-                        .fill(Color.clear)
-                        .frame(width: 6)
-                        .contentShape(Rectangle())
-                        .gesture(
-                            DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                                .onChanged { value in
-                                    if self.resizeDragStart == nil {
-                                        self.resizeDragStart = self.paneWidth
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 6)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                                    .onChanged { value in
+                                        if self.resizeDragStart == nil {
+                                            self.resizeDragStart = self.paneWidth
+                                        }
+                                        let newWidth = (self.resizeDragStart ?? self.paneWidth) - value.translation.width
+                                        self.paneWidth = max(220, min(600, newWidth))
                                     }
-                                    let newWidth = (self.resizeDragStart ?? self.paneWidth) - value.translation.width
-                                    self.paneWidth = max(220, min(600, newWidth))
+                                    .onEnded { _ in self.resizeDragStart = nil }
+                            )
+                            .onHover { hovering in
+                                if hovering {
+                                    NSCursor.resizeLeftRight.push()
+                                } else {
+                                    NSCursor.pop()
                                 }
-                                .onEnded { _ in self.resizeDragStart = nil }
-                        )
-                        .onHover { hovering in
-                            if hovering {
-                                NSCursor.resizeLeftRight.push()
-                            } else {
-                                NSCursor.pop()
                             }
-                        }
-                    Divider()
-                }
+                        Divider()
+                    }
                 }
             }
             .sheet(isPresented: self.$vm.isEditorPresented) {
@@ -118,36 +120,39 @@ public struct LyricsPane: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // Row 1: title, source badge, close
-            HStack(spacing: 6) {
-                Text(localized: "Lyrics")
-                    .font(.headline)
-                    .accessibilityAddTraits(.isHeader)
-
-                if let label = self.vm.documentSourceLabel {
-                    self.sourceBadge(label)
-                }
-
-                Spacer()
-
-                Button {
-                    if self.reduceMotion {
-                        self.vm.paneVisible = false
-                    } else {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            self.vm.paneVisible = false
-                        }
+            // Embedded panes already have the inspector title and close action.
+            if !self.embedded || self.vm.documentSourceLabel != nil {
+                HStack(spacing: 6) {
+                    if !self.embedded {
+                        Text(localized: "Lyrics")
+                            .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
                     }
-                } label: {
-                    Image(systemName: "xmark")
+
+                    if let label = self.vm.documentSourceLabel {
+                        self.sourceBadge(label)
+                    }
+
+                    Spacer()
+
+                    if !self.embedded {
+                        Button {
+                            if self.reduceMotion {
+                                self.vm.paneVisible = false
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    self.vm.paneVisible = false
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.string("Close lyrics pane (⌘L)"))
+                        .accessibilityLabel(L10n.string("Close lyrics pane"))
+                        .accessibilityIdentifier(A11y.Lyrics.closeButton)
+                    }
                 }
-                .buttonStyle(.plain)
-                .help(L10n.string("Close lyrics pane (⌘L)"))
-                .accessibilityLabel(L10n.string("Close lyrics pane"))
-                .accessibilityIdentifier(A11y.Lyrics.closeButton)
-                .opacity(self.embedded ? 0 : 1)
-                .disabled(self.embedded)
-                .accessibilityHidden(self.embedded)
             }
 
             // Row 2: font-size picker + action buttons

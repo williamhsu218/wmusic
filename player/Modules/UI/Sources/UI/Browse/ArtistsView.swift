@@ -17,6 +17,7 @@ public struct ArtistDetailView: View {
     @State private var liveAlbumScrollOffset: CGFloat = 0
     @ScaledMetric(relativeTo: .body) private var albumCardWidth: CGFloat = 140
     @State private var compactDetail = false
+    @State private var hoveredAlbumID: Int64?
     public init(artistID: Int64, library: LibraryViewModel) {
         self.artistID = artistID
         self.library = library
@@ -145,8 +146,13 @@ public struct ArtistDetailView: View {
         VStack(alignment: .leading, spacing: 4) {
             AlbumArtworkButton(
                 album: album,
-                onOpen: { if let id = album.id { self.openAlbum(id) } },
-                onPlay: { self.playAlbum(album) }
+                onOpen: {
+                    if let id = album.id {
+                        self.openAlbum(id)
+                    }
+                },
+                onPlay: { self.playAlbum(album) },
+                isActive: self.hoveredAlbumID == album.id
             )
 
             Text(album.title)
@@ -167,6 +173,13 @@ public struct ArtistDetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering {
+                self.hoveredAlbumID = album.id
+            } else if self.hoveredAlbumID == album.id {
+                self.hoveredAlbumID = nil
+            }
+        }
         .contextMenu {
             self.albumContextMenu(album: album)
         }

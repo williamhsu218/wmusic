@@ -28,8 +28,6 @@ public struct NowPlayingStrip: View {
     var scrobbleSettingsVM: ScrobbleSettingsViewModel?
     var openExpandedNowPlaying: () -> Void
     var prewarmExpandedNowPlaying: () -> Void
-    var artworkNamespace: Namespace.ID?
-    var expanded: Bool
     @AppStorage("lyrics.paneVisible") private var inspectorVisible = false
     @AppStorage("ui.inspector.selection") private var inspectorSelection = "lyrics"
     @AppStorage("visualizer.paneVisible") private var visualizerVisible = false
@@ -38,16 +36,12 @@ public struct NowPlayingStrip: View {
         vm: NowPlayingViewModel,
         scrobbleSettingsVM: ScrobbleSettingsViewModel? = nil,
         openExpandedNowPlaying: @escaping () -> Void = {},
-        prewarmExpandedNowPlaying: @escaping () -> Void = {},
-        artworkNamespace: Namespace.ID? = nil,
-        expanded: Bool = false
+        prewarmExpandedNowPlaying: @escaping () -> Void = {}
     ) {
         self.vm = vm
         self.scrobbleSettingsVM = scrobbleSettingsVM
         self.openExpandedNowPlaying = openExpandedNowPlaying
         self.prewarmExpandedNowPlaying = prewarmExpandedNowPlaying
-        self.artworkNamespace = artworkNamespace
-        self.expanded = expanded
     }
 
     public var body: some View {
@@ -74,11 +68,12 @@ public struct NowPlayingStrip: View {
                                 self.inspectorVisible = true
                             }
                         } label: { Image(systemName: "list.bullet") }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(self.inspectorVisible && self.inspectorSelection == "queue" ? Color.accentColor : Color.textSecondary)
-                        .help(L10n.string("Playing Queue"))
-                        .accessibilityLabel(L10n.string("Playing Queue"))
-                        .accessibilityIdentifier("nowPlayingStrip.queue")
+                            .buttonStyle(.plain)
+                            .foregroundStyle(self.inspectorVisible && self.inspectorSelection == "queue" ? Color.accentColor : Color
+                                .textSecondary)
+                            .help(L10n.string("Playing Queue"))
+                            .accessibilityLabel(L10n.string("Playing Queue"))
+                            .accessibilityIdentifier("nowPlayingStrip.queue")
                     }
                 }
                 .frame(width: sideWidth, alignment: .trailing)
@@ -104,7 +99,9 @@ public struct NowPlayingStrip: View {
 
     /// The drawn snapshot of the current item. It changes once per track,
     /// after the title, subtitle, cover and badges are all known.
-    private var display: NowPlayingDisplay { self.vm.display }
+    private var display: NowPlayingDisplay {
+        self.vm.display
+    }
 
     /// The cover and text keep their view identity across track changes:
     /// the text is replaced in place and only a different cover cross-fades.
@@ -144,7 +141,6 @@ public struct NowPlayingStrip: View {
                 .transition(.opacity)
             }
             .frame(width: 48, height: 48)
-            .modifier(PlaybackArtworkMatch(namespace: self.artworkNamespace, isSource: !self.expanded, enabled: !self.reduceMotion))
             .animation(self.reduceMotion ? nil : .easeOut(duration: 0.15), value: self.display.artworkIdentity)
             .accessibilityHidden(true)
         }
@@ -154,7 +150,9 @@ public struct NowPlayingStrip: View {
         .accessibilityLabel(L10n.string("Now Playing"))
         .accessibilityIdentifier(A11y.NowPlaying.artworkButton)
         .onHover { isHovering in
-            if isHovering { self.prewarmExpandedNowPlaying() }
+            if isHovering {
+                self.prewarmExpandedNowPlaying()
+            }
         }
     }
 
@@ -341,11 +339,16 @@ public struct NowPlayingStrip: View {
         NowPlayingPanelButtons(vm: self.vm, scrobbleSettingsVM: self.scrobbleSettingsVM)
     }
 
+    private var previewPosition: TimeInterval? {
+        guard self.scrubDragFraction == nil, self.vm.duration > 0, let fraction = self.hoverFraction else { return nil }
+        return fraction * self.vm.duration
+    }
+
     private var scrubber: some View {
         HStack(spacing: 6) {
-            Text(Formatters.duration(self.displayPosition))
+            Text(Formatters.duration(self.previewPosition ?? self.displayPosition))
                 .font(Typography.caption)
-                .foregroundStyle(Color.textSecondary)
+                .foregroundStyle(self.previewPosition == nil ? Color.textSecondary : Color.accentColor)
                 .monospacedDigit()
                 .lineLimit(1)
                 .frame(width: self.timeLabelWidth, alignment: .trailing)
@@ -397,24 +400,6 @@ public struct NowPlayingStrip: View {
                 case .ended:
                     self.hoverFraction = nil
                 }
-            }
-            .overlay {
-                GeometryReader { geometry in
-                    Color.clear
-                        .overlay(alignment: .topLeading) {
-                            if let fraction = self.hoverFraction, self.vm.duration > 0 {
-                                Text(Formatters.duration(fraction * self.vm.duration))
-                                    .font(.caption.monospacedDigit())
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(.regularMaterial, in: Capsule())
-                                    .fixedSize()
-                                    .offset(x: max(0, min(geometry.size.width - 60, fraction * geometry.size.width - 30)), y: -28)
-                            }
-                        }
-                }
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
             }
             // CUE marker ticks (ADR-087): |------|-----|-|---- along the
             // slider's bottom edge. Hidden below two markers (inert sets
@@ -506,19 +491,5 @@ public struct NowPlayingStrip: View {
     /// duration) widens once when its clock passes an hour (#563).
     private var timeLabelWidth: Double {
         Formatters.timeLabelWidth(longest: max(self.vm.duration, self.displayPosition))
-    }
-}
-
-struct PlaybackArtworkMatch: ViewModifier {
-    let namespace: Namespace.ID?
-    let isSource: Bool
-    let enabled: Bool
-
-    @ViewBuilder func body(content: Content) -> some View {
-        if let namespace, self.enabled {
-            content.matchedGeometryEffect(id: "playback.artwork", in: namespace, isSource: self.isSource)
-        } else {
-            content
-        }
     }
 }

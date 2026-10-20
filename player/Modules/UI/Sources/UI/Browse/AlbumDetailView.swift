@@ -16,6 +16,8 @@ public struct AlbumDetailView: View {
     @State private var artistName = ""
     @State private var artwork: NSImage?
     @State private var collapsed = false
+    @State private var expandedHeaderHeight: CGFloat = 220
+    @State private var compactHeaderHeight: CGFloat = 80
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(albumID: Int64, library: LibraryViewModel) {
@@ -25,9 +27,17 @@ public struct AlbumDetailView: View {
 
     public var body: some View {
         GeometryReader { geometry in
+            let compact = self.collapsed || geometry.size.height < 460
             VStack(spacing: 0) {
                 // Header
-                self.header(compact: self.collapsed || geometry.size.height < 460)
+                self.header(compact: compact)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        if compact {
+                            self.compactHeaderHeight = height
+                        } else {
+                            self.expandedHeaderHeight = height
+                        }
+                    }
 
                 Divider()
 
@@ -35,13 +45,17 @@ public struct AlbumDetailView: View {
                 TracksView(
                     vm: self.library.tracks, library: self.library,
                     onScroll: { offset in
-                        let next = self.collapsed ? offset > 4 : offset > 64
+                        let next = AlbumHeaderCollapsePolicy.isCollapsed(
+                            after: offset, wasCollapsed: self.collapsed,
+                            expandedHeight: self.expandedHeaderHeight, compactHeight: self.compactHeaderHeight
+                        )
                         if next != self.collapsed {
                             withAnimation(self.reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                                 self.collapsed = next
                             }
                         }
-                    })
+                    }
+                )
             }
         }
         // task(id:), not task: switching .album(A) -> .album(B) keeps this
@@ -76,6 +90,7 @@ public struct AlbumDetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityLabel(L10n.string("Play Album"))
+                .disabled(self.library.tracks.tracks.isEmpty)
                 Button {
                     Task { await self.playShuffled() }
                 } label: {
@@ -83,6 +98,7 @@ public struct AlbumDetailView: View {
                 }
                 .buttonStyle(.bordered)
                 .accessibilityLabel(L10n.string("Shuffle Album"))
+                .disabled(self.library.tracks.tracks.isEmpty)
             }
             .padding(12)
             .background { ArtworkAmbientBackground(image: self.artwork) }
@@ -130,7 +146,8 @@ public struct AlbumDetailView: View {
                                 .padding(.vertical, 2)
                                 .background(Color.bgTertiary, in: Capsule())
                                 .accessibilityLabel(
-                                    L10n.string("Release kind: \(ReleaseKindLabel.string(for: kind))"))
+                                    L10n.string("Release kind: \(ReleaseKindLabel.string(for: kind))")
+                                )
                         }
                         if let total = album?.totalTracks {
                             Text(localized: "\(total) songs")
@@ -142,11 +159,7 @@ public struct AlbumDetailView: View {
                     // Play / Shuffle buttons (ADR-005 audit H4).
                     HStack(spacing: 8) {
                         Button {
-                            Task {
-                                if let first = library.tracks.tracks.first {
-                                    await self.library.play(track: first)
-                                }
-                            }
+                            Task { await self.library.playAlbum(albumID: self.albumID) }
                         } label: {
                             Label(L10n.string("Play"), systemImage: "play.fill")
                                 .font(Typography.body)
@@ -155,6 +168,7 @@ public struct AlbumDetailView: View {
                         .controlSize(.large)
                         .accessibilityLabel(L10n.string("Play Album"))
                         .help(L10n.string("Play this album from the first track"))
+                        .disabled(self.library.tracks.tracks.isEmpty)
 
                         Button {
                             Task { await self.playShuffled() }
@@ -198,7 +212,8 @@ public struct AlbumDetailView: View {
             } else {
                 GradientPlaceholder(seed: Int(self.albumID))
                     .accessibilityLabel(
-                        L10n.string("\(self.album?.title ?? L10n.string("Album")) artwork placeholder"))
+                        L10n.string("\(self.album?.title ?? L10n.string("Album")) artwork placeholder")
+                    )
             }
         }
         .frame(width: size, height: size)
@@ -209,9 +224,8 @@ public struct AlbumDetailView: View {
     // MARK: - Data loading
 
     private func playShuffled() async {
-        let tracks = self.library.tracks.tracks
-        guard !tracks.isEmpty else { return }
-        await self.library.play(tracks: tracks, shuffle: true)
+        guard !self.library.tracks.tracks.isEmpty else { return }
+        await self.library.playAlbum(albumID: self.albumID, shuffle: true)
     }
 
     private func load() async {
@@ -231,8 +245,8 @@ public struct AlbumDetailView: View {
                     "albumDetail.artist.failed",
                     {
                         try await artistRepo.fetch(id: artistID).name
-                    })
-                {
+                    }
+                ) {
                     self.artistName = name
                 }
             }
@@ -257,7 +271,8 @@ public struct AlbumDetailView: View {
                 [
                     "albumID": self.albumID,
                     "error": String(reflecting: error),
-                ])
+                ]
+            )
         }
     }
 }

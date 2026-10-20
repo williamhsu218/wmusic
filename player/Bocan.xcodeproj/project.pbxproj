@@ -60,6 +60,7 @@
 		2F10190EBC449B79B6806730 /* Library in Frameworks */ = {isa = PBXBuildFile; productRef = D12DF4C04E3DB095C79E72AA /* Library */; };
 		2F34CE52EF91906E320FB425 /* SurfaceCrawler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D814D9D39C8E3F75FA33680 /* SurfaceCrawler.swift */; };
 		2F3E9CE4D8E9D9998E68F768 /* SearchSurfaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53FA4B334EF1F8493BE22095 /* SearchSurfaceTests.swift */; };
+		2F579172D954EBBA2F031C3D /* AlbumHeaderStabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CACB67EF8A873910049A5A61 /* AlbumHeaderStabilityTests.swift */; };
 		3040E954FD2877629B29F18F /* HistoryConventionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1F913337FE7D80664009D9 /* HistoryConventionTests.swift */; };
 		30FF0315CF8C0B599D8A50AC /* SubsonicCapabilityObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D68C949E587C48064DA7121 /* SubsonicCapabilityObserver.swift */; };
 		3271E3DB75439910AA2F11DA /* ChannelLayoutLabelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E75F39506E492E25A3029604 /* ChannelLayoutLabelTests.swift */; };
@@ -509,6 +510,7 @@
 		C8CF7E346ACE0ACFBD6D7A20 /* SubsonicSettingsViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubsonicSettingsViewModelTests.swift; sourceTree = "<group>"; };
 		CA2045323B98669539249F86 /* BackgroundServiceRetentionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundServiceRetentionTests.swift; sourceTree = "<group>"; };
 		CA4345B74618EDB42D7A1E53 /* TrackMenuSelectAllTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackMenuSelectAllTests.swift; sourceTree = "<group>"; };
+		CACB67EF8A873910049A5A61 /* AlbumHeaderStabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlbumHeaderStabilityTests.swift; sourceTree = "<group>"; };
 		CCA742F3F8F01D90BE366925 /* MenuInvocationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuInvocationTests.swift; sourceTree = "<group>"; };
 		CCB19AAB29930C92F958AB05 /* SubsonicSongNowPlayingSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubsonicSongNowPlayingSelectionTests.swift; sourceTree = "<group>"; };
 		CEA16B515E4559A3EB0AD4A1 /* LaunchLoadingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchLoadingView.swift; sourceTree = "<group>"; };
@@ -729,6 +731,7 @@
 			isa = PBXGroup;
 			children = (
 				78CF89F4E72E981CF31E1221 /* AddToPlaylistRefreshConventionTests.swift */,
+				CACB67EF8A873910049A5A61 /* AlbumHeaderStabilityTests.swift */,
 				5EC15BE967BDEA660DF47C9D /* AlbumsGridConventionTests.swift */,
 				82F9CA039EA2E967BAA21F51 /* AlbumsViewModelTests.swift */,
 				943FEF240D1BC56F1CD74232 /* AppKitTestIsolationConventionTests.swift */,
@@ -1286,6 +1289,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CA4900ACCEFF2672FAB5A1FC /* AddToPlaylistRefreshConventionTests.swift in Sources */,
+				2F579172D954EBBA2F031C3D /* AlbumHeaderStabilityTests.swift in Sources */,
 				3CA53E6687E0C55B53C357A9 /* AlbumsGridConventionTests.swift in Sources */,
 				D4FF663D31850CABBFD89C5A /* AlbumsViewModelTests.swift in Sources */,
 				4AC5174EFD4ECB70FC7F8ECF /* AppKitTestIsolationConventionTests.swift in Sources */,
@@ -1612,7 +1616,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/Bocan.entitlements;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -1748,7 +1752,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/Bocan.entitlements;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;

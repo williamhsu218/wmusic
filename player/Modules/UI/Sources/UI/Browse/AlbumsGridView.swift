@@ -1,3 +1,4 @@
+import AppKit
 import Persistence
 import SwiftUI
 
@@ -10,11 +11,12 @@ private struct AlbumCell: View {
     let trackCount: Int?
     let onOpen: () -> Void
     let onPlay: () -> Void
+    let isActive: Bool
 
     var body: some View {
         let displayArtist = self.artistName ?? L10n.string("Various Artists")
         VStack(alignment: .leading, spacing: 4) {
-            AlbumArtworkButton(album: self.album, onOpen: self.onOpen, onPlay: self.onPlay)
+            AlbumArtworkButton(album: self.album, onOpen: self.onOpen, onPlay: self.onPlay, isActive: self.isActive)
             Button(action: self.onOpen) {
                 VStack(alignment: .leading, spacing: 4) {
                     // Title
@@ -86,13 +88,13 @@ private struct AlbumInteractiveCell<Menu: View>: View {
             .focusable()
             .focused(self.$focusedAlbumID, equals: self.album.id)
             .focusEffectDisabled()
-            .highPriorityGesture(TapGesture().modifiers(.command).onEnded { self.onCmdTap() })
             .onHover { self.isHovered = $0 }
             .contextMenu { self.contextMenuContent() }
             // Gesture-composed clicks don't synthesize an assistive activation,
             // so expose both outcomes as explicit accessibility actions.
             .accessibilityAction { self.onOpen() }
             .accessibilityAction(named: L10n.string("Play Album")) { self.onPlay() }
+            .accessibilityValue(self.isSelected ? L10n.string("Selected") : "")
             .onKeyPress(keys: [.return, .space, .leftArrow, .rightArrow, .upArrow, .downArrow]) {
                 self.handleKeyPress($0)
             }
@@ -103,7 +105,8 @@ private struct AlbumInteractiveCell<Menu: View>: View {
     private var styledCell: some View {
         AlbumCell(
             album: self.album, artistName: self.artistName, trackCount: self.trackCount,
-            onOpen: self.onTap, onPlay: self.onPlay
+            onOpen: { self.activate(self.onTap) }, onPlay: { self.activate(self.onPlay) },
+            isActive: self.isHovered || self.isFocused
         )
         .padding(4)
         .background(
@@ -140,6 +143,14 @@ private struct AlbumInteractiveCell<Menu: View>: View {
             return .ignored
         }
         return .handled
+    }
+
+    private func activate(_ action: () -> Void) {
+        if (NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags).contains(.command) {
+            self.onCmdTap()
+        } else {
+            action()
+        }
     }
 }
 
@@ -329,7 +340,8 @@ public struct AlbumsGridView: View {
                         1,
                         Int(
                             (usable + Theme.albumGridSpacing) / (Theme.albumGridMinWidth + Theme.albumGridSpacing)
-                        ))
+                        )
+                    )
                 },
                 action: { self.gridColumnCount = $0 }
             )
@@ -383,8 +395,7 @@ public struct AlbumsGridView: View {
         let albums = self.vm.albums
         guard !albums.isEmpty else { return }
         guard let currentID = self.focusedAlbumID,
-            let currentIdx = albums.firstIndex(where: { $0.id == currentID })
-        else {
+              let currentIdx = albums.firstIndex(where: { $0.id == currentID }) else {
             self.focusedAlbumID = albums.first?.id
             return
         }
@@ -438,7 +449,8 @@ public struct AlbumsGridView: View {
                             Task { await self.library.setAlbumForceGapless(albumID: id, forced: forced) }
                         }
                     }
-                ))
+                )
+            )
             Toggle(
                 L10n.string("Exclude from Shuffle"),
                 isOn: Binding(
@@ -450,7 +462,8 @@ public struct AlbumsGridView: View {
                             }
                         }
                     }
-                ))
+                )
+            )
         }
 
         Divider()
@@ -480,8 +493,8 @@ public struct AlbumsGridView: View {
                 "albumsGrid.openInspector.failed",
                 {
                     try await repo.fetchAll(albumID: id)
-                })
-            {
+                }
+            ) {
                 collected.append(contentsOf: tracks)
             }
         }

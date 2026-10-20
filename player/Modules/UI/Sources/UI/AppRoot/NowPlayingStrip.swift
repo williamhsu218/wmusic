@@ -15,6 +15,9 @@ public struct NowPlayingStrip: View {
     /// doesn't fight live `vm.position` updates; seeking happens on release.
     @AppStorage("appearance.accentColor") private var accentColorKey = "system"
     @State private var scrubDragFraction: Double?
+    @State private var scrubTrackID: String?
+    @State private var hoverFraction: Double?
+    @State private var scrubberWidth: CGFloat = 1
     /// Menu-to-strip signal (BocanCommands sets it); cleared at launch by BocanApp.
     @AppStorage("scrobble.showRecentSheet") private var showRecentScrobbles = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -25,31 +28,62 @@ public struct NowPlayingStrip: View {
     var scrobbleSettingsVM: ScrobbleSettingsViewModel?
     var openExpandedNowPlaying: () -> Void
     var prewarmExpandedNowPlaying: () -> Void
+    var artworkNamespace: Namespace.ID?
+    var expanded: Bool
+    @AppStorage("lyrics.paneVisible") private var inspectorVisible = false
+    @AppStorage("ui.inspector.selection") private var inspectorSelection = "lyrics"
+    @AppStorage("visualizer.paneVisible") private var visualizerVisible = false
 
     public init(
         vm: NowPlayingViewModel,
         scrobbleSettingsVM: ScrobbleSettingsViewModel? = nil,
         openExpandedNowPlaying: @escaping () -> Void = {},
-        prewarmExpandedNowPlaying: @escaping () -> Void = {}
+        prewarmExpandedNowPlaying: @escaping () -> Void = {},
+        artworkNamespace: Namespace.ID? = nil,
+        expanded: Bool = false
     ) {
         self.vm = vm
         self.scrobbleSettingsVM = scrobbleSettingsVM
         self.openExpandedNowPlaying = openExpandedNowPlaying
         self.prewarmExpandedNowPlaying = prewarmExpandedNowPlaying
+        self.artworkNamespace = artworkNamespace
+        self.expanded = expanded
     }
 
     public var body: some View {
-        HStack(spacing: 6) {
-            self.trackIdentity
-            Spacer(minLength: 0)
-            self.transport
-            Spacer(minLength: 0)
-            self.volumeAndScrubber
-            Spacer(minLength: 0)
-            Divider()
-                .frame(height: 32)
-                .padding(.horizontal, 4)
-            self.panelButtons
+        GeometryReader { geometry in
+            let sideWidth = min(320, max(220, geometry.size.width * 0.25))
+            HStack(spacing: 16) {
+                self.trackIdentity
+                    .frame(width: sideWidth, alignment: .leading)
+                VStack(spacing: 8) {
+                    self.transport
+                    self.scrubber
+                }
+                .frame(maxWidth: .infinity)
+                VStack(alignment: .trailing, spacing: 10) {
+                    self.volumeRow
+                    HStack(spacing: 16) {
+                        self.panelButtons
+                        Button {
+                            self.visualizerVisible = false
+                            if self.inspectorSelection == "queue", self.inspectorVisible {
+                                self.inspectorVisible = false
+                            } else {
+                                self.inspectorSelection = "queue"
+                                self.inspectorVisible = true
+                            }
+                        } label: { Image(systemName: "list.bullet") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(self.inspectorVisible && self.inspectorSelection == "queue" ? Color.accentColor : Color.textSecondary)
+                        .help(L10n.string("Playing Queue"))
+                        .accessibilityLabel(L10n.string("Playing Queue"))
+                        .accessibilityIdentifier("nowPlayingStrip.queue")
+                    }
+                }
+                .frame(width: sideWidth, alignment: .trailing)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .frame(height: Theme.nowPlayingStripHeight)
         .padding(.horizontal, 16)
@@ -110,6 +144,7 @@ public struct NowPlayingStrip: View {
                 .transition(.opacity)
             }
             .frame(width: 48, height: 48)
+            .modifier(PlaybackArtworkMatch(namespace: self.artworkNamespace, isSource: !self.expanded, enabled: !self.reduceMotion))
             .animation(self.reduceMotion ? nil : .easeOut(duration: 0.15), value: self.display.artworkIdentity)
             .accessibilityHidden(true)
         }
@@ -225,19 +260,7 @@ public struct NowPlayingStrip: View {
                 .padding(.top, 2)
             }
         }
-        // Centred in the bar, and 160...380 rather than 120...300 (#536).
-        //
-        // Measured: everything else on the strip costs 668 pt before this
-        // block and the scrubber divide what is left, and the transport alone
-        // is 317 of it. The floor is what pays at a narrow window: at 900 pt
-        // the block is pinned to it, and 160 shows appreciably more title than
-        // 120 did. The ceiling only bites above about 1300 pt, where a long
-        // title now gets the room instead of stopping at 300. In between, at
-        // the 1100 pt default window, the block already takes close to its
-        // ideal width and neither bound moves it; a longer title still
-        // truncates there, and only a narrower transport or a minimum window
-        // width would change that.
-        .frame(minWidth: 160, maxWidth: 380, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         // Announce the completed snapshot, so the artist is included.
         .onChange(of: self.display.title) { _, title in
             guard self.vm.nowPlayingTrackID != nil, !title.isEmpty else { return }
@@ -318,18 +341,6 @@ public struct NowPlayingStrip: View {
         NowPlayingPanelButtons(vm: self.vm, scrobbleSettingsVM: self.scrobbleSettingsVM)
     }
 
-    private var volumeAndScrubber: some View {
-        VStack(spacing: 4) {
-            self.scrubber
-            self.volumeRow
-        }
-        // 300 rather than 340. At a narrow window the scrubber is squeezed
-        // well below either figure, and asking for 340 made it worse: the
-        // 0:00 and 5:00 labels closed on the thumb until they touched it at
-        // 900 pt. Asking for less leaves the slider a legible track.
-        .frame(maxWidth: 300)
-    }
-
     private var scrubber: some View {
         HStack(spacing: 6) {
             Text(Formatters.duration(self.displayPosition))
@@ -354,9 +365,12 @@ public struct NowPlayingStrip: View {
                 ),
                 in: 0 ... 1
             ) { editing in
-                if !editing, let fraction = self.scrubDragFraction {
+                if editing {
+                    self.scrubTrackID = self.vm.title + "|" + String(describing: self.vm.nowPlayingTrackID)
+                } else if let fraction = self.scrubDragFraction {
                     let target = fraction * self.vm.duration
                     self.scrubDragFraction = nil
+                    guard self.scrubTrackID == self.vm.title + "|" + String(describing: self.vm.nowPlayingTrackID) else { return }
                     Task { await self.vm.scrub(to: target) }
                 }
             }
@@ -375,6 +389,33 @@ public struct NowPlayingStrip: View {
                 Task { await self.vm.scrub(to: pos) }
             }
             .accessibilityIdentifier(A11y.NowPlaying.scrubber)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { self.scrubberWidth = $0 }
+            .onContinuousHover { phase in
+                switch phase {
+                case let .active(location):
+                    self.hoverFraction = max(0, min(1, (location.x - 7) / max(1, self.scrubberWidth - 14)))
+                case .ended:
+                    self.hoverFraction = nil
+                }
+            }
+            .overlay {
+                GeometryReader { geometry in
+                    Color.clear
+                        .overlay(alignment: .topLeading) {
+                            if let fraction = self.hoverFraction, self.vm.duration > 0 {
+                                Text(Formatters.duration(fraction * self.vm.duration))
+                                    .font(.caption.monospacedDigit())
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(.regularMaterial, in: Capsule())
+                                    .fixedSize()
+                                    .offset(x: max(0, min(geometry.size.width - 60, fraction * geometry.size.width - 30)), y: -28)
+                            }
+                        }
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
             // CUE marker ticks (ADR-087): |------|-----|-|---- along the
             // slider's bottom edge. Hidden below two markers (inert sets
             // never load, but the guard keeps the rule in one place).
@@ -465,5 +506,19 @@ public struct NowPlayingStrip: View {
     /// duration) widens once when its clock passes an hour (#563).
     private var timeLabelWidth: Double {
         Formatters.timeLabelWidth(longest: max(self.vm.duration, self.displayPosition))
+    }
+}
+
+struct PlaybackArtworkMatch: ViewModifier {
+    let namespace: Namespace.ID?
+    let isSource: Bool
+    let enabled: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if let namespace, self.enabled {
+            content.matchedGeometryEffect(id: "playback.artwork", in: namespace, isSource: self.isSource)
+        } else {
+            content
+        }
     }
 }

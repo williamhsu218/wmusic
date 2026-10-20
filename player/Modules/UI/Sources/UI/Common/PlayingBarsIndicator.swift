@@ -15,6 +15,7 @@ import SwiftUI
 struct PlayingBarsIndicator: View {
     /// Whether the bars should animate. `false` freezes the bars in place.
     let isPlaying: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Tint applied to all three bars.
     var color: Color = .accentColor
@@ -33,14 +34,14 @@ struct PlayingBarsIndicator: View {
     private let updateInterval: TimeInterval = 1.0 / 6.0
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: self.updateInterval, paused: !self.isPlaying)) { context in
+        TimelineView(.animation(minimumInterval: self.updateInterval, paused: !self.isPlaying || self.reduceMotion)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             HStack(alignment: .bottom, spacing: 1) {
                 ForEach(0 ..< 3, id: \.self) { i in
                     let phase = self.phases[i]
                     // sin(...) ∈ [-1, 1] → height ratio ∈ [0.25, 1.0].
                     let raw = sin((t * self.frequency * 2 * .pi) + phase)
-                    let ratio = self.isPlaying ? (0.25 + 0.375 * (raw + 1)) : 0.35
+                    let ratio = self.isPlaying && !self.reduceMotion ? (0.25 + 0.375 * (raw + 1)) : 0.35
                     Capsule(style: .continuous)
                         .fill(self.color)
                         .frame(width: 2, height: max(2, self.size.height * ratio))

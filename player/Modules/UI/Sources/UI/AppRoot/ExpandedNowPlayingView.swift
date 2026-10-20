@@ -6,6 +6,9 @@ import SwiftUI
 struct ExpandedNowPlayingView: View {
     let library: LibraryViewModel
     let lyricsVM: LyricsViewModel
+    var visualizerVM: VisualizerViewModel? = nil
+    var artworkNamespace: Namespace.ID? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The parent keeps this surface mounted behind the browser between visits.
     /// Gate its window-level commands while it is hidden.
     let isPresented: Bool
@@ -55,7 +58,8 @@ struct ExpandedNowPlayingView: View {
                         selection: self.selection,
                         isPresented: self.isPresented,
                         onGetInfo: self.onGetInfo,
-                        onNavigate: self.onNavigate
+                        onNavigate: self.onNavigate,
+                        visualizerVM: self.visualizerVM
                     )
                         .frame(maxWidth: .infinity, maxHeight: isCompact ? .infinity : nil)
                         .frame(height: isCompact ? nil : contentHeight)
@@ -67,14 +71,7 @@ struct ExpandedNowPlayingView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .background {
-                Color.bgPrimary
-                    .overlay {
-                        LinearGradient(
-                            colors: [Color.accentColor.opacity(0.11), .clear, Color.bgSecondary.opacity(0.25)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    }
+                ArtworkAmbientBackground(image: self.nowPlaying.display.artwork)
                     .ignoresSafeArea()
             }
         }
@@ -113,6 +110,10 @@ struct ExpandedNowPlayingView: View {
                     .tag(ExpandedNowPlayingPanel.Selection.queue)
                 Label(L10n.string("Lyrics"), systemImage: "quote.bubble")
                     .tag(ExpandedNowPlayingPanel.Selection.lyrics)
+                if self.visualizerVM != nil {
+                    Label(L10n.string("Visualizer"), systemImage: "waveform")
+                        .tag(ExpandedNowPlayingPanel.Selection.visualizer)
+                }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -229,6 +230,7 @@ struct ExpandedNowPlayingView: View {
             }
         }
         .frame(width: size, height: size)
+        .modifier(PlaybackArtworkMatch(namespace: self.artworkNamespace, isSource: self.isPresented, enabled: !self.reduceMotion))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: .black.opacity(0.23), radius: 24, y: 14)
         .accessibilityLabel(

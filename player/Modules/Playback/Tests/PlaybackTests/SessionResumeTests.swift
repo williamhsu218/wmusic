@@ -1,5 +1,5 @@
-@preconcurrency import AVFoundation
 import AudioEngine
+@preconcurrency import AVFoundation
 import Foundation
 import Persistence
 import Testing
@@ -7,6 +7,49 @@ import Testing
 
 @Suite("Session resume", .serialized)
 struct SessionResumeTests {
+    @Test("loaded seeks use decoder duration even when library metadata is stale")
+    func loadedSeekUsesDecoderDuration() async throws {
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("seek-\(UUID()).wav")
+        try self.writeFixture(to: fixture)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let db = try await Database(location: .inMemory)
+        let engine = AudioEngine()
+        let player = QueuePlayer(engine: engine, database: db, resumeDefaultsSuiteName: "wmusic.seek.\(UUID())")
+        await player.waitUntilActivated()
+        let item = QueueItem(
+            trackID: 1,
+            bookmark: nil,
+            fileURL: fixture.absoluteString,
+            duration: 1,
+            sourceFormat: self.item(url: fixture).sourceFormat
+        )
+        try await player.play(items: [item])
+        try await player.seek(to: 4)
+        #expect(await abs(player.currentTime - 4) < 0.2)
+        await player.stop()
+    }
+
+    @Test("seeking a restored unloaded track updates its deferred resume without opening the file")
+    func seekBeforeFirstPlay() async throws {
+        let db = try await Database(location: .inMemory)
+        let suite = "wmusic.resume-tests.\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let item = self.item(url: URL(filePath: "/unavailable/restore.wav"))
+        defaults.set(12.0, forKey: "playback.resumePosition")
+        await QueuePersistence(database: db).saveImmediately(
+            items: [item], currentIndex: 0, repeatMode: .off, shuffleState: .off
+        )
+        let engine = AudioEngine()
+        let player = QueuePlayer(engine: engine, database: db, resumeDefaultsSuiteName: suite)
+        await player.waitUntilActivated()
+        try await player.seek(to: 4)
+        #expect(await player.currentTime == 4)
+        #expect(await engine.playbackState == .idle)
+        await player.prepareForTermination()
+        #expect(defaults.double(forKey: "playback.resumePosition") == 4)
+    }
+
     private func writeFixture(to url: URL) throws {
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2))
         let file = try AVAudioFile(forWriting: url, settings: format.settings)
@@ -15,12 +58,17 @@ struct SessionResumeTests {
         for channel in 0 ..< 2 {
             buffer.floatChannelData?[channel].initialize(repeating: 0, count: 44100)
         }
-        for _ in 0 ..< 30 { try file.write(from: buffer) }
+        for _ in 0 ..< 30 {
+            try file.write(from: buffer)
+        }
     }
 
     private func item(url: URL) -> QueueItem {
         QueueItem(
-            trackID: 1, bookmark: nil, fileURL: url.absoluteString, duration: 30,
+            trackID: 1,
+            bookmark: nil,
+            fileURL: url.absoluteString,
+            duration: 30,
             sourceFormat: AudioSourceFormat(
                 sampleRate: 44100, bitDepth: 16, channelCount: 2, isInterleaved: false, codec: "flac"
             ), title: "Resume fixture"

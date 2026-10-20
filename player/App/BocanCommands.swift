@@ -16,6 +16,7 @@ struct BocanCommands: Commands {
     let updateController: UpdateController
     /// Mirrors `LyricsViewModel.paneVisible` (`@AppStorage("lyrics.paneVisible")`).
     @AppStorage("lyrics.paneVisible") private var lyricsPaneVisible = false
+    @AppStorage("ui.inspector.selection") private var inspectorSelection = "lyrics"
     /// Mirrors `LyricsViewModel.lrclibEnabled` (`@AppStorage("lyrics.lrclibEnabled")`).
     /// Not `private`: the Track menu lives in an extension file.
     @AppStorage("lyrics.lrclibEnabled") var lyricsLrclibEnabled = false
@@ -154,8 +155,11 @@ struct BocanCommands: Commands {
         // after the sidebar group so they sit below Show/Hide Sidebar.
         CommandGroup(after: .sidebar) {
             // ⌘L is reserved for "Love" (the Track menu); Show Lyrics uses ⌘⌥L.
-            Button(self.lyricsPaneVisible ? "Hide Lyrics" : "Show Lyrics") {
-                self.toggleAnimated(self.$lyricsPaneVisible)
+            Button(self.lyricsPaneVisible && self.inspectorSelection == "lyrics" ? "Hide Lyrics" : "Show Lyrics") {
+                let alreadyShowingLyrics = self.lyricsPaneVisible && self.inspectorSelection == "lyrics"
+                self.inspectorSelection = "lyrics"
+                self.visualizerPaneVisible = false
+                self.lyricsPaneVisible = !alreadyShowingLyrics
             }
             .keyboardShortcut("l", modifiers: [.command, .option])
 

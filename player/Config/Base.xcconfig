@@ -1,0 +1,10 @@
+// Project-level base configuration for Debug and Release (see project.yml).
+//
+// It lives in a subfolder so XcodeGen attaches it to the main group with
+// stable object IDs. A config file at the project root gets a detached group
+// with new random TEMP_ IDs on every `xcodegen generate`.
+//
+// API keys stay in the git-ignored Secrets.xcconfig; copy it from
+// Secrets.xcconfig.template. The build fails without it.
+
+#include "../Secrets.xcconfig"

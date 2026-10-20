@@ -5,7 +5,7 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 player_dir="$root_dir/player"
 dist_dir="$root_dir/dist"
-derived_data="$player_dir/DerivedData"
+derived_data="${WMUSIC_DERIVED_DATA:-$player_dir/DerivedData}"
 built_app="$derived_data/Build/Products/Release/WMusic.app"
 final_app="$dist_dir/WMusic.app"
 build_log_dir="$root_dir/.build-logs"

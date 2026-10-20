@@ -9,9 +9,10 @@ struct ExpandedNowPlayingPanel: View {
     let isPresented: Bool
     let onGetInfo: (Int64) -> Void
     let onNavigate: () -> Void
+    var visualizerVM: VisualizerViewModel? = nil
 
     enum Selection: String {
-        case queue, lyrics
+        case queue, lyrics, visualizer
     }
 
     var body: some View {
@@ -32,6 +33,10 @@ struct ExpandedNowPlayingPanel: View {
                     onNavigate: self.onNavigate
                 )
                 .scrollContentBackground(.hidden)
+            } else if self.selection == .visualizer, let visualizerVM {
+                if self.isPresented {
+                    VisualizerPane(vm: visualizerVM, nowPlayingVM: self.library.nowPlaying, embedded: true)
+                }
             } else {
                 ExpandedLyricsView(
                     vm: self.lyricsVM,

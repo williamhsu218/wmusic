@@ -18,7 +18,9 @@ struct TerminationCoordinatorTests {
         // This line executes immediately; requestTermination cannot block the
         // main actor while its preparation task needs that same actor.
         #expect(events.isEmpty)
-        for _ in 0 ..< 1000 where events.last != "reply" { await Task.yield() }
+        for _ in 0 ..< 1000 where events.last != "reply" {
+            await Task.yield()
+        }
         #expect(events == ["saving", "saved", "reply"])
     }
 
@@ -32,19 +34,26 @@ struct TerminationCoordinatorTests {
             events.append("late save")
         }
         coordinator.requestTermination { events.append("reply") }
-        for _ in 0 ..< 500 where events.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0 ..< 500 where events.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(events == ["reply"])
 
         // Preparation finishing after the deadline must not reply a second time.
         release.finish()
-        for _ in 0 ..< 500 where events.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0 ..< 500 where events.count < 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(events == ["reply", "late save"])
     }
 
     @Test("quit preparation vacuums the database after saving the queue")
     func vacuumRunsAfterQueueSave() throws {
         let url = URL(filePath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .resolvingSymlinksInPath()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
             .appendingPathComponent("App/BocanApp.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         let start = try #require(source.range(of: "terminationCoordinator.prepare = {"))

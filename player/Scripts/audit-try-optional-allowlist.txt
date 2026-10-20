@@ -16,6 +16,12 @@ Modules/Library/Sources/Library/LibraryScanner.swift|guard let track = try? awai
 Modules/Library/Sources/Library/PlaylistIO/CueMarkerService.swift|let sheet = try? CUESheetReader.parse(data: data, sourceURL: url) else { return false }  # conservative: unreadable cue reports targets missing
 Modules/Library/Sources/Library/PlaylistIO/PlaylistImportService.swift|guard let roots = try? await libraryRoots.fetchAll() else { return unreadable }  # conservative: the unreadable list is returned unchanged
 
+# Narrow probes: a failed symlink probe reports the original stat error; an
+# invalid remount address is rejected; title cleanup retains the original text.
+Modules/Library/Sources/Library/FileWalker.swift|if (try? fm.destinationOfSymbolicLink(atPath: child.path)) == nil {  # failed probe still calls onError with the original stat failure
+Modules/Library/Sources/Library/NetworkShareAddress.swift|return try? NetworkShareAddress(address)  # failable sanitizer rejects invalid URLs by returning nil
+Modules/Library/Sources/Library/Lyrics/OnlineLyricsClient.swift|if let expression = try? NSRegularExpression(pattern: pattern) {  # fixed literal regex; fallback preserves the title instead of discarding it
+
 # Contract-defined fallbacks in Persistence.
 Modules/Persistence/Sources/Persistence/Database.swift|guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {  # invalid user regex matches nothing, by contract
 Modules/Persistence/Sources/Persistence/Internal/BookmarkBlob.swift|_ = try? URL(  # staleness probe by contract

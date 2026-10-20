@@ -16,10 +16,126 @@ private func loadFixture(named name: String) throws -> Data {
     return data
 }
 
+private actor SearchGate {
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func wait() async {
+        guard !self.released else { return }
+        await withCheckedContinuation { self.waiter = $0 }
+    }
+
+    func release() {
+        self.released = true
+        self.waiter?.resume()
+        self.waiter = nil
+    }
+}
+
 // MARK: - Tests
 
 @Suite("PodcastSearchService")
 struct PodcastSearchServiceTests {
+    @Test("detail uses its fallback even when the primary ignores cancellation")
+    func detailFallbackAfterTimeout() async throws {
+        let gate = SearchGate()
+        let data = try loadFixture(named: "itunes-search.json")
+        let recorder = RequestRecorder()
+        let mock = MockHTTPClient()
+        mock.handler = { request in
+            recorder.record(request)
+            if request.url?.host == "api.podcastindex.org" {
+                await gate.wait()
+                throw URLError(.timedOut)
+            }
+            return (data, makeHTTPResponse(status: 200))
+        }
+        let service = PodcastSearchService(
+            podcastIndex: PodcastIndexClient(credentials: PodcastIndexCredentials(apiKey: "k", apiSecret: "s"), http: mock),
+            itunes: ITunesSearchClient(http: mock),
+            sourceTimeout: .milliseconds(100)
+        )
+        let result = try PodcastSearchResult(
+            canonicalFeedKey: "example.com/feed",
+            feedURL: #require(URL(string: "https://example.com/feed")),
+            title: "Saved show",
+            sources: [.podcastIndex],
+            itunesCollectionID: 1_234_567
+        )
+        _ = await service.detail(for: result)
+        await gate.release()
+        #expect(recorder.requests.contains { $0.url?.path == "/lookup" })
+    }
+
+    @Test("source deadline returns without waiting for a cancellation-ignoring HTTP client")
+    func uncooperativeSourceTimesOut() async throws {
+        let gate = SearchGate()
+        let mock = MockHTTPClient()
+        mock.handler = { _ in
+            await gate.wait()
+            return (Data("{\"resultCount\":0,\"results\":[]}".utf8), makeHTTPResponse(status: 200))
+        }
+        let service = PodcastSearchService(
+            podcastIndex: nil, itunes: ITunesSearchClient(http: mock), sourceTimeout: .milliseconds(80)
+        )
+        await #expect(throws: PodcastsError.self) { _ = try await service.search(term: "swift") }
+        await gate.release()
+    }
+
+    @Test("detail falls back to iTunes when configured Podcast Index fails")
+    func detailFallbackAfterFailure() async throws {
+        let data = try loadFixture(named: "itunes-search.json")
+        let recorder = RequestRecorder()
+        let mock = MockHTTPClient()
+        mock.handler = { request in
+            recorder.record(request)
+            if request.url?.host == "api.podcastindex.org" {
+                throw URLError(.notConnectedToInternet)
+            }
+            return (data, makeHTTPResponse(status: 200))
+        }
+        let service = PodcastSearchService(
+            podcastIndex: PodcastIndexClient(credentials: PodcastIndexCredentials(apiKey: "k", apiSecret: "s"), http: mock),
+            itunes: ITunesSearchClient(http: mock)
+        )
+        let result = try PodcastSearchResult(
+            canonicalFeedKey: "example.com/feed",
+            feedURL: #require(URL(string: "https://example.com/feed")),
+            title: "Saved show",
+            sources: [.podcastIndex],
+            itunesCollectionID: 1_234_567
+        )
+        _ = await service.detail(for: result)
+        #expect(recorder.requests.contains { $0.url?.path == "/lookup" })
+    }
+
+    @Test("iTunes failure with no Podcast Index credentials is a failure, not empty results")
+    func onlyConfiguredSourceFailureThrows() async throws {
+        let mock = MockHTTPClient()
+        mock.handler = { _ in throw URLError(.notConnectedToInternet) }
+        let service = PodcastSearchService(podcastIndex: nil, itunes: ITunesSearchClient(http: mock))
+        await #expect(throws: PodcastsError.self) { _ = try await service.search(term: "swift") }
+    }
+
+    @Test("cancellation remains cancellation after both source outcomes complete")
+    func cancellationIsNotAnEmptySearch() async throws {
+        let mock = MockHTTPClient()
+        let (started, signal) = AsyncStream<Void>.makeStream()
+        mock.handler = { _ in
+            signal.yield(())
+            try await Task.sleep(for: .seconds(30))
+            return (Data(), makeHTTPResponse(status: 200))
+        }
+        let service = PodcastSearchService(podcastIndex: nil, itunes: ITunesSearchClient(http: mock))
+        let task = Task { try await service.search(term: "swift") }
+        for await _ in started {
+            break
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        signal.finish()
+    }
+
     // MARK: Headline regression: merge where both sources return the same show
 
     @Test("Both sources return the same show -- one merged result with both source tags")

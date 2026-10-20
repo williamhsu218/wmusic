@@ -1,4 +1,5 @@
 import AudioEngine
+@preconcurrency import AVFoundation
 import Foundation
 import Persistence
 import Testing
@@ -9,7 +10,7 @@ import Testing
 /// Records every resolver call and returns canned values, so tests can assert
 /// the player consulted the seam without decoding real audio.
 private actor StubPodcastResolver: PodcastEpisodeResolving {
-    let audioURLToReturn: URL
+    var audioURLToReturn: URL
     let resumePositionToReturn: TimeInterval
 
     private(set) var audioURLCalls: [(feedURL: URL, guid: String)] = []
@@ -21,6 +22,10 @@ private actor StubPodcastResolver: PodcastEpisodeResolving {
     init(audioURL: URL, resumePosition: TimeInterval = 0) {
         self.audioURLToReturn = audioURL
         self.resumePositionToReturn = resumePosition
+    }
+
+    func setAudioURL(_ url: URL) {
+        self.audioURLToReturn = url
     }
 
     func audioURL(feedURL: URL, episodeGUID: String) async throws -> URL {
@@ -69,6 +74,26 @@ private actor CapturingScrobbleSink: ScrobbleSink {
 
 @Suite("QueuePlayer podcast playback")
 struct PodcastPlaybackTests {
+    @Test("quit without playing a restored episode never overwrites its saved position with zero")
+    func unloadedRestoredEpisodePreservesPosition() async throws {
+        let db = try await Database(location: .inMemory)
+        let stub = StubPodcastResolver(audioURL: Self.enclosure, resumePosition: 42)
+        let item = self.makePodcastItem(duration: 300)
+        await QueuePersistence(database: db).saveImmediately(
+            items: [item], currentIndex: 0, repeatMode: .off, shuffleState: .off
+        )
+        let suite = "wmusic.podcast-restore.\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let player = QueuePlayer(
+            engine: AudioEngine(), database: db, podcastResolver: stub, resumeDefaultsSuiteName: suite
+        )
+        await player.waitUntilActivated()
+        await player.prepareForTermination()
+        #expect(await stub.persistCalls.isEmpty)
+        #expect(await stub.audioURLCalls.isEmpty)
+    }
+
     // swiftlint:disable:next force_unwrapping
     private static let feed = URL(string: "https://example.invalid/feed.xml")!
     private static let guid = "episode-guid-1"
@@ -170,6 +195,29 @@ struct PodcastPlaybackTests {
         #expect(calls.isEmpty)
     }
 
+    /// Load actual synthetic audio so position-writeback tests do not mistake an
+    /// idle engine's zero for a played episode's position.
+    private func loadPodcastFixture(player: QueuePlayer, resolver: StubPodcastResolver) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("podcast-\(UUID()).wav")
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2))
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44100))
+            buffer.frameLength = 44100
+            for channel in 0 ..< 2 {
+                buffer.floatChannelData?[channel].initialize(repeating: 0, count: 44100)
+            }
+            for _ in 0 ..< 3 {
+                try file.write(from: buffer)
+            }
+        }
+        await resolver.setAudioURL(url)
+        await player.waitUntilActivated()
+        try await player.play(items: [self.makePodcastItem(duration: 3)])
+        try await player.seek(to: 0.5)
+        return url
+    }
+
     // MARK: - Position write-back
 
     @Test("persistPodcastPositionIfNeeded writes back when the current item is a podcast")
@@ -177,12 +225,15 @@ struct PodcastPlaybackTests {
         let db = try await Database(location: .inMemory)
         let stub = StubPodcastResolver(audioURL: Self.enclosure)
         let player = self.makePlayer(db: db, resolver: stub)
-        await player.queue.replace(with: [self.makePodcastItem()], startAt: 0)
+        let fixture = try await self.loadPodcastFixture(player: player, resolver: stub)
+        defer { try? FileManager.default.removeItem(at: fixture) }
 
         await player.persistPodcastPositionIfNeeded()
 
         let calls = await stub.persistCalls
         #expect(calls.count == 1)
+        #expect((calls.first?.position ?? 0) > 0.4)
+        await player.stop()
         #expect(calls.first?.feedURL == Self.feed)
         #expect(calls.first?.guid == Self.guid)
     }
@@ -205,12 +256,15 @@ struct PodcastPlaybackTests {
         let db = try await Database(location: .inMemory)
         let stub = StubPodcastResolver(audioURL: Self.enclosure)
         let player = self.makePlayer(db: db, resolver: stub)
-        await player.queue.replace(with: [self.makePodcastItem()], startAt: 0)
+        let fixture = try await self.loadPodcastFixture(player: player, resolver: stub)
+        defer { try? FileManager.default.removeItem(at: fixture) }
 
         await player.pause()
 
         let calls = await stub.persistCalls
         #expect(calls.count == 1)
+        #expect((calls.first?.position ?? 0) > 0.4)
+        await player.stop()
     }
 
     @Test("stop() persists a podcast position once")
@@ -218,25 +272,31 @@ struct PodcastPlaybackTests {
         let db = try await Database(location: .inMemory)
         let stub = StubPodcastResolver(audioURL: Self.enclosure)
         let player = self.makePlayer(db: db, resolver: stub)
-        await player.queue.replace(with: [self.makePodcastItem()], startAt: 0)
+        let fixture = try await self.loadPodcastFixture(player: player, resolver: stub)
+        defer { try? FileManager.default.removeItem(at: fixture) }
 
         await player.stop()
 
         let calls = await stub.persistCalls
         #expect(calls.count == 1)
+        #expect((calls.first?.position ?? 0) > 0.4)
+        await player.stop()
     }
 
-    @Test("savePositionForSuspend persists a podcast position even when idle")
+    @Test("savePositionForSuspend persists a loaded podcast position")
     func suspendPersistsPodcast() async throws {
         let db = try await Database(location: .inMemory)
         let stub = StubPodcastResolver(audioURL: Self.enclosure)
         let player = self.makePlayer(db: db, resolver: stub)
-        await player.queue.replace(with: [self.makePodcastItem()], startAt: 0)
+        let fixture = try await self.loadPodcastFixture(player: player, resolver: stub)
+        defer { try? FileManager.default.removeItem(at: fixture) }
 
         await player.savePositionForSuspend()
 
         let calls = await stub.persistCalls
         #expect(calls.count == 1)
+        #expect((calls.first?.position ?? 0) > 0.4)
+        await player.stop()
     }
 
     @Test("pause() does not persist for a non-podcast current item")

@@ -10,6 +10,53 @@ import Testing
 @Suite("Startup scan gate")
 @MainActor
 struct StartupScanGateTests {
+    @Test("populated libraries scan only when explicitly enabled", arguments: [false, true])
+    func populatedLibraryRespectsPreference(enabled: Bool) async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let suite = "wmusic-startup-test-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        if enabled { defaults.set(true, forKey: "library.scanOnLaunch") }
+        let database = try await Database(location: .inMemory)
+        let scanner = LibraryScanner(database: database)
+        try await scanner.addRoot(folder)
+        _ = try await TrackRepository(database: database).insert(Track(fileURL: "file:///synthetic/saved.wav", title: "Saved Track", addedAt: 1, updatedAt: 1))
+        let vm = LibraryViewModel(database: database, engine: MockTransport(), scanner: scanner)
+        await vm.triggerStartupScanIfNeeded(userDefaults: defaults)
+        if enabled {
+            #expect(vm.isScanning)
+            try await self.waitForScanToFinish(vm)
+            #expect(try await !PendingMaintenanceRepository(database: database).hasRequest(task: PendingMaintenance.Task.fullRescan))
+        } else {
+            #expect(!vm.isScanning)
+            #expect(vm.scanTask == nil, "Default launch must never start source enumeration")
+            #expect(try await PendingMaintenanceRepository(database: database).hasRequest(task: PendingMaintenance.Task.fullRescan))
+        }
+        await vm.triggerStartupScanIfNeeded(userDefaults: defaults)
+        #expect(!vm.isScanning, "A second window must not scan again")
+        vm.rescanLibrary(mode: .quick)
+        #expect(vm.isScanning, "Manual rescan remains available with launch scanning off")
+        try await self.waitForScanToFinish(vm)
+        await scanner.stopWatching()
+    }
+
+    @Test("no saved sources means no launch scan, even with opt-in")
+    func noSourcesDoesNotScan() async throws {
+        let suite = "wmusic-no-sources-test-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "library.scanOnLaunch")
+        let database = try await Database(location: .inMemory)
+        let scanner = LibraryScanner(database: database)
+        let vm = LibraryViewModel(database: database, engine: MockTransport(), scanner: scanner)
+        await vm.triggerStartupScanIfNeeded(userDefaults: defaults)
+        #expect(vm.scanTask == nil)
+        #expect(!vm.isScanning)
+        #expect(!vm.isInitialScan)
+    }
+
     @Test("reopening a window skips the completed startup scan, but manual rescan still runs")
     func completedStartupScanIsNotRepeated() async throws {
         let folder = FileManager.default.temporaryDirectory
@@ -24,7 +71,7 @@ struct StartupScanGateTests {
         #expect(try await maintenance.hasRequest(task: PendingMaintenance.Task.fullRescan))
         let vm = LibraryViewModel(database: database, engine: MockTransport(), scanner: scanner)
 
-        vm.triggerStartupScanIfNeeded()
+        await vm.triggerStartupScanIfNeeded()
         // The trigger sets this synchronously, before the real scanner task
         // starts. A no-op implementation cannot pass by merely setting a flag.
         #expect(vm.isScanning)
@@ -35,7 +82,7 @@ struct StartupScanGateTests {
         )
         #expect(vm.scanSummary == nil, "An empty automatic startup scan should be silent")
 
-        vm.triggerStartupScanIfNeeded()
+        await vm.triggerStartupScanIfNeeded()
         #expect(!vm.isScanning, "A second main-window mount must not start another scan")
         #expect(vm.scanSummary == nil, "No second scan should publish a summary")
 

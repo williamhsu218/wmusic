@@ -7,6 +7,7 @@ import SwiftUI
 public struct LibrarySettingsView: View {
     @EnvironmentObject private var vm: LibraryViewModel
     @AppStorage("library.watchForChanges") private var watchForChanges = true
+    @AppStorage("library.scanOnLaunch") private var scanOnLaunch = false
     @AppStorage("metadata.embedCoverArt") private var embedCoverArt = false
     @AppStorage(DeepDiveSetting.key) private var deepDiveEnabled = false
     @State private var showingSources = false
@@ -16,16 +17,18 @@ public struct LibrarySettingsView: View {
     public var body: some View {
         Form {
             Section(L10n.string("Scanning")) {
+                Toggle(L10n.string("Scan library on launch"), isOn: self.$scanOnLaunch)
+                    .accessibilityIdentifier("settings.library.scanOnLaunch")
+                    .help(L10n.string("Check music sources for offline changes each time WMusic opens. Network drives may take longer."))
                 Toggle(L10n.string("Watch folders for new files"), isOn: self.$watchForChanges)
                     .accessibilityIdentifier(A11y.SettingsIDs.watchFolders)
                     .help(L10n.string("Imports files as soon as they appear in your library folders, without waiting for a rescan."))
-                // "Use quick scan by default" lived here and read nothing: the
-                // launch scan is always quick (once per app process), and
-                // Full Rescan is an explicit File-menu command. A switch that
-                // cannot change anything is worse than no switch (#502).
-                Text(localized: "Scans on launch read only the files that changed. Use Full Rescan in the File menu to re-read everything.")
+                Text(localized: "Your saved library opens immediately. Use Quick Rescan (⌘⌥R) for changes made while WMusic was closed. Saved sources are scanned automatically when the library is empty.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Button(L10n.string("Quick Rescan")) { self.vm.rescanLibrary(mode: .quick) }
+                    .disabled(self.vm.isScanning || self.vm.libraryRoots.isEmpty)
+                    .accessibilityIdentifier("settings.library.quickRescan")
             }
 
             Section(L10n.string("Metadata")) {

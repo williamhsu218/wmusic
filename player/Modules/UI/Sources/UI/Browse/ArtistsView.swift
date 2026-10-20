@@ -15,13 +15,8 @@ public struct ArtistDetailView: View {
     @State private var albumScrollPosition = ScrollPosition(edge: .top)
     /// Live vertical offset of the album strip, snapshotted into the library view model so it survives a rebuild.
     @State private var liveAlbumScrollOffset: CGFloat = 0
-    /// Scales the minimum album cell width proportionally to the user's text size setting.
-    @ScaledMetric(relativeTo: .body) private var scaledAlbumMinWidth = Theme.albumGridMinWidth
-
-    private var albumColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: self.scaledAlbumMinWidth), spacing: Theme.albumGridSpacing)]
-    }
-
+    @ScaledMetric(relativeTo: .body) private var albumCardWidth: CGFloat = 140
+    @State private var compactDetail = false
     public init(artistID: Int64, library: LibraryViewModel) {
         self.artistID = artistID
         self.library = library
@@ -32,7 +27,7 @@ public struct ArtistDetailView: View {
             // Artist header
             if let artist {
                 self.artistHeader(artist)
-                    .padding(20)
+                    .padding(self.compactDetail ? 12 : 20)
                     .background(Color.bgSecondary)
                     .contextMenu { ArtistContextMenu(id: self.artistID, name: artist.name, library: self.library) }
                 Divider()
@@ -41,19 +36,20 @@ public struct ArtistDetailView: View {
             // Albums section — scrollable, capped so Songs table gets most of the space
             if !self.albums.isEmpty {
                 self.sectionLabel(L10n.string("Albums"), count: self.albums.count)
-                ScrollView {
-                    LazyVGrid(columns: self.albumColumns, spacing: Theme.albumGridSpacing) {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: Theme.albumGridSpacing) {
                         ForEach(self.albums, id: \.id) { album in
                             self.albumCell(album, trackCount: album.id.flatMap { self.albumTrackCounts[$0] })
+                                .frame(width: self.compactDetail ? self.albumCardWidth * 0.77 : self.albumCardWidth)
                         }
                     }
                     .padding(Theme.albumGridSpacing)
                 }
                 .scrollPosition(self.$albumScrollPosition)
-                .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, newY in
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.x } action: { _, newY in
                     self.liveAlbumScrollOffset = newY
                 }
-                .frame(maxHeight: 260)
+                .frame(height: (self.compactDetail ? self.albumCardWidth * 0.77 : self.albumCardWidth) + 66)
                 Divider()
             }
 
@@ -61,6 +57,8 @@ public struct ArtistDetailView: View {
             self.sectionLabel(L10n.string("Songs"), count: self.library.tracks.rows.count)
             TracksView(vm: self.library.tracks, library: self.library, sortable: true)
         }
+        .onGeometryChange(for: Bool.self) { $0.size.height < 500 } action: { self.compactDetail = $0 }
+        .navigationTitle(self.artist?.name ?? L10n.string("Artists"))
         // task(id:), not task: switching .artist(A) -> .artist(B) keeps this
         // view's identity (same switch arm in ContentPane), so a plain task
         // never re-fires and the header goes stale. Same fix as AlbumDetailView.
@@ -87,16 +85,16 @@ public struct ArtistDetailView: View {
             ZStack {
                 Circle()
                     .fill(Color.accentColor.opacity(0.15))
-                    .frame(width: 64, height: 64)
+                    .frame(width: self.compactDetail ? 40 : 64, height: self.compactDetail ? 40 : 64)
                 Image(systemName: "music.mic")
-                    .font(.system(size: 28, weight: .medium))
+                    .font(.system(size: self.compactDetail ? 20 : 28, weight: .medium))
                     .foregroundStyle(Color.accentColor)
             }
             .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(artist.name)
-                    .font(Typography.largeTitle)
+                    .font(self.compactDetail ? Typography.title : Typography.largeTitle)
                     .foregroundStyle(Color.textPrimary)
 
                 // MusicBrainz disambiguation ("film composer", "UK rock band"),
@@ -143,23 +141,13 @@ public struct ArtistDetailView: View {
             .background(Color.bgSecondary)
     }
 
-    @ViewBuilder
-    private func albumArtwork(_ album: Album) -> some View {
-        if let path = album.coverArtPath {
-            Artwork(artPath: path, seed: Int(album.id ?? 0), size: Theme.albumGridMinWidth)
-                .accessibilityLabel(L10n.string("\(album.title) artwork"))
-        } else {
-            GradientPlaceholder(seed: Int(album.id ?? 0))
-                .aspectRatio(1, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.artworkCornerRadius, style: .continuous))
-                .accessibilityLabel(L10n.string("\(album.title) artwork placeholder"))
-        }
-    }
-
     private func albumCell(_ album: Album, trackCount: Int?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            self.albumArtwork(album)
-                .frame(maxWidth: .infinity)
+            AlbumArtworkButton(
+                album: album,
+                onOpen: { if let id = album.id { self.openAlbum(id) } },
+                onPlay: { self.playAlbum(album) }
+            )
 
             Text(album.title)
                 .font(Typography.subheadline)
@@ -179,18 +167,10 @@ public struct ArtistDetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .albumOpenPlayGesture(
-            open: {
-                if let id = album.id {
-                    self.openAlbum(id)
-                }
-            },
-            play: { self.playAlbum(album) }
-        )
         .contextMenu {
             self.albumContextMenu(album: album)
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(
             [album.title, self.artist?.name, album.year.map(String.init)]
                 .compactMap(\.self)
@@ -277,7 +257,7 @@ public struct ArtistDetailView: View {
     /// Restores the album strip to the offset saved for this artist.
     private func restoreAlbumScrollOffset() {
         guard let offset = self.library.artistAlbumScrollOffsets[self.artistID], offset > 0 else { return }
-        self.albumScrollPosition.scrollTo(y: CGFloat(offset))
+        self.albumScrollPosition.scrollTo(x: CGFloat(offset))
     }
 
     private func openInspector(forAlbumID id: Int64) async {
@@ -479,6 +459,7 @@ public struct ArtistsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
             .accessibilityLabel(artist.name)
             .accessibilityHint(L10n.string("Open artist"))
             .help(L10n.string("Opens this artist's albums and songs."))

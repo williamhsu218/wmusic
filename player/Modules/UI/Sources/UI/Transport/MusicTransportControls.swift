@@ -22,7 +22,7 @@ struct MusicTransportControls: View {
     }
 
     var body: some View {
-        HStack(spacing: 20) {
+        HStack(spacing: 14) {
             Button {
                 self.library.toggleLovedForNowPlaying()
             } label: {

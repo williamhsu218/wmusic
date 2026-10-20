@@ -19,7 +19,8 @@ struct AppRootGate: View {
                     vm: graph.libraryViewModel,
                     lyricsVM: graph.lyricsViewModel,
                     visualizerVM: graph.visualizerViewModel,
-                    scrobbleSettingsVM: graph.scrobbleSettingsViewModel
+                    scrobbleSettingsVM: graph.scrobbleSettingsViewModel,
+                    startupScanDefaults: E2EEnvironment.settingsDefaults ?? .standard
                 )
                 .environment(graph.dspViewModel)
                 .environment(\.settingsRouter, graph.settingsRouter)

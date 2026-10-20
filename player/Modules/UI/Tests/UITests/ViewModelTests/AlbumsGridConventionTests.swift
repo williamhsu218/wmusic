@@ -95,12 +95,12 @@ struct AlbumDoubleClickConventionTests {
         )
     }
 
-    @Test("Grid cells play on double-click and open on single click")
+    @Test("Grid cells open immediately with an independent play target")
     func gridUsesGesture() throws {
         let source = try self.uiSource("Browse/AlbumsGridView.swift")
         #expect(
-            source.contains("albumOpenPlayGesture(open: { self.onTap() }, play: { self.onPlay() })"),
-            "the interactive cell must route clicks through the shared gesture"
+            source.contains("AlbumArtworkButton(") && !source.contains(".albumOpenPlayGesture("),
+            "the grid must use separate immediate open and play buttons"
         )
         #expect(
             source.contains("onPlay:"),
@@ -108,16 +108,16 @@ struct AlbumDoubleClickConventionTests {
         )
     }
 
-    @Test("The artist album strip plays on double-click via playAlbum(albumID:)")
+    @Test("The artist carousel exposes a separate play button")
     func artistStripUsesGesture() throws {
         let source = try self.uiSource("Browse/ArtistsView.swift")
         #expect(
-            source.contains("albumOpenPlayGesture("),
-            "the artist album strip must route clicks through the shared gesture"
+            source.contains("AlbumArtworkButton(") && source.contains("ScrollView(.horizontal)"),
+            "the artist must expose a horizontal album carousel"
         )
         #expect(
             source.contains("self.library.playAlbum(albumID: id)"),
-            "double-click must play in place via playAlbum(albumID:)"
+            "the play button must play in place via playAlbum(albumID:)"
         )
     }
 

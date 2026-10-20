@@ -42,7 +42,7 @@ extension AudioEngine {
 
         // Serialize the recovery against user transport actions (play/pause/seek/
         // load), exactly as those paths serialize against each other.
-        await self.acquireTransport()
+        guard await self.acquireTransport() else { return }
         defer { self.releaseTransport() }
 
         // A transport action may have swapped the pump while we waited for the gate.

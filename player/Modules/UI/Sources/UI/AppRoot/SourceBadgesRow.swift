@@ -2,8 +2,7 @@ import SwiftUI
 
 // MARK: - SourceBadgeModel
 
-/// One box in the play bar's source row (ADR-092): what it says, what it
-/// explains on hover, and which tint it wears.
+/// A source fact and its explanation, shared by the compact capsule and inspector.
 ///
 /// Built by a pure function so the row's shape can be tested without a view
 /// tree, which the host-less test bundle cannot build.
@@ -24,22 +23,7 @@ struct SourceBadgeModel: Identifiable, Equatable {
     }
 
     var tint: Color {
-        switch self.kind {
-        case .codec:
-            .badgeCodec
-
-        case .bitrate:
-            .badgeBitrate
-
-        case .sampleRate:
-            .badgeSampleRate
-
-        case .bitDepth:
-            .badgeBitDepth
-
-        case .channels:
-            .badgeChannels
-        }
+        .textSecondary
     }
 
     /// The badges to draw for `facts`, in the fixed order codec, bitrate,
@@ -189,9 +173,8 @@ struct SourceBadge: View {
 
 // MARK: - SourceBadgesRow
 
-/// The row of small coloured boxes under the title in the play bar: the
-/// codec, bitrate, sample rate, bit depth and channels of what is playing
-/// (ADR-092). Nothing is drawn when nothing is known.
+/// One quiet quality capsule. Full source facts remain available on hover
+/// and through VoiceOver, even when the compact label has to truncate.
 struct SourceBadgesRow: View {
     let facts: NowPlayingSourceFacts
 
@@ -202,31 +185,17 @@ struct SourceBadgesRow: View {
     var body: some View {
         let badges = self.badges
         if !badges.isEmpty {
-            // The play bar squeezes the title block hard on a narrow window.
-            // Rather than let five capsules truncate to five ellipses, drop
-            // them from the end until the row fits: the codec and the bitrate
-            // are the facts worth the last of the space.
-            ViewThatFits(in: .horizontal) {
-                self.row(badges)
-                self.row(badges.dropLast(1))
-                self.row(badges.dropLast(2))
-                self.row(badges.dropLast(3))
-                self.row(badges.dropLast(4))
-            }
-            // One VoiceOver stop for the lot, and it reads every fact even
-            // where the window is too narrow to draw them all. The facts
-            // change once per track, so there is nothing to follow live.
-            .accessibilityElement(children: .combine)
+            Text(badges.filter { [.codec, .bitDepth, .sampleRate].contains($0.kind) }.map(\.text).joined(separator: " · "))
+            .font(Typography.mini)
+            .foregroundStyle(Color.textSecondary)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(.quaternary.opacity(0.5), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.textSecondary.opacity(0.25)))
+            .help(badges.map { $0.text + ": " + $0.help }.joined(separator: "\n"))
             .accessibilityLabel(badges.map(\.text).joined(separator: ", "))
         }
     }
 
-    private func row(_ badges: some Collection<SourceBadgeModel>) -> some View {
-        HStack(spacing: 6) {
-            ForEach(Array(badges)) { badge in
-                SourceBadge(model: badge)
-            }
-        }
-        .fixedSize(horizontal: true, vertical: false)
-    }
 }

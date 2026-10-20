@@ -713,7 +713,12 @@ final class AppModel {
     private func seedE2EFixturesIfRequested() async {
         guard E2EEnvironment.isActive, let graph = self.graph else { return }
         if let seed = E2EEnvironment.seedDirectory {
-            await graph.libraryViewModel.addURLs([seed])
+            // Register fixtures only once. Re-adding the same source on every
+            // relaunch invoked a manual scan and masked the launch preference.
+            await graph.libraryViewModel.refreshRoots()
+            if !graph.libraryViewModel.libraryRoots.contains(where: { $0.path == seed.path }) {
+                await graph.libraryViewModel.addURLs([seed])
+            }
         }
         if let streamURL = E2EEnvironment.seedRadioQueueURL,
            let qp = graph.libraryViewModel.queuePlayer {

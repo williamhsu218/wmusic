@@ -34,6 +34,8 @@ public actor QueuePlayer: Transport {
     private let persistence: QueuePersistence
     private let resumeDefaults: UserDefaults
     private var pendingResume: (itemID: QueueItem.ID, position: TimeInterval)?
+    /// The item actually loaded in the engine; queue selection alone is not proof of a playable position.
+    private var loadedItemID: QueueItem.ID?
     /// The sleep timer — available for UI observation via `LibraryViewModel`.
     public nonisolated let sleepTimer: SleepTimer
 
@@ -315,6 +317,7 @@ public actor QueuePlayer: Transport {
             if await (self.queue.currentItem) != nil {
                 try await self.loadCurrentItem()
             }
+
         default:
             break
         }
@@ -339,6 +342,27 @@ public actor QueuePlayer: Transport {
     }
 
     public func seek(to time: TimeInterval) async throws {
+        await self.waitUntilActivated()
+        if let item = await self.queue.currentItem, !item.playableSource.isLiveStream {
+            let state = await self.engine.playbackState
+            let shouldDefer = switch state {
+            case .idle, .stopped, .ended, .failed:
+                true
+
+            default:
+                false
+            }
+            if shouldDefer {
+                guard time.isFinite, time >= 0, item.duration <= 0 || time <= item.duration + 0.001 else {
+                    throw AudioEngineError.seekOutOfRange(requested: time, duration: item.duration)
+                }
+                // A restored track may be on an unavailable volume. Scrubbing
+                // updates the intent; only Play opens the file.
+                self.pendingResume = (item.id, time)
+                return
+            }
+        }
+        // Once loaded, the decoder's duration is authoritative over stale metadata.
         try await self.engine.seek(to: time)
     }
 
@@ -403,6 +427,10 @@ public actor QueuePlayer: Transport {
         await self.persistPodcastPositionIfNeeded()
 
         guard let item = await self.queue.currentItem, !item.playableSource.isLiveStream else { return }
+        if case .podcast = item.playableSource {
+            return
+        }
+        guard self.loadedItemID == item.id || self.pendingResume?.itemID == item.id else { return }
         let position = if let pending = self.pendingResume, pending.itemID == item.id {
             pending.position
         } else {
@@ -680,6 +708,7 @@ public actor QueuePlayer: Transport {
     }
 
     private func loadAndPlay(item: QueueItem, autoPlay: Bool = true) async throws {
+        self.loadedItemID = nil
         if let pending = self.pendingResume, pending.itemID != item.id {
             self.pendingResume = nil
         }
@@ -792,6 +821,12 @@ public actor QueuePlayer: Transport {
             url = rawURL
         }
 
+        defer {
+            if resolvedFromPerFileBookmark {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
         // Fetch track metadata (for NowPlaying).
         let track = await self.nowPlayingTrack(item.trackID)
         self.emitCurrentTrack(track)
@@ -816,34 +851,24 @@ public actor QueuePlayer: Transport {
         self.markerContinuation?.yield(self.currentMarkers)
 
         try await self.engine.load(url, replayGain: self.replayGain(for: item, track: track))
-        // Release whichever scope was started — AVAudioFile already holds an open
-        // file descriptor so the scope is no longer needed.
-        if resolvedFromPerFileBookmark {
-            url.stopAccessingSecurityScopedResource()
-        }
+        self.loadedItemID = item.id
         // Drop the RAII handle so the root scope is released here rather than
         // waiting for the function to return (matches the pre-RAII timing).
         withExtendedLifetime(rootScope) {}
         rootScope = nil
 
-        // Per-episode podcast resume: seek to the saved position for this
-        // episode before playback begins. This is authoritative for a podcast
-        // item; the global last-position restore path skips podcast items so
-        // the two resume mechanisms never fight.
-        await self.applyPodcastResumeIfNeeded(for: item)
-
         if let pending = self.pendingResume, pending.itemID == item.id {
-            if case .podcast = item.playableSource {
-                // Podcast positions belong to the per-episode resolver.
-            } else {
-                let position = item.duration > 0 ? min(pending.position, item.duration) : pending.position
-                do {
-                    try await self.engine.seek(to: position)
-                } catch {
-                    self.log.warning("queueplayer.position.restore.failed", ["error": String(reflecting: error)])
-                }
+            // An explicit seek before the first Play also overrides a podcast's
+            // per-episode resume point.
+            let position = item.duration > 0 ? min(pending.position, item.duration) : pending.position
+            do {
+                try await self.engine.seek(to: position)
+            } catch {
+                self.log.warning("queueplayer.position.restore.failed", ["error": String(reflecting: error)])
             }
             self.pendingResume = nil
+        } else {
+            await self.applyPodcastResumeIfNeeded(for: item)
         }
 
         if case .podcast = item.playableSource {
@@ -974,15 +999,18 @@ public actor QueuePlayer: Transport {
             case .ended:
                 self.stopScrobbleUpdateLoop()
                 await self.handleTrackEnded()
+
             case .playing:
                 self.lastEmittedState = .playing
                 self.stateContinuation?.yield(.playing)
                 await self.gaplessScheduler.start()
                 self.startScrobbleUpdateLoop()
+
             case .paused:
                 self.lastEmittedState = .paused
                 self.stateContinuation?.yield(.paused)
                 self.stopScrobbleUpdateLoop()
+
             default:
                 self.lastEmittedState = engineState
                 self.stateContinuation?.yield(engineState)
@@ -1021,8 +1049,13 @@ public actor QueuePlayer: Transport {
         guard let resolver = self.podcastResolver,
               let item = await self.queue.currentItem,
               case let .podcast(feedURL, guid) = item.playableSource else { return }
-        let position = await self.engine.currentTime
-        let duration = await self.engine.duration
+        guard self.loadedItemID == item.id || self.pendingResume?.itemID == item.id else { return }
+        let position = if let pending = self.pendingResume, pending.itemID == item.id {
+            pending.position
+        } else {
+            await self.engine.currentTime
+        }
+        let duration = self.loadedItemID == item.id ? await self.engine.duration : item.duration
         await resolver.persistPosition(
             feedURL: feedURL,
             episodeGUID: guid,
@@ -1361,6 +1394,7 @@ public actor QueuePlayer: Transport {
                 "reason": preparation == .crossfade ? "boundary" : "engineFallback",
                 "next": item.trackID,
             ])
+
         case .gapless:
             if await self.crossfadeScheduler.isEnabled {
                 self.log.debug("crossfade.decision", [
@@ -1419,6 +1453,7 @@ public actor QueuePlayer: Transport {
             self.log.debug("queueplayer.gapless.staleItem", [:])
             return
         }
+        self.loadedItemID = item.id
         // A crossfade or hand-over in the playing pump swaps no pump, so no
         // spurious end follows it and the settle window stays off (see
         // `armedBoundary`). Only a separate pump needs the window.
@@ -1503,7 +1538,11 @@ public actor QueuePlayer: Transport {
         if let item = await self.queue.currentItem,
            !item.playableSource.isLiveStream, position.isFinite, position > 0,
            savedID == nil || savedID == item.id.uuidString {
-            self.pendingResume = (item.id, position)
+            if case .podcast = item.playableSource {
+                // Loaded on demand through the episode resolver.
+            } else {
+                self.pendingResume = (item.id, position)
+            }
         } else {
             self.resumeDefaults.removeObject(forKey: "playback.resumePosition")
             self.resumeDefaults.removeObject(forKey: "playback.resumeItemID")

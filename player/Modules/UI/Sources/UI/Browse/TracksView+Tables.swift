@@ -17,7 +17,9 @@ extension TracksView {
             actions: self.trackContextMenuActions,
             scrollRequest: self.vm.scrollRequest,
             scrollTargetTrackID: self.vm.scrollTargetTrackID,
-            onMove: self.effectiveOnMove
+            onMove: self.effectiveOnMove,
+            onScroll: self.onScroll,
+            isPlaying: self.nowPlaying.isPlaying
         )
     }
 
@@ -34,7 +36,9 @@ extension TracksView {
             actions: self.trackContextMenuActions,
             scrollRequest: self.vm.scrollRequest,
             scrollTargetTrackID: self.vm.scrollTargetTrackID,
-            onMove: self.effectiveOnMove
+            onMove: self.effectiveOnMove,
+            onScroll: self.onScroll,
+            isPlaying: self.nowPlaying.isPlaying
         )
     }
 }

@@ -14,6 +14,34 @@ private func audioOutputAvailable() -> Bool {
 
 @Suite("AudioEngine transport")
 struct EngineTransportTests {
+    @Test("cancelling queued Play does not execute it when the transport becomes free")
+    func cancelledQueuedPlay() async throws {
+        let engine = AudioEngine()
+        await engine.acquireTransport()
+        let task = Task { try await engine.play() }
+        try await Task.sleep(for: .milliseconds(30))
+        task.cancel()
+        await engine.releaseTransport()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        // The cancelled waiter must not strand ownership of the gate.
+        try await engine.load(self.fixtureURL("sine-1s-44100-16-stereo.wav"))
+        #expect(await engine.playbackState == .ready)
+    }
+
+    @Test("load waits for the same transport gate as pause, seek and stop")
+    func loadHonoursTransportGate() async throws {
+        let engine = AudioEngine()
+        let url = try self.fixtureURL("sine-1s-44100-16-stereo.wav")
+        await engine.acquireTransport()
+        let loading = Task { try await engine.load(url) }
+        try await Task.sleep(for: .milliseconds(80))
+        let stateWhileBusy = await engine.playbackState
+        await engine.releaseTransport()
+        try await loading.value
+        #expect(stateWhileBusy == .idle)
+        #expect(await engine.playbackState == .ready)
+    }
+
     private func fixtureURL(_ name: String) throws -> URL {
         let url = Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures")
         return try #require(url, "Missing fixture: \(name)")

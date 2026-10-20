@@ -8,51 +8,44 @@ private struct AlbumCell: View {
     let album: Album
     let artistName: String?
     let trackCount: Int?
+    let onOpen: () -> Void
+    let onPlay: () -> Void
 
     var body: some View {
         let displayArtist = self.artistName ?? L10n.string("Various Artists")
         VStack(alignment: .leading, spacing: 4) {
-            // Artwork — always a 1:1 square that fills the grid cell's width.
-            // `Artwork` self-applies an aspect-ratio constraint so the loaded
-            // image and the gradient placeholder lay out identically.
-            Group {
-                if let path = album.coverArtPath {
-                    Artwork(artPath: path, seed: Int(self.album.id ?? 0), size: Theme.albumGridMinWidth)
-                        .accessibilityLabel(L10n.string("\(self.album.title) artwork"))
-                } else {
-                    GradientPlaceholder(seed: Int(self.album.id ?? 0))
-                        .aspectRatio(1, contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.artworkCornerRadius, style: .continuous))
-                        .accessibilityLabel(L10n.string("\(self.album.title) artwork placeholder"))
+            AlbumArtworkButton(album: self.album, onOpen: self.onOpen, onPlay: self.onPlay)
+            Button(action: self.onOpen) {
+                VStack(alignment: .leading, spacing: 4) {
+                    // Title
+                    Text(self.album.title)
+                        .font(Typography.subheadline)
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
+
+                    // Artist name (or "Various Artists" when no album artist is set)
+                    Text(displayArtist)
+                        .font(Typography.caption)
+                        .foregroundStyle(Color.textSecondary)
+                        .lineLimit(1)
+
+                    // Year · track count
+                    let yearString = self.album.year.map { String($0) }
+                    let countString = self.trackCount.map { L10n.string("\($0) songs") }
+                    let subtitle = [yearString, countString].compactMap(\.self).joined(separator: " · ")
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(Typography.caption)
+                            .foregroundStyle(Color.textTertiary)
+                            .lineLimit(1)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity)
-
-            // Title
-            Text(self.album.title)
-                .font(Typography.subheadline)
-                .foregroundStyle(Color.textPrimary)
-                .lineLimit(1)
-
-            // Artist name (or "Various Artists" when no album artist is set)
-            Text(displayArtist)
-                .font(Typography.caption)
-                .foregroundStyle(Color.textSecondary)
-                .lineLimit(1)
-
-            // Year · track count
-            let yearString = self.album.year.map { String($0) }
-            let countString = self.trackCount.map { L10n.string("\($0) songs") }
-            let subtitle = [yearString, countString].compactMap(\.self).joined(separator: " · ")
-            if !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(Typography.caption)
-                    .foregroundStyle(Color.textTertiary)
-                    .lineLimit(1)
-            }
+            .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(
             [self.album.title, displayArtist, self.album.year.map(String.init)]
                 .compactMap(\.self)
@@ -94,7 +87,6 @@ private struct AlbumInteractiveCell<Menu: View>: View {
             .focused(self.$focusedAlbumID, equals: self.album.id)
             .focusEffectDisabled()
             .highPriorityGesture(TapGesture().modifiers(.command).onEnded { self.onCmdTap() })
-            .albumOpenPlayGesture(open: { self.onTap() }, play: { self.onPlay() })
             .onHover { self.isHovered = $0 }
             .contextMenu { self.contextMenuContent() }
             // Gesture-composed clicks don't synthesize an assistive activation,
@@ -109,19 +101,22 @@ private struct AlbumInteractiveCell<Menu: View>: View {
     /// The visual half of the cell, split from ``body`` so the type-checker
     /// never times out on one continuous modifier chain.
     private var styledCell: some View {
-        AlbumCell(album: self.album, artistName: self.artistName, trackCount: self.trackCount)
-            .padding(4)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(self.isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.accentColor, lineWidth: self.isFocused ? 2 : 0)
-            )
-            .contentShape(Rectangle())
-            .scaleEffect(self.isHovered && !self.reduceMotion ? 1.04 : 1.0)
-            .animation(self.reduceMotion ? nil : .easeOut(duration: 0.15), value: self.isHovered)
+        AlbumCell(
+            album: self.album, artistName: self.artistName, trackCount: self.trackCount,
+            onOpen: self.onTap, onPlay: self.onPlay
+        )
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(self.isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.accentColor, lineWidth: self.isFocused ? 2 : 0)
+        )
+        .contentShape(Rectangle())
+        .scaleEffect(self.isHovered && !self.reduceMotion ? 1.015 : 1.0)
+        .animation(self.reduceMotion ? nil : .easeOut(duration: 0.15), value: self.isHovered)
     }
 
     private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
@@ -178,7 +173,9 @@ public struct AlbumsGridView: View {
     /// Scales the minimum album cell width proportionally to the user's text size setting.
     @ScaledMetric(relativeTo: .body) private var scaledAlbumMinWidth = Theme.albumGridMinWidth
 
-    public init(vm: AlbumsViewModel, library: LibraryViewModel, title: String? = nil, searchQuery: String = "") {
+    public init(
+        vm: AlbumsViewModel, library: LibraryViewModel, title: String? = nil, searchQuery: String = ""
+    ) {
         self.vm = vm
         self.library = library
         self.titleOverride = title
@@ -319,15 +316,20 @@ public struct AlbumsGridView: View {
                 .padding(Theme.albumGridSpacing)
             }
             .scrollPosition(self.$scrollPosition)
-            .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, newY in
+            .onScrollGeometryChange(for: CGFloat.self) {
+                $0.contentOffset.y
+            } action: { _, newY in
                 self.liveScrollOffset = newY
             }
             .onGeometryChange(
                 for: Int.self,
                 of: {
                     let usable = $0.size.width - 2 * Theme.albumGridSpacing
-                    return max(1, Int((usable + Theme.albumGridSpacing) /
-                            (Theme.albumGridMinWidth + Theme.albumGridSpacing)))
+                    return max(
+                        1,
+                        Int(
+                            (usable + Theme.albumGridSpacing) / (Theme.albumGridMinWidth + Theme.albumGridSpacing)
+                        ))
                 },
                 action: { self.gridColumnCount = $0 }
             )
@@ -381,7 +383,8 @@ public struct AlbumsGridView: View {
         let albums = self.vm.albums
         guard !albums.isEmpty else { return }
         guard let currentID = self.focusedAlbumID,
-              let currentIdx = albums.firstIndex(where: { $0.id == currentID }) else {
+            let currentIdx = albums.firstIndex(where: { $0.id == currentID })
+        else {
             self.focusedAlbumID = albums.first?.id
             return
         }
@@ -426,22 +429,28 @@ public struct AlbumsGridView: View {
 
         if !multi {
             Divider()
-            Toggle(L10n.string("Force Gapless Playback"), isOn: Binding(
-                get: { album.forceGapless },
-                set: { forced in
-                    if let id = album.id {
-                        Task { await self.library.setAlbumForceGapless(albumID: id, forced: forced) }
+            Toggle(
+                L10n.string("Force Gapless Playback"),
+                isOn: Binding(
+                    get: { album.forceGapless },
+                    set: { forced in
+                        if let id = album.id {
+                            Task { await self.library.setAlbumForceGapless(albumID: id, forced: forced) }
+                        }
                     }
-                }
-            ))
-            Toggle(L10n.string("Exclude from Shuffle"), isOn: Binding(
-                get: { album.excludedFromShuffle },
-                set: { excluded in
-                    if let id = album.id {
-                        Task { await self.library.setAlbumExcludedFromShuffle(albumID: id, excluded: excluded) }
+                ))
+            Toggle(
+                L10n.string("Exclude from Shuffle"),
+                isOn: Binding(
+                    get: { album.excludedFromShuffle },
+                    set: { excluded in
+                        if let id = album.id {
+                            Task {
+                                await self.library.setAlbumExcludedFromShuffle(albumID: id, excluded: excluded)
+                            }
+                        }
                     }
-                }
-            ))
+                ))
         }
 
         Divider()
@@ -467,9 +476,12 @@ public struct AlbumsGridView: View {
         let repo = TrackRepository(database: self.library.database)
         var collected: [Track] = []
         for id in ids {
-            if let tracks = await recoveredRead("albumsGrid.openInspector.failed", {
-                try await repo.fetchAll(albumID: id)
-            }) {
+            if let tracks = await recoveredRead(
+                "albumsGrid.openInspector.failed",
+                {
+                    try await repo.fetchAll(albumID: id)
+                })
+            {
                 collected.append(contentsOf: tracks)
             }
         }

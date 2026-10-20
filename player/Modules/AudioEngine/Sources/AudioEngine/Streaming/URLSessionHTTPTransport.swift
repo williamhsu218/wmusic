@@ -23,7 +23,7 @@ public struct URLSessionHTTPTransport: HTTPTransport {
                 delegate.begin(awaiting: continuation)
             }
         } onCancel: {
-            task.cancel()
+            delegate.cancel()
         }
     }
 }
@@ -36,13 +36,14 @@ public struct URLSessionHTTPTransport: HTTPTransport {
 /// A class with a lock rather than an actor because `URLSessionDataDelegate`
 /// callbacks are synchronous: the response callback must call its completion
 /// handler before it returns, and data must be yielded in arrival order.
-private final class StreamingDataDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class StreamingDataDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let task: URLSessionDataTask
     private let streamContinuation: AsyncThrowingStream<Data, Error>.Continuation
 
     private let lock = NSLock()
     /// Waits for the response headers. `nil` once it has been resumed.
     private var responseContinuation: CheckedContinuation<RemoteTrackBytes, Error>?
+    private var terminalError: Error?
     /// Held only until it is handed to the caller. After that the caller owns
     /// the one reference, so dropping it unread terminates the stream and
     /// cancels the transfer.
@@ -65,8 +66,35 @@ private final class StreamingDataDelegate: NSObject, URLSessionDataDelegate, @un
     }
 
     func begin(awaiting continuation: CheckedContinuation<RemoteTrackBytes, Error>) {
-        self.lock.withLock { self.responseContinuation = continuation }
+        let error = self.lock.withLock { () -> Error? in
+            if let error = self.terminalError {
+                return error
+            }
+            self.responseContinuation = continuation
+            return nil
+        }
+        if let error {
+            continuation.resume(throwing: error)
+            return
+        }
         self.task.resume()
+    }
+
+    func cancel() {
+        self.finishWithError(RemoteTrackLoaderError.cancelled)
+        self.task.cancel()
+    }
+
+    private func finishWithError(_ error: Error) {
+        let waiting = self.lock.withLock {
+            if self.terminalError == nil {
+                self.terminalError = error
+            }
+            defer { self.responseContinuation = nil }
+            return self.responseContinuation
+        }
+        waiting?.resume(throwing: error)
+        self.streamContinuation.finish(throwing: error)
     }
 
     private func takeResponseContinuation() -> CheckedContinuation<RemoteTrackBytes, Error>? {
@@ -93,8 +121,7 @@ private final class StreamingDataDelegate: NSObject, URLSessionDataDelegate, @un
     ) {
         if let http = response as? HTTPURLResponse, let failure = Self.failure(forStatus: http.statusCode) {
             _ = self.takeStream()
-            self.takeResponseContinuation()?.resume(throwing: failure)
-            self.streamContinuation.finish(throwing: failure)
+            self.finishWithError(failure)
             completionHandler(.cancel)
             return
         }
@@ -121,8 +148,7 @@ private final class StreamingDataDelegate: NSObject, URLSessionDataDelegate, @un
         let mapped = Self.mapped(error)
         // Before the headers arrived this fails `bytes(for:)`; after, it ends
         // the stream. Finishing an already-finished stream is a no-op.
-        self.takeResponseContinuation()?.resume(throwing: mapped)
-        self.streamContinuation.finish(throwing: mapped)
+        self.finishWithError(mapped)
     }
 
     // MARK: Error mapping

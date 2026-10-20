@@ -55,7 +55,7 @@ struct RootPositionTickConventionTests {
     @Test("LyricsPlaybackDriver still forwards each position tick to the lyrics model")
     func driverForwardsPosition() throws {
         let source = try self.source("Sources/UI/Lyrics/LyricsPlaybackDriver.swift")
-        #expect(source.contains(".onChange(of: self.nowPlaying.position)"))
+        #expect(source.contains(".onChange(of: self.nowPlaying.position, initial: true)"))
         #expect(source.contains("self.lyricsVM.positionDidChange(position)"))
     }
 }

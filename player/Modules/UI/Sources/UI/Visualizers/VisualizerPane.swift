@@ -12,6 +12,7 @@ public struct VisualizerPane: View {
     @ObservedObject public var vm: VisualizerViewModel
 
     public var nowPlayingVM: NowPlayingViewModel
+    public var embedded: Bool
 
     // MARK: - State
 
@@ -22,15 +23,16 @@ public struct VisualizerPane: View {
 
     // MARK: - Init
 
-    public init(vm: VisualizerViewModel, nowPlayingVM: NowPlayingViewModel) {
+    public init(vm: VisualizerViewModel, nowPlayingVM: NowPlayingViewModel, embedded: Bool = false) {
         self.vm = vm
         self.nowPlayingVM = nowPlayingVM
+        self.embedded = embedded
     }
 
     // MARK: - Body
 
     public var body: some View {
-        if self.vm.paneVisible {
+        if self.vm.paneVisible || self.embedded {
             VStack(spacing: 0) {
                 self.header
                 Divider()
@@ -53,7 +55,7 @@ public struct VisualizerPane: View {
                 }
                 .onHover { _ in self.overlayTrigger += 1 }
             }
-            .frame(width: self.paneWidth)
+            .frame(width: self.embedded ? nil : self.paneWidth)
             // ignoresSafeAreaEdges: [] — the ShapeStyle background form
             // defaults to .all, which paints the black up through the top
             // safe area, i.e. under the toolbar and native tab strip in a
@@ -61,6 +63,7 @@ public struct VisualizerPane: View {
             // bug there). The pane must stay inside its own frame.
             .background(Color.black, ignoresSafeAreaEdges: [])
             .overlay(alignment: .leading) {
+                if !self.embedded {
                 HStack(spacing: 0) {
                     Rectangle()
                         .fill(Color.clear)
@@ -85,6 +88,7 @@ public struct VisualizerPane: View {
                             }
                         }
                     Divider()
+                }
                 }
             }
             // .contain, not the default: setting both a label and an
@@ -138,6 +142,9 @@ public struct VisualizerPane: View {
             .help(L10n.string("Close visualizer pane"))
             .accessibilityLabel(L10n.string("Close visualizer pane"))
             .accessibilityIdentifier(A11y.Visualizer.closeButton)
+            .opacity(self.embedded ? 0 : 1)
+            .disabled(self.embedded)
+            .accessibilityHidden(self.embedded)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

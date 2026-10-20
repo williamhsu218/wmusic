@@ -18,6 +18,10 @@ struct MainToolbarItems: ToolbarContent {
     let immersiveOpen: Bool
     let toggleImmersive: () -> Void
     let reduceMotion: Bool
+    let inspectorSelection: Binding<String>
+    private var lyricsSelected: Bool {
+        self.lyricsPaneVisible.wrappedValue && self.inspectorSelection.wrappedValue == "lyrics"
+    }
 
     var body: some ToolbarContent {
         ToolbarItemGroup(placement: .navigation) {
@@ -37,6 +41,8 @@ struct MainToolbarItems: ToolbarContent {
             .keyboardShortcut("]", modifiers: .command)
             .accessibilityIdentifier(A11y.Toolbar.forward)
 
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
             Button(
                 self.miniPlayerOpen ? L10n.string("Hide Mini Player") : L10n.string("Show Mini Player"),
                 systemImage: "pip.enter"
@@ -45,15 +51,22 @@ struct MainToolbarItems: ToolbarContent {
             }
             .help(L10n.string("Toggle mini player (⌥⌘M)"))
             .accessibilityIdentifier(A11y.Toolbar.miniPlayerToggle)
+            .foregroundStyle(self.miniPlayerOpen ? Color.accentColor : Color.primary)
+            .accessibilityValue(self.miniPlayerOpen ? L10n.string("on") : L10n.string("off"))
 
             Button(
-                self.lyricsPaneVisible.wrappedValue ? L10n.string("Hide Lyrics") : L10n.string("Show Lyrics"),
+                self.lyricsSelected ? L10n.string("Hide Lyrics") : L10n.string("Show Lyrics"),
                 systemImage: "text.quote"
             ) {
-                self.toggleAnimated(self.lyricsPaneVisible)
+                let alreadyShowingLyrics = self.lyricsPaneVisible.wrappedValue && self.inspectorSelection.wrappedValue == "lyrics"
+                self.inspectorSelection.wrappedValue = "lyrics"
+                self.visualizerPaneVisible.wrappedValue = false
+                self.lyricsPaneVisible.wrappedValue = !alreadyShowingLyrics
             }
             .help(L10n.string("Toggle lyrics pane (⌥⌘L)"))
             .accessibilityIdentifier(A11y.Toolbar.lyricsToggle)
+            .foregroundStyle(self.lyricsSelected ? Color.accentColor : Color.primary)
+            .accessibilityValue(self.lyricsSelected ? L10n.string("on") : L10n.string("off"))
 
             Button(
                 self.visualizerPaneVisible.wrappedValue ? L10n.string("Hide Visualizer") : L10n.string("Show Visualizer"),
@@ -65,6 +78,8 @@ struct MainToolbarItems: ToolbarContent {
             }
             .help(L10n.string("Toggle visualizer pane (⇧⌘V)"))
             .accessibilityIdentifier(A11y.Toolbar.visualizerToggle)
+            .foregroundStyle(self.visualizerPaneVisible.wrappedValue ? Color.accentColor : Color.primary)
+            .accessibilityValue(self.visualizerPaneVisible.wrappedValue ? L10n.string("on") : L10n.string("off"))
 
             Button(
                 self.immersiveOpen ? L10n.string("Exit Immersive Mode") : L10n.string("Enter Immersive Mode"),
@@ -74,6 +89,8 @@ struct MainToolbarItems: ToolbarContent {
             }
             .help(L10n.string("Toggle Immersive Mode (⇧⌘I)"))
             .accessibilityIdentifier(A11y.Toolbar.immersiveToggle)
+            .foregroundStyle(self.immersiveOpen ? Color.accentColor : Color.primary)
+            .accessibilityValue(self.immersiveOpen ? L10n.string("on") : L10n.string("off"))
 
             Button(L10n.string("Identify Track"), systemImage: "waveform.badge.magnifyingglass") {
                 self.vm.showIdentifyTrackForCurrentSelection()

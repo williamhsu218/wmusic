@@ -14,8 +14,8 @@
 git clone https://github.com/bocan/bocan-music.git
 cd bocan-music
 
-# Required before the project can be generated: project.yml references
-# Secrets.xcconfig, so xcodegen fails without it. The template's empty
+# Required before the project can be built: Config/Base.xcconfig includes
+# Secrets.xcconfig, so the build fails without it. The template's empty
 # defaults are fine; add real API keys later if you want those features
 # (see "Local developer API keys" below).
 cp Secrets.xcconfig.template Secrets.xcconfig
@@ -58,6 +58,11 @@ make doctor
 | `make open` | Open in Xcode |
 | `make generate` | Regenerate Xcode project from `project.yml` |
 | `make doctor` | Print tool versions and verify the SwiftLint/SwiftFormat pins and the FFmpeg major pin (`.ffmpeg-major`, enforced by `Scripts/check-ffmpeg-major.sh`) |
+
+For the local WMusic Release candidate, run `script/build_local_app.sh` from the
+repository root. Set `WMUSIC_DERIVED_DATA` to an absolute directory outside the
+repository to keep build products out of the checkout. The signed candidate stays
+at `dist/WMusic.app`; building does not install it.
 
 ## Xcode project
 

@@ -260,14 +260,29 @@ public extension LibraryViewModel {
         self.triggerScan(mode: .quick)
     }
 
-    /// Reconciles changes made while the app was not running, once per app
-    /// process. The FSEvents watcher begins at "now" and cannot replay those
-    /// offline changes. WindowGroup can mount RootView again in the same
-    /// process, so its task must call this gate instead of triggerScan().
-    func triggerStartupScanIfNeeded() {
+    /// Launch reads the persisted library without enumerating source folders.
+    /// Only an empty library with saved sources, or an explicit opt-in, scans.
+    /// Reserve the process gate before suspension so concurrent windows cannot
+    /// both start a scan. Offline changes remain available via Quick Rescan.
+    func triggerStartupScanIfNeeded(userDefaults: UserDefaults = .standard) async {
         guard self.scanner != nil, !self.startupScanTriggered else { return }
         self.startupScanTriggered = true
-        self.triggerScan(mode: .quick, isStartup: true)
+        do {
+            let roots = try await self.scanner?.roots() ?? []
+            guard !roots.isEmpty, !Task.isCancelled else {
+                self.log.debug("scan.startup.skipped", ["reason": "no-sources-or-cancelled"])
+                return
+            }
+            let count = try await TrackRepository(database: self.database).count()
+            guard count == 0 || userDefaults.bool(forKey: "library.scanOnLaunch") else {
+                self.log.debug("scan.startup.skipped", ["reason": "disabled"])
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self.triggerScan(mode: .quick, isStartup: true)
+        } catch {
+            self.log.warning("scan.startup.check.failed", ["error": String(reflecting: error)])
+        }
     }
 
     /// ADR-004 audit M2: re-scan all library roots in either Quick or Full mode.
@@ -315,7 +330,7 @@ public extension LibraryViewModel {
                 // heuristic the wrong way and covers populated content with the
                 // full-screen overlay (#491).
                 self.log.warning("scan.trackCount.failed", ["error": String(reflecting: error)])
-                trackCount = 0
+                trackCount = -1
             }
             self.isInitialScan = trackCount == 0
             let stream = await scanner.scan(mode: mode)

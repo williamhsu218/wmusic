@@ -18,13 +18,17 @@ public actor SubsonicStreamCache {
     public struct Configuration: Sendable {
         public var rootDirectory: URL
         public var budgetBytes: Int64
+        /// Maximum silence while resolving a URL, receiving headers or waiting for the next chunk.
+        public var stallTimeout: Duration
 
         public init(
             rootDirectory: URL,
-            budgetBytes: Int64 = 1_073_741_824
+            budgetBytes: Int64 = 1_073_741_824,
+            stallTimeout: Duration = .seconds(30)
         ) {
             self.rootDirectory = rootDirectory
             self.budgetBytes = budgetBytes
+            self.stallTimeout = stallTimeout
         }
     }
 
@@ -38,6 +42,7 @@ public actor SubsonicStreamCache {
     private let pathMonitor: NWPathMonitor
 
     private final class Entry {
+        let id = UUID()
         let key: SubsonicStreamKey
         /// Mutable so the cache can rename the file to a real audio
         /// extension once the magic bytes are known (see `finaliseExtension`).
@@ -47,8 +52,10 @@ public actor SubsonicStreamCache {
         var isComplete = false
         var error: Error?
         var lastAccess: Date
-        var readyContinuations: [CheckedContinuation<URL, Error>] = []
+        var readyContinuations: [UUID: CheckedContinuation<URL, Error>] = [:]
         var downloadTask: Task<Void, Never>?
+        var deadlineTask: Task<Void, Never>?
+        var deadlineID = UUID()
         var hasSignalledReady = false
 
         init(key: SubsonicStreamKey, fileURL: URL, now: Date = Date()) {
@@ -96,42 +103,72 @@ public actor SubsonicStreamCache {
         for key: SubsonicStreamKey,
         urlProvider: @Sendable @escaping () async throws -> URL
     ) async throws -> URL {
+        try Task.checkCancellation()
+        let entry: Entry
         if let existing = self.entries[key] {
             existing.lastAccess = Date()
-            if let error = existing.error {
-                throw error
-            }
             if existing.isComplete {
                 return existing.fileURL
             }
-            return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
-                existing.readyContinuations.append(cont)
-            }
-        }
-
-        let fileURL = try self.fileURL(for: key)
-        let entry = Entry(key: key, fileURL: fileURL)
-        self.entries[key] = entry
-
-        // Truncate any stale partial file so we start clean.
-        try? FileManager.default.removeItem(at: fileURL)
-        FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-
-        let resolvedURL: URL
-        do {
-            resolvedURL = try await urlProvider()
-        } catch {
-            self.entries[key] = nil
+            entry = existing
+        } else {
+            let fileURL = try self.fileURL(for: key)
             try? FileManager.default.removeItem(at: fileURL)
-            throw error
-        }
-
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
-            entry.readyContinuations.append(cont)
+            guard FileManager.default.createFile(atPath: fileURL.path, contents: nil) else {
+                throw RemoteTrackLoaderError.transport("Unable to create the audio cache file")
+            }
+            entry = Entry(key: key, fileURL: fileURL)
+            self.entries[key] = entry
+            self.armDeadline(for: entry)
+            // Register the first waiter before suspending for URL signing. All
+            // callers now share both URL resolution and the actual download.
+            let entryID = entry.id
             entry.downloadTask = Task { [weak self] in
-                await self?.runDownload(key: key, url: resolvedURL)
+                await self?.runDownload(key: key, entryID: entryID, urlProvider: urlProvider)
             }
         }
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                entry.readyContinuations[waiterID] = continuation
+                if Task.isCancelled {
+                    self.cancelWaiter(key: key, waiterID: waiterID)
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(key: key, waiterID: waiterID) }
+        }
+    }
+
+    private func cancelWaiter(key: SubsonicStreamKey, waiterID: UUID) {
+        guard let entry = self.entries[key], let waiter = entry.readyContinuations.removeValue(forKey: waiterID) else { return }
+        waiter.resume(throwing: CancellationError())
+        if entry.readyContinuations.isEmpty {
+            self.fail(entry: entry, with: RemoteTrackLoaderError.cancelled)
+        }
+    }
+
+    private func armDeadline(for entry: Entry) {
+        entry.deadlineTask?.cancel()
+        let timeout = self.config.stallTimeout
+        let key = entry.key
+        let entryID = entry.id
+        let deadlineID = UUID()
+        entry.deadlineID = deadlineID
+        entry.deadlineTask = Task { [weak self] in
+            do { try await Task.sleep(for: timeout) } catch { return }
+            await self?.deadlineExpired(key: key, entryID: entryID, deadlineID: deadlineID)
+        }
+    }
+
+    private func deadlineExpired(key: SubsonicStreamKey, entryID: UUID, deadlineID: UUID) {
+        guard let entry = self.entries[key], entry.id == entryID,
+              entry.deadlineID == deadlineID, !entry.isComplete else { return }
+        self.fail(entry: entry, with: RemoteTrackLoaderError.transport("Audio download stalled"))
+    }
+
+    func waitingRequestCount(for key: SubsonicStreamKey) -> Int {
+        self.entries[key]?.readyContinuations.count ?? 0
     }
 
     /// Mark these keys as pinned. Pinned entries are skipped by LRU
@@ -149,14 +186,8 @@ public actor SubsonicStreamCache {
     /// deleted from the user's library or its credentials change.
     public func purge(serverID: UUID) throws {
         let serverDir = self.config.rootDirectory.appendingPathComponent(serverID.uuidString, isDirectory: true)
-        for (key, entry) in self.entries where key.serverID == serverID {
-            entry.downloadTask?.cancel()
-            entry.error = RemoteTrackLoaderError.cancelled
-            for cont in entry.readyContinuations {
-                cont.resume(throwing: RemoteTrackLoaderError.cancelled)
-            }
-            entry.readyContinuations.removeAll()
-            self.entries[key] = nil
+        for entry in self.entries.values.filter({ $0.key.serverID == serverID }) {
+            self.fail(entry: entry, with: RemoteTrackLoaderError.cancelled)
         }
         if FileManager.default.fileExists(atPath: serverDir.path) {
             try FileManager.default.removeItem(at: serverDir)
@@ -189,22 +220,16 @@ public actor SubsonicStreamCache {
     private func cancelInFlightDownloads() {
         let incomplete = self.entries.filter { !$1.isComplete }
         guard !incomplete.isEmpty else { return }
-        for (key, entry) in incomplete {
-            entry.downloadTask?.cancel()
-            for cont in entry.readyContinuations {
-                cont.resume(throwing: RemoteTrackLoaderError.cancelled)
-            }
-            entry.readyContinuations.removeAll()
-            try? FileManager.default.removeItem(at: entry.fileURL)
-            self.entries[key] = nil
+        for entry in incomplete.values {
+            self.fail(entry: entry, with: RemoteTrackLoaderError.cancelled)
         }
         self.log.info("subsonic.cache.network.lost", ["cancelled": incomplete.count])
     }
 
     // MARK: - Download pump
 
-    private func runDownload(key: SubsonicStreamKey, url: URL) async {
-        guard let entry = self.entries[key] else { return }
+    private func runDownload(key: SubsonicStreamKey, entryID: UUID, urlProvider: @Sendable () async throws -> URL) async {
+        guard let entry = self.entries[key], entry.id == entryID else { return }
         // The cache signals ready only when the whole file is on disk, so this
         // interval is the network part of time-to-first-audio (#547).
         let endSpan = Telemetry.timer("subsonic.download")
@@ -213,12 +238,18 @@ public actor SubsonicStreamCache {
 
         let bytes: RemoteTrackBytes
         do {
+            let url = try await urlProvider()
+            try Task.checkCancellation()
+            guard self.entries[key] === entry else { return }
+            self.armDeadline(for: entry)
             bytes = try await self.loader.loadBytes(from: url)
+            try Task.checkCancellation()
+            guard self.entries[key] === entry else { return }
         } catch {
             self.fail(entry: entry, with: error)
             return
         }
-        entry.totalBytes = bytes.totalBytes
+        self.receivedHeaders(bytes, for: entry)
 
         let handle: FileHandle
         do {
@@ -239,27 +270,45 @@ public actor SubsonicStreamCache {
         do {
             for try await chunk in bytes.stream {
                 try Task.checkCancellation()
+                guard self.entries[key] === entry else { return }
+                if !chunk.isEmpty {
+                    self.armDeadline(for: entry)
+                }
                 try handle.write(contentsOf: chunk)
                 entry.bytesWritten += Int64(chunk.count)
             }
+            try Task.checkCancellation()
+            guard self.entries[key] === entry else { return }
             // Close the writer before sniffing so the read sees a flushed file.
             try? handle.close()
-            entry.isComplete = true
-            self.finaliseExtension(for: entry)
-            if !entry.hasSignalledReady {
-                entry.hasSignalledReady = true
-                self.signalReady(entry: entry)
-            }
-            self.log.info("subsonic.cache.download.complete", [
-                "songID": key.songID,
-                "bytes": entry.bytesWritten,
-                "ext": entry.fileURL.pathExtension,
-                "ms": Self.milliseconds(ContinuousClock.now - started),
-            ])
-            await self.evictIfNeeded()
+            self.completeDownload(entry, started: started)
+            await self.evictIfNeeded(keeping: entry.key)
         } catch {
             self.fail(entry: entry, with: error)
         }
+    }
+
+    private func receivedHeaders(_ bytes: RemoteTrackBytes, for entry: Entry) {
+        entry.totalBytes = bytes.totalBytes
+        self.armDeadline(for: entry)
+    }
+
+    private func completeDownload(_ entry: Entry, started: ContinuousClock.Instant) {
+        entry.deadlineTask?.cancel()
+        entry.deadlineTask = nil
+        entry.downloadTask = nil
+        entry.isComplete = true
+        self.finaliseExtension(for: entry)
+        if !entry.hasSignalledReady {
+            entry.hasSignalledReady = true
+            self.signalReady(entry: entry)
+        }
+        self.log.info("subsonic.cache.download.complete", [
+            "songID": entry.key.songID,
+            "bytes": entry.bytesWritten,
+            "ext": entry.fileURL.pathExtension,
+            "ms": Self.milliseconds(ContinuousClock.now - started),
+        ])
     }
 
     private static func milliseconds(_ duration: Duration) -> Int {
@@ -349,16 +398,23 @@ public actor SubsonicStreamCache {
     private func signalReady(entry: Entry) {
         let conts = entry.readyContinuations
         entry.readyContinuations.removeAll()
-        for cont in conts {
+        for cont in conts.values {
             cont.resume(returning: entry.fileURL)
         }
     }
 
     private func fail(entry: Entry, with error: Error) {
+        // A cancelled/expired attempt can finish after a retry has begun.
+        // It must never remove that retry's entry or its file.
+        guard self.entries[entry.key] === entry else { return }
+        entry.downloadTask?.cancel()
+        entry.deadlineTask?.cancel()
+        entry.downloadTask = nil
+        entry.deadlineTask = nil
         entry.error = error
         let conts = entry.readyContinuations
         entry.readyContinuations.removeAll()
-        for cont in conts {
+        for cont in conts.values {
             cont.resume(throwing: error)
         }
         try? FileManager.default.removeItem(at: entry.fileURL)
@@ -372,12 +428,14 @@ public actor SubsonicStreamCache {
     // MARK: - Eviction
 
     /// LRU-evict completed, non-pinned entries until the cache is back under
-    /// budget. Incomplete downloads are never evicted (we'd lose live data).
-    private func evictIfNeeded() async {
+    /// budget. Incomplete downloads and the file just returned are never evicted.
+    /// A single oversized file may exceed the soft budget until a later request;
+    /// returning an already-deleted URL would make a successful download unusable.
+    private func evictIfNeeded(keeping deliveredKey: SubsonicStreamKey) async {
         var totalSize = self.cacheSize()
         guard totalSize > self.config.budgetBytes else { return }
         let candidates = self.entries.values
-            .filter { $0.isComplete && !self.pinned.contains($0.key) }
+            .filter { $0.isComplete && $0.key != deliveredKey && !self.pinned.contains($0.key) }
             .sorted { $0.lastAccess < $1.lastAccess }
         for entry in candidates {
             if totalSize <= self.config.budgetBytes {

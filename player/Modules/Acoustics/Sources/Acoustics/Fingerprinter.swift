@@ -12,11 +12,13 @@ import Observability
 public actor Fingerprinter {
     private let fpcalcURL: URL
     private let log = AppLogger.make(.network)
+    private let timeout: Duration
 
     /// - Parameter fpcalcURL: Absolute path to the `fpcalc` executable inside the app bundle.
     ///   Obtain via `Bundle.main.url(forResource: "fpcalc", withExtension: nil)`.
-    public init(fpcalcURL: URL) {
+    public init(fpcalcURL: URL, timeout: Duration = .seconds(60)) {
         self.fpcalcURL = fpcalcURL
+        self.timeout = timeout
     }
 
     // MARK: - Public API
@@ -33,11 +35,14 @@ public actor Fingerprinter {
     public func fingerprint(url: URL) async throws -> (fingerprint: String, duration: Int) {
         let fpcalcURL = self.fpcalcURL
         self.log.debug("fingerprinter.start", ["path": url.lastPathComponent])
-        let result = try await Task.detached(priority: .userInitiated) {
-            // Task.detached is required here because waitUntilExit() blocks the
-            // calling thread. Running off-actor keeps the main actor responsive.
-            try Self.runFpcalc(at: fpcalcURL, fileURL: url)
-        }.value
+        let result: (fingerprint: String, duration: Int)
+        do {
+            result = try await OperationDeadline.run(for: self.timeout) {
+                try await Self.runFpcalc(at: fpcalcURL, fileURL: url)
+            }
+        } catch OperationDeadlineError.timedOut {
+            throw AcousticsError.fpcalcFailed(exitCode: -1, stderr: "Fingerprinting timed out")
+        }
         self.log.debug("fingerprinter.done", ["duration": result.duration])
         return result
     }
@@ -47,7 +52,7 @@ public actor Fingerprinter {
     private static func runFpcalc(
         at fpcalcURL: URL,
         fileURL: URL
-    ) throws -> (fingerprint: String, duration: Int) {
+    ) async throws -> (fingerprint: String, duration: Int) {
         guard fileURL.isFileURL else {
             throw AcousticsError.invalidInput(reason: "fpcalc requires a file URL, got: \(fileURL.scheme ?? "nil")")
         }
@@ -59,22 +64,47 @@ public actor Fingerprinter {
         process.executableURL = fpcalcURL
         process.arguments = ["-json", "-length", "120", path]
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        let exitCode = process.terminationStatus
-        guard exitCode == 0 else {
-            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            let errStr = String(data: errData, encoding: .utf8) ?? ""
-            throw AcousticsError.fpcalcFailed(exitCode: exitCode, stderr: errStr)
+        // Pipes read only after process exit can fill up and deadlock fpcalc.
+        // Temporary output files avoid that backpressure and are removed on
+        // every success, launch failure, cancellation and timeout path.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("wmusic-fpcalc-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let stdoutURL = directory.appendingPathComponent("stdout")
+        let stderrURL = directory.appendingPathComponent("stderr")
+        FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+        FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+        let stdout = try FileHandle(forWritingTo: stdoutURL)
+        defer { try? stdout.close() }
+        let stderr = try FileHandle(forWritingTo: stderrURL)
+        defer { try? stderr.close() }
+        process.standardOutput = stdout
+        process.standardError = stderr
+        let owner = FingerprintProcess(process)
+        let (exits, continuation) = AsyncStream<Int32>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        process.terminationHandler = { process in
+            continuation.yield(process.terminationStatus)
+            continuation.finish()
         }
-
-        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let exitCode: Int32 = try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try owner.run()
+            for await status in exits {
+                try Task.checkCancellation()
+                return status
+            }
+            throw CancellationError()
+        } onCancel: {
+            owner.cancel()
+        }
+        guard exitCode == 0 else {
+            let data = try Data(contentsOf: stderrURL)
+            throw AcousticsError.fpcalcFailed(
+                exitCode: exitCode,
+                stderr: String(bytes: data.prefix(4096), encoding: .utf8) ?? "Unreadable fpcalc error output"
+            )
+        }
+        let data = try Data(contentsOf: stdoutURL)
         return try self.parseFpcalcOutput(data)
     }
 
@@ -86,6 +116,42 @@ public actor Fingerprinter {
         } catch {
             let raw = String(data: data, encoding: .utf8) ?? "<binary>"
             throw AcousticsError.invalidResponse(reason: "fpcalc JSON parse failed: \(raw.prefix(200))")
+        }
+    }
+}
+
+/// Serializes cancellation against process launch. Escalation targets only the
+/// owned child if it ignores SIGTERM; no global process-name kill is used.
+private final class FingerprintProcess: @unchecked Sendable {
+    private let process: Process
+    private let lock = NSLock()
+    private var cancelled = false
+
+    init(_ process: Process) {
+        self.process = process
+    }
+
+    func run() throws {
+        try self.lock.withLock {
+            guard !self.cancelled else { throw CancellationError() }
+            try self.process.run()
+        }
+    }
+
+    func cancel() {
+        self.lock.withLock {
+            self.cancelled = true
+            if self.process.isRunning {
+                self.process.terminate()
+            }
+        }
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(200))
+            self.lock.withLock {
+                if self.process.isRunning {
+                    kill(self.process.processIdentifier, SIGKILL)
+                }
+            }
         }
     }
 }

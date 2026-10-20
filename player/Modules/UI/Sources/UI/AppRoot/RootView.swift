@@ -24,6 +24,7 @@ public struct BocanRootView: View {
     /// it re-ran this whole body, and every child that could not prove itself
     /// unchanged, on each synced lyric line (#456). The pane toggle reads the
     /// same preference key through `lyricsPaneVisible` below.
+    private let startupScanDefaults: UserDefaults
     private let lyricsVM: LyricsViewModel
     @ObservedObject private var visualizerVM: VisualizerViewModel
     /// Plain reference (not @ObservedObject) so `BocanRootView` skips
@@ -40,6 +41,8 @@ public struct BocanRootView: View {
     @State private var batchCoverArtVM: BatchCoverArtViewModel?
     @State private var duplicateReviewVM: DuplicateReviewViewModel?
     /// Per-window state: the main browser stays mounted behind its player.
+    @Namespace private var artworkTransition
+    @AppStorage("ui.inspector.selection") private var inspectorSelection = "lyrics"
     @State private var showExpandedNowPlaying = false
     @State private var expandedPrewarmed = false
     @State private var expandedTransitionGeneration = 0
@@ -69,12 +72,14 @@ public struct BocanRootView: View {
         vm: LibraryViewModel,
         lyricsVM: LyricsViewModel,
         visualizerVM: VisualizerViewModel,
-        scrobbleSettingsVM: ScrobbleSettingsViewModel? = nil
+        scrobbleSettingsVM: ScrobbleSettingsViewModel? = nil,
+        startupScanDefaults: UserDefaults = .standard
     ) {
         _vm = StateObject(wrappedValue: vm)
         self.lyricsVM = lyricsVM
         self.visualizerVM = visualizerVM
         self.scrobbleSettingsVM = scrobbleSettingsVM
+        self.startupScanDefaults = startupScanDefaults
     }
 
     /// `true` once any music source exists (local folder or Subsonic server,
@@ -99,8 +104,8 @@ public struct BocanRootView: View {
     /// Main window chrome, split from `body` to keep the modifier chain
     /// within the Swift type-checker's limits.
     private var windowContent: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
                 NavigationSplitView {
                     Sidebar(vm: self.vm)
                 } detail: {
@@ -125,43 +130,33 @@ public struct BocanRootView: View {
                                 self.openWindow(id: ImmersiveWindowView.windowID)
                             }
                         },
-                        reduceMotion: self.reduceMotion
+                        reduceMotion: self.reduceMotion,
+                        inspectorSelection: self.$inspectorSelection
                     )
                 }
 
-                NowPlayingStrip(
-                    vm: self.vm.nowPlaying,
-                    scrobbleSettingsVM: self.scrobbleSettingsVM,
-                    openExpandedNowPlaying: { self.setExpandedNowPlaying(true) },
-                    prewarmExpandedNowPlaying: { self.prewarmExpandedNowPlaying() }
-                )
-                    .environmentObject(self.visualizerVM)
-            }
-
-            // One trailing slot: Visualizer wins over Lyrics when both are on.
-            if self.visualizerVM.paneVisible {
-                VisualizerPane(vm: self.visualizerVM, nowPlayingVM: self.vm.nowPlaying)
-            } else {
-                // Pass the model, never `nowPlaying.position`: a position read
-                // here makes this whole body a dependent of the 0.5 s tick, and
-                // every child that cannot prove itself unchanged re-runs with it,
-                // down to the songs table re-diffing every row (#450).
-                LyricsPane(vm: self.lyricsVM, nowPlaying: self.vm.nowPlaying) { pos in
-                    Task { await self.vm.nowPlaying.scrub(to: pos) }
+                if self.visualizerVM.paneVisible {
+                    VisualizerPane(vm: self.visualizerVM, nowPlayingVM: self.vm.nowPlaying)
+                } else if self.lyricsPaneVisible {
+                    LibraryInspector(library: self.vm, lyricsVM: self.lyricsVM,
+                                     selection: self.$inspectorSelection, isVisible: self.$lyricsPaneVisible)
                 }
             }
+            NowPlayingStrip(
+                vm: self.vm.nowPlaying,
+                scrobbleSettingsVM: self.scrobbleSettingsVM,
+                openExpandedNowPlaying: { self.setExpandedNowPlaying(true) },
+                prewarmExpandedNowPlaying: { self.prewarmExpandedNowPlaying() },
+                artworkNamespace: self.artworkTransition,
+                expanded: self.showExpandedNowPlaying
+            )
+            .environmentObject(self.visualizerVM)
         }
         .modifier(LyricsPlaybackDriver(lyricsVM: self.lyricsVM, nowPlaying: self.vm.nowPlaying))
         .safeAreaInset(edge: .top, spacing: 0) {
-            // Crash-recovery banner takes priority over the diagnostics consent
-            // banner (issue #208).  Collapses once the user picks Recover or
-            // Start Fresh; never grabs focus so it can't cause an audio pop.
             if self.didCrashPreviously {
                 CrashRecoveryBanner()
             } else if !self.diagnosticsConsentAsked, self.libraryHasContent {
-                // Non-modal first-launch consent prompt (issue #209), deferred
-                // until the user has added music so it doesn't compete with the
-                // empty-library "Add Music" call to action (issue #310).
                 DiagnosticsConsentBanner()
             }
         }
@@ -194,7 +189,7 @@ public struct BocanRootView: View {
             await self.vm.refreshRoots()
             await self.vm.loadCurrentDestination()
             self.prewarmExpandedNowPlaying()
-            self.vm.triggerStartupScanIfNeeded()
+            await self.vm.triggerStartupScanIfNeeded(userDefaults: self.startupScanDefaults)
             await self.vm.startOrStopWatcher()
         }
         .onDisappear {
@@ -250,6 +245,8 @@ public struct BocanRootView: View {
                     ExpandedNowPlayingView(
                         library: self.vm,
                         lyricsVM: self.lyricsVM,
+                        visualizerVM: self.visualizerVM,
+                        artworkNamespace: self.artworkTransition,
                         isPresented: self.showExpandedNowPlaying,
                         onClose: { self.setExpandedNowPlaying(false) },
                         onGetInfo: { trackID in

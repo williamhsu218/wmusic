@@ -4,6 +4,52 @@ import Testing
 
 @Suite("Fingerprinter")
 struct FingerprinterTests {
+    private func executable(_ body: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("wmusic-fpcalc-test-\(UUID())")
+        try ("#!/bin/sh\n" + body).write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        return url
+    }
+
+    @Test("large stderr cannot block a successful fingerprint subprocess")
+    func drainsLargeOutput() async throws {
+        let script = try self.executable("/usr/bin/head -c 262144 /dev/zero >&2\nprintf '%s' '{\"fingerprint\":\"test\",\"duration\":3}'\n")
+        defer { try? FileManager.default.removeItem(at: script) }
+        let result = try await Fingerprinter(fpcalcURL: script, timeout: .seconds(3)).fingerprint(url: URL(filePath: "/tmp/test.wav"))
+        #expect(result.fingerprint == "test")
+        #expect(result.duration == 3)
+    }
+
+    @Test("a hanging subprocess times out")
+    func subprocessDeadline() async throws {
+        let script = try self.executable("exec /bin/sleep 30\n")
+        defer { try? FileManager.default.removeItem(at: script) }
+        await #expect(throws: AcousticsError.fpcalcFailed(exitCode: -1, stderr: "Fingerprinting timed out")) {
+            _ = try await Fingerprinter(fpcalcURL: script, timeout: .milliseconds(150)).fingerprint(url: URL(filePath: "/tmp/test.wav"))
+        }
+    }
+
+    @Test("cancelling fingerprint work terminates its child")
+    func cancellationKillsChild() async throws {
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("wmusic-fpcalc-pid-\(UUID())")
+        let script = try self.executable("trap '' TERM\necho $$ > '\(pidFile.path)'\nexec /bin/sleep 30\n")
+        defer {
+            try? FileManager.default.removeItem(at: script)
+            try? FileManager.default.removeItem(at: pidFile)
+        }
+        let task = Task { try await Fingerprinter(fpcalcURL: script).fingerprint(url: URL(filePath: "/tmp/test.wav")) }
+        for _ in 0 ..< 500 where !FileManager.default.fileExists(atPath: pidFile.path) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let pid = try #require(Int32(String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        task.cancel()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        for _ in 0 ..< 100 where kill(pid, 0) == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(kill(pid, 0) == -1)
+    }
+
     // MARK: - fpcalc output parsing
 
     @Test("parseFpcalcOutput decodes valid JSON")

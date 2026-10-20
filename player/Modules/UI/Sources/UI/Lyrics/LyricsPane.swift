@@ -20,6 +20,7 @@ public struct LyricsPane: View {
 
     /// Seek callback forwarded to ``LyricsView`` when the user taps a synced line.
     public var onSeek: (TimeInterval) -> Void
+    public var embedded: Bool
 
     // MARK: - State
 
@@ -35,17 +36,19 @@ public struct LyricsPane: View {
     public init(
         vm: LyricsViewModel,
         nowPlaying: NowPlayingViewModel,
+        embedded: Bool = false,
         onSeek: @escaping (TimeInterval) -> Void
     ) {
         self.vm = vm
         self.nowPlaying = nowPlaying
+        self.embedded = embedded
         self.onSeek = onSeek
     }
 
     // MARK: - Body
 
     public var body: some View {
-        if self.vm.paneVisible {
+        if self.vm.paneVisible || self.embedded {
             VStack(spacing: 0) {
                 self.header
                 Divider()
@@ -59,7 +62,7 @@ public struct LyricsPane: View {
                 // lyrics column shares the same document and needs the same ticks).
                 LyricsView(vm: self.vm, onSeek: self.onSeek, searchText: self.searchText)
             }
-            .frame(width: self.paneWidth)
+            .frame(width: self.embedded ? nil : self.paneWidth)
             .background {
                 if self.reduceTransparency {
                     Color(nsColor: .windowBackgroundColor)
@@ -68,6 +71,7 @@ public struct LyricsPane: View {
                 }
             }
             .overlay(alignment: .leading) {
+                if !self.embedded {
                 HStack(spacing: 0) {
                     Rectangle()
                         .fill(Color.clear)
@@ -92,6 +96,7 @@ public struct LyricsPane: View {
                             }
                         }
                     Divider()
+                }
                 }
             }
             .sheet(isPresented: self.$vm.isEditorPresented) {
@@ -140,6 +145,9 @@ public struct LyricsPane: View {
                 .help(L10n.string("Close lyrics pane (⌘L)"))
                 .accessibilityLabel(L10n.string("Close lyrics pane"))
                 .accessibilityIdentifier(A11y.Lyrics.closeButton)
+                .opacity(self.embedded ? 0 : 1)
+                .disabled(self.embedded)
+                .accessibilityHidden(self.embedded)
             }
 
             // Row 2: font-size picker + action buttons

@@ -144,7 +144,7 @@ struct SourceBadgesRowConventionTests {
         // Centred in the bar, not top-aligned: the top-aligned version left
         // the title floating with empty space under it whenever the row was
         // short or absent.
-        #expect(strip.contains("minWidth: 160, maxWidth: 380, alignment: .leading"))
-        #expect(!strip.contains("alignment: .topLeading"))
+        #expect(strip.contains(".frame(width: sideWidth, alignment: .leading)"))
+        #expect(strip.contains("self.scrubber"))
     }
 }

@@ -22,6 +22,16 @@ public actor SyncServer {
 
     private var running = false
     private var boundPort: UInt16?
+    private var startTask: Task<Void, Error>?
+    private var stopTask: Task<Void, Never>?
+
+    var isStarting: Bool {
+        self.startTask != nil
+    }
+
+    var activeConnectionCount: Int {
+        get async { await self.listener.connectionCount }
+    }
 
     /// - Parameters:
     ///   - database: the shared library database.
@@ -109,29 +119,73 @@ public actor SyncServer {
     /// change observer, wires pairing-mode changes to the Bonjour TXT, and begins
     /// advertising. Idempotent.
     public func start() async throws {
-        guard !self.running else { return }
-        try await self.trusted.start()
-        await self.libraryObserver.start()
-        await self.transcodeCoordinator.start()
-
-        let port = try await self.listener.start(advertise: true)
-        self.boundPort = port
-
-        // Reflect pairing-mode changes in the advertised TXT `pm` field. Fires
-        // immediately with the current state (0 at rest).
-        let listener = self.listener
-        await self.pairing.observePairingMode { on in
-            Task { await listener.updatePairingMode(on) }
+        try Task.checkCancellation()
+        if let stopping = self.stopTask {
+            await stopping.value
+            try await self.start()
+            return
         }
-
-        self.running = true
-        self.log.debug("sync.start", ["port": String(port)])
+        guard !self.running else { return }
+        if let starting = self.startTask {
+            try await starting.value
+            return
+        }
+        let task = Task { try await self.startComponents() }
+        self.startTask = task
+        defer { self.startTask = nil }
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
-    /// Exits any pairing window (reverting `pm` to 0), withdraws the Bonjour
-    /// advertisement, closes the listener, and stops the observers. Idempotent.
+    private func startComponents() async throws {
+        do {
+            try Task.checkCancellation()
+            try await self.trusted.start()
+            try Task.checkCancellation()
+            await self.libraryObserver.start()
+            try Task.checkCancellation()
+            await self.transcodeCoordinator.start()
+            try Task.checkCancellation()
+            let port = try await self.listener.start(advertise: true)
+            try Task.checkCancellation()
+            let listener = self.listener
+            await self.pairing.observePairingMode { on in
+                Task { await listener.updatePairingMode(on) }
+            }
+            try Task.checkCancellation()
+            self.boundPort = port
+            self.running = true
+            self.log.debug("sync.start", ["port": String(port)])
+        } catch {
+            // Startup can fail after any subset of the observers was started.
+            // Cleanup must not depend on the final `running` flag.
+            await self.stopComponents()
+            throw error
+        }
+    }
+
+    /// Stop also cancels and joins an in-progress startup. A late ready callback
+    /// cannot resurrect a server that Settings has just disabled.
     public func stop() async {
-        guard self.running else { return }
+        if let stopping = self.stopTask {
+            await stopping.value
+            return
+        }
+        let starting = self.startTask
+        starting?.cancel()
+        let task = Task {
+            _ = await starting?.result
+            await self.stopComponents()
+        }
+        self.stopTask = task
+        await task.value
+        self.stopTask = nil
+    }
+
+    private func stopComponents() async {
         await self.pairing.cancel()
         await self.listener.stop()
         await self.libraryObserver.stop()

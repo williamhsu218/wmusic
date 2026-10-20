@@ -4,7 +4,7 @@ import Testing
 
 // MARK: - Stub transport
 
-private actor StubTransport: HTTPTransport {
+actor StreamCacheTestTransport: HTTPTransport {
     struct Script {
         var chunks: [Data]
         var totalBytes: Int64?
@@ -85,18 +85,18 @@ private actor StubTransport: HTTPTransport {
 
 // MARK: - Helpers
 
-private func makeTempDir() throws -> URL {
+func makeStreamCacheTestDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory
         .appendingPathComponent("subsonic-stream-cache-tests-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
 
-private func makeKey(server: UUID = UUID(), song: String = "tr-1", format: String = "mp3", kbps: Int? = 192) -> SubsonicStreamKey {
+func makeStreamCacheTestKey(server: UUID = UUID(), song: String = "tr-1", format: String = "mp3", kbps: Int? = 192) -> SubsonicStreamKey {
     SubsonicStreamKey(serverID: server, songID: song, format: format, bitrateKbps: kbps)
 }
 
-private func dummyURL() -> URL {
+func streamCacheTestURL() -> URL {
     URL(string: "https://example.invalid/stream") ?? URL(filePath: "/")
 }
 
@@ -108,20 +108,20 @@ struct SubsonicStreamCacheTests {
 
     @Test("cold fetch returns URL once the full download completes")
     func coldFetchReturnsAfterDownload() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let chunk = Data(repeating: 0xAA, count: 1024)
         let chunks = Array(repeating: chunk, count: 200) // 200 KB total
-        let transport = StubTransport(script: .init(chunks: chunks, totalBytes: 200 * 1024))
+        let transport = StreamCacheTestTransport(script: .init(chunks: chunks, totalBytes: 200 * 1024))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir, budgetBytes: 10 * 1024 * 1024),
             loader: loader
         )
 
-        let key = makeKey()
-        let url = try await cache.url(for: key) { dummyURL() }
+        let key = makeStreamCacheTestKey()
+        let url = try await cache.url(for: key) { streamCacheTestURL() }
         #expect(FileManager.default.fileExists(atPath: url.path))
         #expect(url.path.contains(key.serverID.uuidString))
 
@@ -137,18 +137,18 @@ struct SubsonicStreamCacheTests {
 
     @Test("a very short track still becomes ready on EOF")
     func shortTrackBecomesReadyOnEOF() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let small = Data(repeating: 0x01, count: 1000)
-        let transport = StubTransport(script: .init(chunks: [small], totalBytes: 1000))
+        let transport = StreamCacheTestTransport(script: .init(chunks: [small], totalBytes: 1000))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir),
             loader: loader
         )
 
-        let url = try await cache.url(for: makeKey()) { dummyURL() }
+        let url = try await cache.url(for: makeStreamCacheTestKey()) { streamCacheTestURL() }
         let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64 ?? 0
         #expect(size == 1000)
     }
@@ -157,21 +157,21 @@ struct SubsonicStreamCacheTests {
 
     @Test("two concurrent requests for the same key share a single download")
     func concurrentRequestsShareOneDownload() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let chunk = Data(repeating: 0x42, count: 100_000)
         let chunks = Array(repeating: chunk, count: 4) // 400 KB
-        let transport = StubTransport(script: .init(chunks: chunks, totalBytes: 400_000))
+        let transport = StreamCacheTestTransport(script: .init(chunks: chunks, totalBytes: 400_000))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir),
             loader: loader
         )
 
-        let key = makeKey()
-        async let first = cache.url(for: key) { dummyURL() }
-        async let second = cache.url(for: key) { dummyURL() }
+        let key = makeStreamCacheTestKey()
+        async let first = cache.url(for: key) { streamCacheTestURL() }
+        async let second = cache.url(for: key) { streamCacheTestURL() }
         let (u1, u2) = try await (first, second)
         #expect(u1 == u2)
 
@@ -184,11 +184,11 @@ struct SubsonicStreamCacheTests {
 
     @Test("an unauthorized mid-stream error surfaces and clears the entry")
     func unauthorizedErrorPropagates() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let chunk = Data(repeating: 0x55, count: 4096)
-        let transport = StubTransport(script: .init(
+        let transport = StreamCacheTestTransport(script: .init(
             chunks: [chunk, chunk],
             totalBytes: 8192,
             failAt: 1,
@@ -201,7 +201,7 @@ struct SubsonicStreamCacheTests {
         )
 
         do {
-            _ = try await cache.url(for: makeKey()) { dummyURL() }
+            _ = try await cache.url(for: makeStreamCacheTestKey()) { streamCacheTestURL() }
             Issue.record("expected unauthorized error")
         } catch let error as RemoteTrackLoaderError {
             #expect(error == .unauthorized)
@@ -214,12 +214,12 @@ struct SubsonicStreamCacheTests {
 
     @Test("urlProvider failure aborts the fetch and leaves no entry behind")
     func urlProviderFailureClearsEntry() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         struct ProviderFailure: Error {}
 
-        let transport = StubTransport(script: .init(chunks: [], totalBytes: 0))
+        let transport = StreamCacheTestTransport(script: .init(chunks: [], totalBytes: 0))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir),
@@ -227,7 +227,7 @@ struct SubsonicStreamCacheTests {
         )
 
         do {
-            _ = try await cache.url(for: makeKey()) { throw ProviderFailure() }
+            _ = try await cache.url(for: makeStreamCacheTestKey()) { throw ProviderFailure() }
             Issue.record("expected ProviderFailure")
         } catch is ProviderFailure {
             // expected
@@ -242,11 +242,11 @@ struct SubsonicStreamCacheTests {
 
     @Test("eviction respects budget and never drops pinned entries")
     func evictionRespectsBudgetAndPinning() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let chunk = Data(repeating: 0x77, count: 10000)
-        let transport = StubTransport(script: .init(chunks: [chunk], totalBytes: 10000))
+        let transport = StreamCacheTestTransport(script: .init(chunks: [chunk], totalBytes: 10000))
         let loader = RemoteTrackLoader(transport: transport)
         // Budget = 25 KB; each entry is 10 KB → after three downloads we
         // sit at 30 KB and need to drop a single entry. With k1 pinned, the
@@ -258,16 +258,16 @@ struct SubsonicStreamCacheTests {
         )
 
         let server = UUID()
-        let k1 = makeKey(server: server, song: "a")
-        let k2 = makeKey(server: server, song: "b")
-        let k3 = makeKey(server: server, song: "c")
+        let k1 = makeStreamCacheTestKey(server: server, song: "a")
+        let k2 = makeStreamCacheTestKey(server: server, song: "b")
+        let k3 = makeStreamCacheTestKey(server: server, song: "c")
 
-        _ = try await cache.url(for: k1) { dummyURL() }
+        _ = try await cache.url(for: k1) { streamCacheTestURL() }
         try await Task.sleep(nanoseconds: 50_000_000)
         await cache.pin([k1]) // pin oldest so it survives eviction
-        _ = try await cache.url(for: k2) { dummyURL() }
+        _ = try await cache.url(for: k2) { streamCacheTestURL() }
         try await Task.sleep(nanoseconds: 50_000_000)
-        _ = try await cache.url(for: k3) { dummyURL() }
+        _ = try await cache.url(for: k3) { streamCacheTestURL() }
         try await Task.sleep(nanoseconds: 100_000_000)
 
         let containsPinned = await cache.contains(k1)
@@ -282,11 +282,11 @@ struct SubsonicStreamCacheTests {
 
     @Test("purge removes all entries and files for a single server")
     func purgeRemovesServerEntries() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let chunk = Data(repeating: 0x09, count: 4096)
-        let transport = StubTransport(script: .init(chunks: [chunk], totalBytes: 4096))
+        let transport = StreamCacheTestTransport(script: .init(chunks: [chunk], totalBytes: 4096))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir),
@@ -295,14 +295,14 @@ struct SubsonicStreamCacheTests {
 
         let serverA = UUID()
         let serverB = UUID()
-        _ = try await cache.url(for: makeKey(server: serverA, song: "a1")) { dummyURL() }
-        _ = try await cache.url(for: makeKey(server: serverB, song: "b1")) { dummyURL() }
+        _ = try await cache.url(for: makeStreamCacheTestKey(server: serverA, song: "a1")) { streamCacheTestURL() }
+        _ = try await cache.url(for: makeStreamCacheTestKey(server: serverB, song: "b1")) { streamCacheTestURL() }
         try await Task.sleep(nanoseconds: 50_000_000)
 
         try await cache.purge(serverID: serverA)
 
-        let countA = await cache.contains(makeKey(server: serverA, song: "a1"))
-        let countB = await cache.contains(makeKey(server: serverB, song: "b1"))
+        let countA = await cache.contains(makeStreamCacheTestKey(server: serverA, song: "a1"))
+        let countB = await cache.contains(makeStreamCacheTestKey(server: serverB, song: "b1"))
         #expect(!countA)
         #expect(countB)
 
@@ -330,13 +330,13 @@ struct SubsonicStreamCacheTests {
 
     @Test("an `original` MP3 download is renamed to .mp3")
     func originalIsRenamedByMagicBytes() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         // ID3v2 header — unmistakable MP3 signature.
         var payload = Data([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00])
         payload.append(Data(repeating: 0x00, count: 1024))
-        let transport = StubTransport(script: .init(chunks: [payload], totalBytes: Int64(payload.count)))
+        let transport = StreamCacheTestTransport(script: .init(chunks: [payload], totalBytes: Int64(payload.count)))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir),
@@ -344,19 +344,19 @@ struct SubsonicStreamCacheTests {
         )
 
         let key = SubsonicStreamKey(serverID: UUID(), songID: "x", format: "original", bitrateKbps: nil)
-        let url = try await cache.url(for: key) { dummyURL() }
+        let url = try await cache.url(for: key) { streamCacheTestURL() }
         #expect(url.pathExtension == "mp3", "expected .mp3 extension, got \(url.pathExtension)")
         #expect(FileManager.default.fileExists(atPath: url.path))
     }
 
     @Test("an `original` FLAC download is renamed to .flac")
     func originalFLACRename() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         var payload = Data([0x66, 0x4C, 0x61, 0x43]) // "fLaC"
         payload.append(Data(repeating: 0x00, count: 1024))
-        let transport = StubTransport(script: .init(chunks: [payload], totalBytes: Int64(payload.count)))
+        let transport = StreamCacheTestTransport(script: .init(chunks: [payload], totalBytes: Int64(payload.count)))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir),
@@ -364,18 +364,18 @@ struct SubsonicStreamCacheTests {
         )
 
         let key = SubsonicStreamKey(serverID: UUID(), songID: "x", format: "original", bitrateKbps: nil)
-        let url = try await cache.url(for: key) { dummyURL() }
+        let url = try await cache.url(for: key) { streamCacheTestURL() }
         #expect(url.pathExtension == "flac")
     }
 
     @Test("an unrecognised `original` payload keeps the .bin extension")
     func originalUnknownStaysBin() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         // Random non-audio bytes — no magic signature.
         let payload = Data(repeating: 0x42, count: 64)
-        let transport = StubTransport(script: .init(chunks: [payload], totalBytes: Int64(payload.count)))
+        let transport = StreamCacheTestTransport(script: .init(chunks: [payload], totalBytes: Int64(payload.count)))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir),
@@ -383,18 +383,18 @@ struct SubsonicStreamCacheTests {
         )
 
         let key = SubsonicStreamKey(serverID: UUID(), songID: "x", format: "original", bitrateKbps: nil)
-        let url = try await cache.url(for: key) { dummyURL() }
+        let url = try await cache.url(for: key) { streamCacheTestURL() }
         #expect(url.pathExtension == "bin")
     }
 
     @Test("a known-format download is left alone (no rename)")
     func knownFormatNotRenamed() async throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         var payload = Data([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00])
         payload.append(Data(repeating: 0x00, count: 1024))
-        let transport = StubTransport(script: .init(chunks: [payload], totalBytes: Int64(payload.count)))
+        let transport = StreamCacheTestTransport(script: .init(chunks: [payload], totalBytes: Int64(payload.count)))
         let loader = RemoteTrackLoader(transport: transport)
         let cache = try SubsonicStreamCache(
             configuration: .init(rootDirectory: dir),
@@ -404,7 +404,7 @@ struct SubsonicStreamCacheTests {
         // Format key is already "mp3" → filename ends with .mp3 and the
         // rename pass is a no-op.
         let key = SubsonicStreamKey(serverID: UUID(), songID: "x", format: "mp3", bitrateKbps: 192)
-        let url = try await cache.url(for: key) { dummyURL() }
+        let url = try await cache.url(for: key) { streamCacheTestURL() }
         #expect(url.pathExtension == "mp3")
     }
 
@@ -412,7 +412,7 @@ struct SubsonicStreamCacheTests {
 
     @Test("detectAudioExtension identifies common audio magic bytes")
     func detectAudioExtensionRecognisesFormats() throws {
-        let dir = try makeTempDir()
+        let dir = try makeStreamCacheTestDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         func write(_ bytes: [UInt8]) throws -> URL {

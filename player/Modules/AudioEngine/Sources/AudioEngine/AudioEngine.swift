@@ -131,7 +131,9 @@ public actor AudioEngine: Transport, AudioGraphInsertionPoint {
     }
 
     /// Authoritative transport state, without waiting for the state stream's consumer.
-    public var playbackState: PlaybackState { self._state }
+    public var playbackState: PlaybackState {
+        self._state
+    }
 
     // MARK: - Gapless public API: AudioEngine+GaplessAPI.swift
 
@@ -177,6 +179,9 @@ public actor AudioEngine: Transport, AudioGraphInsertionPoint {
     /// Load `url`, played at the ReplayGain its facts and the user's mode
     /// and pre-amp resolve to. `nil` plays it as it is.
     public func load(_ url: URL, replayGain: TrackReplayGain?) async throws {
+        guard await self.acquireTransport() else { throw CancellationError() }
+        defer { self.releaseTransport() }
+        try Task.checkCancellation()
         // Click-suppression: ramp the player-node volume to 0 *before* stop().
         // AVAudioPlayerNode.stop() truncates whatever sample is currently in
         // flight; if that sample is mid-cycle (which it almost always is) the
@@ -249,24 +254,11 @@ public actor AudioEngine: Transport, AudioGraphInsertionPoint {
     // interleaves and strands the pump (node "playing", no audio). This async
     // mutex serializes them; the `perform*` variants let internal callers (seek's
     // resume, the device-change handler) run without re-acquiring and deadlocking.
-    private var transportBusy = false
-    private var transportWaiters: [CheckedContinuation<Void, Never>] = []
-
-    func acquireTransport() async {
-        while self.transportBusy {
-            await withCheckedContinuation { self.transportWaiters.append($0) }
-        }
-        self.transportBusy = true
-    }
-
-    func releaseTransport() {
-        self.transportBusy = false
-        guard !self.transportWaiters.isEmpty else { return }
-        self.transportWaiters.removeFirst().resume()
-    }
+    var transportBusy = false
+    var transportWaiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
 
     public func play() async throws {
-        await self.acquireTransport()
+        guard await self.acquireTransport() else { throw CancellationError() }
         defer { self.releaseTransport() }
         try await self.performPlay()
     }
@@ -357,7 +349,7 @@ public actor AudioEngine: Transport, AudioGraphInsertionPoint {
     }
 
     public func pause() async {
-        await self.acquireTransport()
+        guard await self.acquireTransport() else { return }
         defer { self.releaseTransport() }
         await self.performPause()
     }
@@ -383,7 +375,7 @@ public actor AudioEngine: Transport, AudioGraphInsertionPoint {
     }
 
     public func stop() async {
-        await self.acquireTransport()
+        guard await self.acquireTransport() else { return }
         defer { self.releaseTransport() }
         await self.performStop()
     }
@@ -405,7 +397,7 @@ public actor AudioEngine: Transport, AudioGraphInsertionPoint {
     }
 
     public func seek(to time: TimeInterval) async throws {
-        await self.acquireTransport()
+        guard await self.acquireTransport() else { throw CancellationError() }
         defer { self.releaseTransport() }
         try await self.performSeek(to: time)
     }

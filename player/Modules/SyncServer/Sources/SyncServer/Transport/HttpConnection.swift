@@ -15,6 +15,7 @@ actor HttpConnection {
     private let router: Router
     private let pairingMode: @Sendable () -> Bool
     private let isTrusted: @Sendable (String) -> Bool
+    private let onClose: @Sendable () -> Void
     private var parser = HttpRequestParser()
     private let log = AppLogger.make(.sync)
 
@@ -22,12 +23,14 @@ actor HttpConnection {
         connection: NWConnection,
         router: Router,
         pairingMode: @escaping @Sendable () -> Bool,
-        isTrusted: @escaping @Sendable (String) -> Bool
+        isTrusted: @escaping @Sendable (String) -> Bool,
+        onClose: @escaping @Sendable () -> Void = {}
     ) {
         self.connection = connection
         self.router = router
         self.pairingMode = pairingMode
         self.isTrusted = isTrusted
+        self.onClose = onClose
     }
 
     nonisolated func start(queue: DispatchQueue) {
@@ -38,8 +41,11 @@ actor HttpConnection {
             switch state {
             case .ready:
                 Task { await self.onReady() }
+
             case .failed, .cancelled:
                 self.connection.stateUpdateHandler = nil
+                self.onClose()
+
             default:
                 break
             }
@@ -92,9 +98,11 @@ actor HttpConnection {
                 if await self.ingest(data) {
                     return
                 }
+
             case let .final(data):
                 _ = await self.ingest(data)
                 return
+
             case .end:
                 return
             }
@@ -122,9 +130,11 @@ actor HttpConnection {
         switch self.parser.feed(data) {
         case .incomplete:
             return false
+
         case let .failure(response):
             await self.send(response)
             return true
+
         case let .request(request, leftover):
             let response = await self.router.dispatch(request, context: self.context)
             await self.send(response)

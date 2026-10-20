@@ -71,7 +71,7 @@ struct ArtistsScrollRestoreConventionTests {
         )
         // On return the strip restores the saved offset via ScrollPosition.
         #expect(
-            source.contains("self.albumScrollPosition.scrollTo(y: CGFloat(offset))"),
+            source.contains("self.albumScrollPosition.scrollTo(x: CGFloat(offset))"),
             "the album strip must restore the saved offset via ScrollPosition"
         )
     }

@@ -9,15 +9,18 @@ public actor PodcastSearchService {
     private let podcastIndex: PodcastIndexClient?
     private let itunes: ITunesSearchClient
     private let log: AppLogger
+    private let sourceTimeout: Duration
 
     public init(
         podcastIndex: PodcastIndexClient?,
         itunes: ITunesSearchClient,
-        log: AppLogger = .make(.network)
+        log: AppLogger = .make(.network),
+        sourceTimeout: Duration = .seconds(8)
     ) {
         self.podcastIndex = podcastIndex
         self.itunes = itunes
         self.log = log
+        self.sourceTimeout = sourceTimeout
     }
 
     /// Run both sources concurrently, merge, deduplicate, and return the combined
@@ -38,21 +41,23 @@ public actor PodcastSearchService {
         let pi = self.podcastIndex
         let it = self.itunes
 
-        // Fan out both sources with an 8s per-source soft timeout.
-        async let piOutcome: Result<[PodcastSearchResult], Error> = Self.withTimeout(8) {
+        // Bound each configured source independently (8 seconds by default).
+        async let piOutcome: Result<[PodcastSearchResult], Error> = Self.withTimeout(self.sourceTimeout) {
             guard let pi else { return [] }
             return try await pi.search(term: trimmed)
         }
-        async let itOutcome: Result<[PodcastSearchResult], Error> = Self.withTimeout(8) {
+        async let itOutcome: Result<[PodcastSearchResult], Error> = Self.withTimeout(self.sourceTimeout) {
             try await it.search(term: trimmed)
         }
 
         let (piResult, itResult) = await (piOutcome, itOutcome)
+        try Task.checkCancellation()
 
         // Capture feeds; log warnings for individual source failures.
         let piFeeds: [PodcastSearchResult]
         switch piResult {
         case let .success(feeds): piFeeds = feeds
+
         case let .failure(err):
             piFeeds = []
             self.log.warning("search.pi.failed", ["term": trimmed, "error": String(reflecting: err)])
@@ -61,13 +66,19 @@ public actor PodcastSearchService {
         let itFeeds: [PodcastSearchResult]
         switch itResult {
         case let .success(feeds): itFeeds = feeds
+
         case let .failure(err):
             itFeeds = []
             self.log.warning("search.itunes.failed", ["term": trimmed, "error": String(reflecting: err)])
         }
 
         // Throw only when every configured source failed.
-        if case .failure = piResult, case .failure = itResult {
+        let piFailed = if case .failure = piResult {
+            true
+        } else {
+            false
+        }
+        if case .failure = itResult, pi == nil || piFailed {
             throw PodcastsError.searchUnavailable(source: "all", reason: "all sources failed or timed out")
         }
 
@@ -81,9 +92,12 @@ public actor PodcastSearchService {
     /// Prefers Podcast Index's `byfeedurl` endpoint; falls back to iTunes lookup;
     /// falls back to returning the existing result unchanged. Never throws.
     public func detail(for result: PodcastSearchResult) async -> PodcastSearchResult {
+        guard !Task.isCancelled else { return result }
         if let pi = podcastIndex {
             do {
-                if let enriched = try await pi.podcast(byFeedURL: result.feedURL) {
+                if let enriched = try await OperationDeadline.run(for: self.sourceTimeout, operation: {
+                    try await pi.podcast(byFeedURL: result.feedURL)
+                }) {
                     var blended = Self.blend(preferred: enriched, secondary: result)
                     blended.itunesCollectionID = blended.itunesCollectionID ?? result.itunesCollectionID
                     return blended
@@ -94,9 +108,14 @@ public actor PodcastSearchService {
                     "error": String(reflecting: error),
                 ])
             }
-        } else if let collectionID = result.itunesCollectionID {
+        }
+        guard !Task.isCancelled else { return result }
+        if let collectionID = result.itunesCollectionID {
+            let itunes = self.itunes
             do {
-                if let enriched = try await itunes.lookup(collectionID: collectionID) {
+                if let enriched = try await OperationDeadline.run(for: self.sourceTimeout, operation: {
+                    try await itunes.lookup(collectionID: collectionID)
+                }) {
                     return Self.blend(preferred: result, secondary: enriched)
                 }
             } catch {
@@ -234,26 +253,13 @@ public actor PodcastSearchService {
     /// Run `work` with a per-source timeout. Never throws; wraps the outcome in
     /// `Result` so the caller can differentiate failure from empty results.
     private nonisolated static func withTimeout<T: Sendable>(
-        _ seconds: Double,
+        _ duration: Duration,
         work: @escaping @Sendable () async throws -> T
     ) async -> Result<T, Error> {
         do {
-            let value = try await withThrowingTaskGroup(of: T.self) { group in
-                group.addTask { try await work() }
-                group.addTask {
-                    try await Task.sleep(for: .seconds(seconds))
-                    throw PodcastsError.searchUnavailable(
-                        source: "timeout",
-                        reason: "source did not respond within \(Int(seconds))s"
-                    )
-                }
-                guard let result = try await group.next() else {
-                    throw PodcastsError.searchUnavailable(source: "timeout", reason: "no result")
-                }
-                group.cancelAll()
-                return result
-            }
-            return .success(value)
+            return try await .success(OperationDeadline.run(for: duration, operation: work))
+        } catch OperationDeadlineError.timedOut {
+            return .failure(PodcastsError.searchUnavailable(source: "timeout", reason: "source did not respond before the deadline"))
         } catch {
             return .failure(error)
         }

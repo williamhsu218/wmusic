@@ -1,7 +1,6 @@
 import Foundation
 import Network
 import Observability
-import os
 
 /// Owns the `NWListener` for the Phone Sync server: builds the mutual-TLS
 /// parameters from the `ServerIdentity`, accepts connections, and hands each to
@@ -20,6 +19,13 @@ public actor SyncListener {
     private let log = AppLogger.make(.sync)
     private let queue = DispatchQueue(label: "com.willhsu.wmusic.local.sync.listener")
     private var listener: NWListener?
+    private var listenerID: UUID?
+    private var connections: [UUID: NWConnection] = [:]
+
+    var connectionCount: Int {
+        self.connections.count
+    }
+
     private var advertise = false
     private var fingerprint: String?
     /// A browser started alongside advertising purely to raise the macOS Local Network
@@ -48,7 +54,9 @@ public actor SyncListener {
     /// the actual bound port. When `advertise` is true, the listener also
     /// advertises `_bocansync._tcp` over Bonjour.
     func start(port: UInt16? = nil, advertise: Bool = false) async throws -> UInt16 {
+        try Task.checkCancellation()
         let loaded = try await self.identity.load()
+        try Task.checkCancellation()
         self.fingerprint = loaded.fingerprint.hex
         self.advertise = advertise
         let trusted = self.trusted
@@ -65,31 +73,51 @@ public actor SyncListener {
         let endpointPort: NWEndpoint.Port = port.flatMap { NWEndpoint.Port(rawValue: $0) } ?? .any
         let listener = try NWListener(using: parameters, on: endpointPort)
         self.listener = listener
+        let listenerID = UUID()
+        self.listenerID = listenerID
         if advertise, let service = self.makeService() {
             listener.service = service
         }
 
-        let router = self.router
-        let pairingMode = self.pairingMode
-        let queue = self.queue
-        listener.newConnectionHandler = { connection in
-            let handler = HttpConnection(
-                connection: connection,
-                router: router,
-                pairingMode: pairingMode,
-                isTrusted: isTrusted
-            )
-            handler.start(queue: queue)
+        listener.newConnectionHandler = { [weak self] connection in
+            Task { await self?.accept(connection, listenerID: listenerID) }
         }
 
-        let boundPort = try await self.awaitReady(listener)
+        let boundPort = try await Self.awaitReady(listener, queue: self.queue)
+        try Task.checkCancellation()
         if advertise {
             self.startPermissionBrowser()
         }
         return boundPort
     }
 
+    private func accept(_ connection: NWConnection, listenerID: UUID) {
+        guard self.listenerID == listenerID else { connection.cancel()
+            return
+        }
+        let id = UUID()
+        self.connections[id] = connection
+        let trusted = self.trusted
+        let handler = HttpConnection(
+            connection: connection,
+            router: self.router,
+            pairingMode: self.pairingMode,
+            isTrusted: { trusted.contains($0) },
+            onClose: { [weak self] in Task { await self?.removeConnection(id) } }
+        )
+        handler.start(queue: self.queue)
+    }
+
+    private func removeConnection(_ id: UUID) {
+        self.connections[id] = nil
+    }
+
     func stop() {
+        self.listenerID = nil
+        for connection in self.connections.values {
+            connection.cancel()
+        }
+        self.connections.removeAll()
         self.permissionBrowser?.cancel()
         self.permissionBrowser = nil
         self.listener?.cancel()
@@ -111,10 +139,13 @@ public actor SyncListener {
             switch state {
             case .ready:
                 log.debug("sync.localNetwork.browser.ready")
+
             case let .waiting(error):
                 log.debug("sync.localNetwork.browser.waiting", ["error": String(reflecting: error)])
+
             case let .failed(error):
                 log.error("sync.localNetwork.browser.failed", ["error": String(reflecting: error)])
+
             default:
                 break
             }
@@ -148,29 +179,47 @@ public actor SyncListener {
         NWTXTRecord(["v": "1", "fp": fingerprint, "pm": pairingMode ? "1" : "0"])
     }
 
-    private func awaitReady(_ listener: NWListener) async throws -> UInt16 {
-        let resumed = OSAllocatedUnfairLock(initialState: false)
-        return try await withCheckedThrowingContinuation { continuation in
-            listener.stateUpdateHandler = { state in
-                let claim = { resumed.withLock { was -> Bool in
-                    let alreadyResumed = was
-                    was = true
-                    return !alreadyResumed
-                } }
-                switch state {
-                case .ready:
-                    if claim() {
-                        continuation.resume(returning: listener.port?.rawValue ?? 0)
-                    }
-                case let .failed(error):
-                    if claim() {
-                        continuation.resume(throwing: error)
-                    }
-                default:
-                    break
-                }
+    static func awaitReady(
+        _ listener: NWListener,
+        queue: DispatchQueue,
+        timeout: Duration = .seconds(10)
+    ) async throws -> UInt16 {
+        let (states, continuation) = AsyncThrowingStream<UInt16, Error>.makeStream()
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                continuation.yield(listener.port?.rawValue ?? 0)
+                continuation.finish()
+
+            case let .failed(error):
+                continuation.finish(throwing: error)
+
+            case .cancelled:
+                continuation.finish(throwing: CancellationError())
+
+            default:
+                break
             }
-            listener.start(queue: self.queue)
+        }
+        let timer = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            continuation.finish(throwing: URLError(.timedOut))
+            listener.cancel()
+        }
+        defer {
+            timer.cancel()
+            listener.stateUpdateHandler = nil
+        }
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            listener.start(queue: queue)
+            for try await port in states {
+                return port
+            }
+            throw CancellationError()
+        } onCancel: {
+            continuation.finish(throwing: CancellationError())
+            listener.cancel()
         }
     }
 }

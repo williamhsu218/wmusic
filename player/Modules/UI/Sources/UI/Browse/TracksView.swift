@@ -38,6 +38,7 @@ public struct TracksView: View {
     /// When non-nil, enables intra-table drag-reorder and calls this closure
     /// on drop with SwiftUI-style `(source, destination)` index sets.
     public var onMove: ((IndexSet, Int) -> Void)?
+    public var onScroll: ((CGFloat) -> Void)?
 
     /// Reorder is only coherent in the baseline (unsorted) order, so it is
     /// suspended while a temporary column sort is active on a manual-order view.
@@ -76,7 +77,8 @@ public struct TracksView: View {
         destinationSortOrder: [KeyPathComparator<TrackRow>]? = nil,
         supportsManualOrder: Bool = false,
         removeFromPlaylist: (([Track]) -> Void)? = nil,
-        onMove: ((IndexSet, Int) -> Void)? = nil
+        onMove: ((IndexSet, Int) -> Void)? = nil,
+        onScroll: ((CGFloat) -> Void)? = nil
     ) {
         self.vm = vm
         self.library = library
@@ -88,6 +90,7 @@ public struct TracksView: View {
         self.supportsManualOrder = supportsManualOrder
         self.removeFromPlaylist = removeFromPlaylist
         self.onMove = onMove
+        self.onScroll = onScroll
         // A manual-order view starts in its baseline order (no column sort).
         self._sortOrder = State(
             initialValue: supportsManualOrder ? [] : (destinationSortOrder ?? TracksViewModel.defaultSortOrder)

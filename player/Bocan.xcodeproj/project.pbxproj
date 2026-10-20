@@ -23,6 +23,7 @@
 		0C5FDF414A4D5AB72BFA15FF /* PodcastNowPlayingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BE308E653336F7E2A0FC5A8 /* PodcastNowPlayingTests.swift */; };
 		0EC2C79C0BC2CCE5AA1004B5 /* CacheDirectoryMarkerConventionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7151FF210CFD8B4528EEF5EE /* CacheDirectoryMarkerConventionTests.swift */; };
 		0F2FCA653E60B83CF8AA8469 /* Observability in Frameworks */ = {isa = PBXBuildFile; productRef = 8F629E8B78D37805428363DA /* Observability */; };
+		0F93A36A2E83DEFAA0E3F716 /* OperationDeadlineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC6A3F1154A39BE083D5D224 /* OperationDeadlineTests.swift */; };
 		107172A0A726B4E657128E0E /* VolumeIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 38D3908A7CD0D2A9A3BA7A60 /* VolumeIcon.icns */; };
 		11A7481C1C61E6968569DB90 /* PodcastsViewModelSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45DD51AFB9A514CB59B83D8D /* PodcastsViewModelSearchTests.swift */; };
 		146E67FA9E1B65EC2CB4F01E /* libSvtAv1Enc.4.dylib in Resources */ = {isa = PBXBuildFile; fileRef = 10497567C431D6A1E5AE1805 /* libSvtAv1Enc.4.dylib */; };
@@ -455,6 +456,7 @@
 		8DE7AE70CABE9E93BDBE5955 /* NOTICES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = NOTICES.md; sourceTree = "<group>"; };
 		8E8CFB13260B53B3124AF070 /* FundingLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FundingLinkTests.swift; sourceTree = "<group>"; };
 		8F7E8AA1C53EF99B1B37A2B8 /* RuleBuilderViewValidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleBuilderViewValidationTests.swift; sourceTree = "<group>"; };
+		9071D759DCACCA4DE6C3F7FB /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
 		92F911DF68929D5E17148259 /* VisualizerViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizerViewModelTests.swift; sourceTree = "<group>"; };
 		943FEF240D1BC56F1CD74232 /* AppKitTestIsolationConventionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppKitTestIsolationConventionTests.swift; sourceTree = "<group>"; };
 		951CE8E71567DD382A4B2314 /* NowPlayingLocalRestoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingLocalRestoreTests.swift; sourceTree = "<group>"; };
@@ -492,6 +494,7 @@
 		B9F3ECEBA0831D7E932406AE /* LogConsoleAppConventionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogConsoleAppConventionTests.swift; sourceTree = "<group>"; };
 		BA40FDA5CDAF3C9FC2516186 /* DeepDiveRetryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepDiveRetryTests.swift; sourceTree = "<group>"; };
 		BC12CBAF684C255C24BC6127 /* SafeHTMLRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeHTMLRendererTests.swift; sourceTree = "<group>"; };
+		BC6A3F1154A39BE083D5D224 /* OperationDeadlineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationDeadlineTests.swift; sourceTree = "<group>"; };
 		BE4DB9B0333E3B4D973E010F /* ArtistsScrollRestoreConventionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtistsScrollRestoreConventionTests.swift; sourceTree = "<group>"; };
 		BEA809E6A5D66C3273AEBA85 /* TrackSortChainTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackSortChainTests.swift; sourceTree = "<group>"; };
 		BEC62A21CB36CAA1F384F22A /* StallingListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StallingListener.swift; sourceTree = "<group>"; };
@@ -561,7 +564,6 @@
 		FD18A2E69E819F5845E511F3 /* UpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateController.swift; sourceTree = "<group>"; };
 		FE67437858D66E54A636A323 /* PhoneSyncViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSyncViewModelTests.swift; sourceTree = "<group>"; };
 		FEA827D3E6864D7D11A6F8BE /* BocanCommands+CollectionViewMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BocanCommands+CollectionViewMenu.swift"; sourceTree = "<group>"; };
-		"TEMP_73E47682-73A1-4A03-A9B1-2388F4FBEDD9" /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -666,6 +668,7 @@
 			isa = PBXGroup;
 			children = (
 				B087DD42CE6797CF29123E28 /* App */,
+				E3116749EC3823329D2B5A43 /* Config */,
 				0D95A2CB58951EF13BCFC1DB /* Modules */,
 				8BF57F4CB14DAF0B974A3D88 /* Packages */,
 				8D4843DBE6F26EDA773846C8 /* Resources */,
@@ -998,6 +1001,7 @@
 				51DD195DB377523693124804 /* LoggedTests.swift */,
 				E2FB29B52531A4B47891F584 /* LogLevelTests.swift */,
 				F9FA03B30FC5E8E7FB6D2DE8 /* LogStoreTests.swift */,
+				BC6A3F1154A39BE083D5D224 /* OperationDeadlineTests.swift */,
 				2FC6007E8F4CBAB6F0EB637F /* UserAgentTests.swift */,
 			);
 			path = ObservabilityTests;
@@ -1025,6 +1029,14 @@
 				7977471110A3E725E5B75770 /* TransportSurfaceTests.swift */,
 			);
 			path = Surfaces;
+			sourceTree = "<group>";
+		};
+		E3116749EC3823329D2B5A43 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				9071D759DCACCA4DE6C3F7FB /* Base.xcconfig */,
+			);
+			path = Config;
 			sourceTree = "<group>";
 		};
 		E4C7DC06B3D0D9ECBCA3ABBD /* Podcasts */ = {
@@ -1083,14 +1095,6 @@
 				3E25969D35AE4B124C97C732 /* WindowTabbingTests.swift */,
 			);
 			path = AppTests;
-			sourceTree = "<group>";
-		};
-		"TEMP_250770ED-80C0-4952-8434-521FA04A2E64" /* player */ = {
-			isa = PBXGroup;
-			children = (
-				"TEMP_73E47682-73A1-4A03-A9B1-2388F4FBEDD9" /* Secrets.xcconfig */,
-			);
-			path = player;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -1357,6 +1361,7 @@
 				7E5470980A87DFB69B7F7D3E /* NowPlayingSourceFactsTests.swift in Sources */,
 				77F45CC96B5C6CCE9C3BF662 /* NowPlayingViewModelTests.swift in Sources */,
 				7484DA661EE860EF74F807A4 /* OPMLConventionTests.swift in Sources */,
+				0F93A36A2E83DEFAA0E3F716 /* OperationDeadlineTests.swift in Sources */,
 				0172BC6D397A8EF3686EE095 /* PerShowSettingsConventionTests.swift in Sources */,
 				AF3A9B479E484B15FE40BBB8 /* PhoneSyncTranscodeViewModelTests.swift in Sources */,
 				D3DBF4DE1751AE7830A60A1F /* PhoneSyncViewModelTests.swift in Sources */,
@@ -1572,7 +1577,7 @@
 		};
 		3E79DA1DC07FE3812FB54C0A /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = "TEMP_73E47682-73A1-4A03-A9B1-2388F4FBEDD9" /* Secrets.xcconfig */;
+			baseConfigurationReference = 9071D759DCACCA4DE6C3F7FB /* Base.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ARCHS = arm64;
@@ -1607,7 +1612,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/Bocan.entitlements;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -1708,7 +1713,7 @@
 		};
 		D3B7E2D650BF9AC5F77082BA /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = "TEMP_73E47682-73A1-4A03-A9B1-2388F4FBEDD9" /* Secrets.xcconfig */;
+			baseConfigurationReference = 9071D759DCACCA4DE6C3F7FB /* Base.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ARCHS = arm64;
@@ -1743,7 +1748,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/Bocan.entitlements;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;

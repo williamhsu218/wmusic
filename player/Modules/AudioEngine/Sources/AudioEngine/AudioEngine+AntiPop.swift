@@ -86,7 +86,7 @@ public extension AudioEngine {
         // change tears down and rebuilds the pump, so it must not interleave with
         // one of those at an await point. Uses performPlay() below, not play(),
         // because it already holds the gate.
-        await self.acquireTransport()
+        guard await self.acquireTransport() else { return }
         defer { self.releaseTransport() }
 
         let resumeAfter = self.isPlaying

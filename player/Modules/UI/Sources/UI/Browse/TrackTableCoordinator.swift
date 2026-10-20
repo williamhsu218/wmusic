@@ -60,6 +60,20 @@ public final class TrackTableCoordinator: NSObject, NSTableViewDelegate {
 
     // MARK: Cell population
 
+    @objc func didScroll(_ notification: Notification) {
+        guard let clip = notification.object as? NSClipView, let onScroll = self.parent.onScroll else { return }
+        let offset = clip.bounds.minY
+        DispatchQueue.main.async { onScroll(offset) }
+    }
+
+    public func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        let view = TrackTableRowView()
+        view.current = row < self.rows.count && self.rows[row].id == self.parent.nowPlayingTrackID
+        // A quiet stripe on alternating rows, independent of system table colours.
+        view.striped = !row.isMultiple(of: 2)
+        return view
+    }
+
     func cellView(
         for column: NSTableColumn,
         trackID: Int64,
@@ -84,7 +98,7 @@ public final class TrackTableCoordinator: NSObject, NSTableViewDelegate {
         let cell: NSTableCellView = if let reused = tableView.makeView(withIdentifier: cellID, owner: nil) as? NSTableCellView {
             reused
         } else {
-            self.makeTextCell(cellID: cellID)
+            self.makeTextCell(cellID: cellID, title: column.identifier == .title)
         }
         cell.textField?.stringValue = TrackTable.displayValue(for: column.identifier, row: row)
         // preferredFont(forTextStyle:) scales with macOS text size settings.
@@ -92,6 +106,11 @@ public final class TrackTableCoordinator: NSObject, NSTableViewDelegate {
         cell.textField?.font = isNowPlaying
             ? NSFontManager.shared.convert(baseFont, toHaveTrait: .boldFontMask)
             : baseFont
+        (cell as? TrackTextCell)?.current = isNowPlaying
+        if let titleCell = cell as? TrackTitleCell {
+            titleCell.indicator.isHidden = !isNowPlaying
+            titleCell.indicator.rootView = PlayingBarsIndicator(isPlaying: isNowPlaying && self.parent.isPlaying)
+        }
         // Prefix the column name for VoiceOver; rating speaks as "3 stars".
         let colTitle = TrackTable.columnSpecs.first { $0.id == column.identifier }?.title ?? column.title
         let spokenValue: String
@@ -105,8 +124,8 @@ public final class TrackTableCoordinator: NSObject, NSTableViewDelegate {
         return cell
     }
 
-    private func makeTextCell(cellID: NSUserInterfaceItemIdentifier) -> NSTableCellView {
-        let cell = NSTableCellView()
+    private func makeTextCell(cellID: NSUserInterfaceItemIdentifier, title: Bool) -> NSTableCellView {
+        let cell: NSTableCellView = title ? TrackTitleCell() : TrackTextCell()
         cell.identifier = cellID
         let tf = NSTextField(labelWithString: "")
         tf.translatesAutoresizingMaskIntoConstraints = false
@@ -115,10 +134,22 @@ public final class TrackTableCoordinator: NSObject, NSTableViewDelegate {
         cell.addSubview(tf)
         cell.textField = tf
         NSLayoutConstraint.activate([
-            tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: title ? 22 : 4),
             tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
             tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
+        if let titleCell = cell as? TrackTitleCell {
+            let bars = titleCell.indicator
+            bars.translatesAutoresizingMaskIntoConstraints = false
+            bars.setAccessibilityElement(false)
+            cell.addSubview(bars)
+            NSLayoutConstraint.activate([
+                bars.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                bars.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                bars.widthAnchor.constraint(equalToConstant: 12),
+                bars.heightAnchor.constraint(equalToConstant: 12),
+            ])
+        }
         return cell
     }
 

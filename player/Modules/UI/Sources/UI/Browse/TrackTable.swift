@@ -98,6 +98,8 @@ public struct TrackTable: NSViewRepresentable {
     /// When non-nil the table allows intra-table drag-reorder and calls this
     /// closure (on the main thread) with SwiftUI-style `(source, destination)` indices.
     let onMove: ((IndexSet, Int) -> Void)?
+    var onScroll: ((CGFloat) -> Void)? = nil
+    var isPlaying = false
     @AppStorage("appearance.rowDensity") private var rowDensity = "spacious"
 
     // MARK: NSViewRepresentable
@@ -118,7 +120,8 @@ public struct TrackTable: NSViewRepresentable {
         tableView.setAccessibilityIdentifier(A11y.TracksTable.table)
         tableView.setAccessibilityLabel(L10n.string("Track List"))
         tableView.setAccessibilityRoleDescription(L10n.string("Music track list"))
-        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.usesAlternatingRowBackgroundColors = false
+        tableView.backgroundColor = NSColor(Color.bgPrimary)
         tableView.style = .inset
         tableView.allowsMultipleSelection = true
         tableView.allowsColumnReordering = true
@@ -174,7 +177,14 @@ public struct TrackTable: NSViewRepresentable {
         dataSource.onMove = self.onMove
         coordinator.tableView = tableView
 
-        return self.makeScrollView(wrapping: tableView)
+        let scrollView = self.makeScrollView(wrapping: tableView)
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(coordinator, selector: #selector(TrackTableCoordinator.didScroll(_:)), name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
+        return scrollView
+    }
+
+    public static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        NotificationCenter.default.removeObserver(coordinator, name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
     }
 
     private func makeScrollView(wrapping tableView: NSTableView) -> NSScrollView {
@@ -280,6 +290,20 @@ public struct TrackTable: NSViewRepresentable {
 
         // 7 — Scroll to the now-playing track when requested.
         self.applyScrollIfNeeded(coordinator: coordinator, tableView: tableView)
+        let visible = tableView.rows(in: tableView.visibleRect)
+        if visible.location != NSNotFound {
+            for index in visible.location ..< NSMaxRange(visible) {
+                if let rowView = tableView.rowView(atRow: index, makeIfNecessary: false) as? TrackTableRowView {
+                    rowView.current = index < coordinator.rows.count && coordinator.rows[index].id == self.nowPlayingTrackID
+                }
+                if let titleIndex = tableView.tableColumns.firstIndex(where: { $0.identifier == .title }),
+                   let cell = tableView.view(atColumn: titleIndex, row: index, makeIfNecessary: false) as? TrackTitleCell {
+                    let current = index < coordinator.rows.count && coordinator.rows[index].id == self.nowPlayingTrackID
+                    cell.indicator.isHidden = !current
+                    cell.indicator.rootView = PlayingBarsIndicator(isPlaying: current && self.isPlaying)
+                }
+            }
+        }
     }
 
     /// A different set of track IDs: rebuild the rows dictionary and apply a

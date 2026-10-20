@@ -5,6 +5,30 @@ import Testing
 /// Tests are serialized because they mutate `URLProtocolStub`'s static handlers.
 @Suite("URLSessionHTTPTransport", .serialized)
 struct URLSessionHTTPTransportTests {
+    @Test("cancellation before continuation registration is remembered")
+    func cancellationBeforeRegistration() async throws {
+        let session = URLProtocolStub.session(status: 200, body: Data())
+        defer { session.invalidateAndCancel() }
+        let task = try session.dataTask(with: #require(URL(string: "https://example.test/stream")))
+        let delegate = StreamingDataDelegate(task: task)
+        delegate.cancel()
+        await #expect(throws: RemoteTrackLoaderError.cancelled) {
+            let _: RemoteTrackBytes = try await withCheckedThrowingContinuation { delegate.begin(awaiting: $0) }
+        }
+    }
+
+    @Test("an early URLSession failure is retained until the waiter registers")
+    func failureBeforeRegistration() async throws {
+        let session = URLProtocolStub.session(status: 200, body: Data())
+        defer { session.invalidateAndCancel() }
+        let task = try session.dataTask(with: #require(URL(string: "https://example.test/stream")))
+        let delegate = StreamingDataDelegate(task: task)
+        delegate.urlSession(session, task: task, didCompleteWithError: URLError(.cancelled))
+        await #expect(throws: RemoteTrackLoaderError.cancelled) {
+            let _: RemoteTrackBytes = try await withCheckedThrowingContinuation { delegate.begin(awaiting: $0) }
+        }
+    }
+
     @Test("200 streams body and surfaces Content-Length as totalBytes")
     func happyPath() async throws {
         let body = Data(repeating: 0x42, count: 4096)
